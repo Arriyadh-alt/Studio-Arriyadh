@@ -1,3 +1,30 @@
+# Clipper Studio
+
+A local web workspace that turns YouTube livestream chat spikes into vertical,
+captioned highlights. Paste a replay URL, let Autopilot find the moments, then
+review, nudge, re-render, keep and download your favorites.
+
+## Run the web app on your laptop
+
+Install Python 3.11+ and ffmpeg (including ffprobe and libass). From this folder:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+CLIPPER_DATA_DIR=~/clipper-data .venv/bin/uvicorn clipper_studio.api:app --host 0.0.0.0 --port 8080
+```
+
+Open http://localhost:8080. On an iPhone on the same Wi-Fi, open
+`http://YOUR-LAPTOP-LAN-IP:8080` in Safari. Allow the port through your laptop's
+firewall only on your trusted local network. This app has no authentication;
+do not expose it to the public internet. No frontend build or service worker.
+
+The first caption render downloads the Whisper `base` model. Output, replay chat
+and job state are saved outside this repository in `~/clipper-data`. Keep a single
+server process; do not use `--workers` or `--reload` during processing.
+See [STUDIO.md](STUDIO.md) for the API and [E2E.md](E2E.md) for backend evidence.
+The original CLI remains available below.
+
 # shorts-clipper
 
 Cut a time range out of a YouTube video and turn it into a 1080x1920 (9:16) vertical MP4 for YouTube Shorts / TikTok.

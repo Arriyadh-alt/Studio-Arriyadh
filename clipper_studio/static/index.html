@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101317">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Clipper Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23101317'/%3E%3Cpath d='M23 17L48 45M23 47L48 19' stroke='%23b8f477' stroke-width='5'/%3E%3Ccircle cx='18' cy='16' r='7' fill='none' stroke='%23b8f477' stroke-width='4'/%3E%3Ccircle cx='18' cy='48' r='7' fill='none' stroke='%23b8f477' stroke-width='4'/%3E%3C/svg%3E">
+  <link rel="manifest" href="./manifest.webmanifest" crossorigin="use-credentials">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="#"><span class="brand-icon">✂</span> Clipper Studio</a><span class="tag">From stream to standout</span></header>
+  <main>
+    <div id="notice" role="alert" hidden></div>
+    <section id="home">
+      <div class="hero"><span class="eyebrow">Your chat knows the best moments</span><h1>Long stream.<br><span>Shortlist of highlights.</span></h1><p>Paste a livestream replay. Autopilot finds the chat spikes<br class="desktop"> and turns the reaction into ready-to-review vertical clips.</p></div>
+      <form id="start-form" class="panel start-panel">
+        <label for="url">Paste YouTube livestream URL</label>
+        <div class="url-row"><input id="url" type="url" placeholder="https://www.youtube.com/watch?v=…" required autocomplete="url"><button class="primary" id="start-button" type="submit">Start Autopilot <span aria-hidden="true">↗</span></button></div>
+        <details><summary>Options <span>Fine-tune your highlights</span></summary><div class="options">
+          <label>Number of clips<input id="clip-count" type="number" min="1" max="50" value="8" required></label>
+          <label>Lead-in <output id="lead-value">18 seconds</output><input id="lead" type="range" min="15" max="20" value="18"></label>
+          <label>Layout<select id="mode"><option value="crop">Center crop</option><option value="blur">Blurred background</option></select></label>
+          <label class="check"><input id="captions" type="checkbox" checked> Burn in captions</label>
+        </div></details>
+        <p class="hint">✦ Chat-led detection <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
+      </form>
+      <div class="section-heading"><div><span class="eyebrow">Your workspace</span><h2>Recent streams</h2></div><button id="refresh-jobs" class="quiet">Refresh ↻</button></div>
+      <div id="jobs" class="jobs"></div>
+    </section>
+    <section id="job-view" hidden>
+      <a class="back" href="#">← All streams</a>
+      <div id="job-heading"></div>
+      <div class="panel progress-panel"><div class="status-row"><strong id="stage" aria-live="polite"></strong><span id="progress-label"></span></div><progress id="progress" max="1" value="0"></progress><div id="job-error" class="error" hidden></div></div>
+      <section class="panel activity-panel"><div class="section-heading"><div><span class="eyebrow">The pulse of your stream</span><h2>Chat activity</h2></div><span class="hint">Tap a spike to review ↓</span></div><div id="chart"></div></section>
+      <div class="section-heading clips-heading"><div><span class="eyebrow">Made for the moment</span><h2 id="clips-title">Your highlights</h2></div><a id="download-kept" class="button" hidden>Download kept clips ↓</a></div>
+      <div id="clips" class="clips"></div>
+    </section>
+  </main>
+  <footer><span>Clipper Studio · Let the chat pick.</span><a href="https://app.devin.ai/sessions/dae3999fdb914b70885df4c30adcf656" target="_blank" rel="noopener">Request changes ↗</a></footer>
+</body>
+</html>

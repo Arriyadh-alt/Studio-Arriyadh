@@ -45,3 +45,38 @@ This is not an unloaded venv: every command used `.venv/bin/python` or
 `.venv/bin/yt-dlp`. Python 3.11+ is recommended for deployment. The initial missing
 JavaScript runtime warning was resolved by installing Deno and yt-dlp's default
 extras and starting the final API with the activated venv's bin directory on PATH.
+
+## Web UI + retry verification
+
+The same-origin frontend is served on port 8080 with `CLIPPER_DATA_DIR=~/clipper-data`.
+The completed three-clip demo job above was copied into that directory. Exploratory
+servers on 8000 and 8001 were stopped.
+
+Using Python Playwright connected to Chrome CDP at port 29229, submitted the same
+Valkyrae URL from the home form, expanded Options and selected two clips (crop,
+captions on). UI job: `f3cd8131cc074215ac26dcef95c0176f`.
+
+- Two playable 1080×1920 clips appeared after **140.08 seconds**; chat analysis
+  took **6.46 seconds**. Both were played and decoded without video errors.
+- Nudged the first start from **34:02 to 34:03** and clicked Re-render. It finished
+  in **60.22 seconds**. Played the replacement video for over three seconds,
+  spanning a poll refresh, with no video error.
+- Kept the first clip and downloaded the resulting ZIP from the UI; it contained
+  `highlight-1.mp4`.
+- Chart marker navigation was clicked on desktop and mobile. Expanded marker
+  hit areas and adapted the chart coordinate width for readable mobile markers.
+- Checked 1280×900 desktop, 390×844 mobile, and 360px width. No horizontal overflow
+  at either mobile width. Browser page-error list was empty.
+- Improved the review-button layout after screenshot inspection to prevent
+  wrapping and use the full card width on desktop.
+
+Screenshots saved outside the repository:
+`~/screens/home-desktop.png`, `~/screens/home-mobile.png`,
+`~/screens/job-desktop.png`, `~/screens/job-mobile.png`,
+`~/screens/job-mobile-360.png`.
+
+Backend tests after adding retry, keep/ZIP and static-file coverage:
+`39 passed in 0.67s`. The retry test injects a download failure and a render
+failure, succeeds on attempt three, then verifies a permanent failure exhausts
+all three attempts and exposes its error. Browser viewport testing used Chrome,
+not native iPhone Safari; native share/save sheet behavior remains unverified.

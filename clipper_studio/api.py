@@ -5,18 +5,23 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from starlette.background import BackgroundTask
 
 from shorts_clipper.captions import to_ass, transcribe
 from shorts_clipper.downloader import download_section
@@ -48,6 +53,10 @@ class RenderRequest(BaseModel):
     end: float = Field(gt=0, allow_inf_nan=False)
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
+
+
+class KeepRequest(BaseModel):
+    kept: bool
 
 
 class Store:
@@ -86,6 +95,9 @@ def find_clip(job, cid):
 
 
 def create_app(data_dir=None):
+    runtime_dir = str(Path(sys.executable).parent)
+    if (Path(runtime_dir) / "deno").is_file() and runtime_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = runtime_dir + os.pathsep + os.environ.get("PATH", "")
     store = Store(data_dir or os.environ.get("CLIPPER_DATA_DIR", "~/clipper-data"))
     pending = queue.Queue()
 
@@ -95,7 +107,7 @@ def create_app(data_dir=None):
             job.update(fields)
             store.save(job)
 
-    def render(jid, cid):
+    def render_attempt(jid, cid):
         with store.lock:
             job = store.get(jid)
             clip = find_clip(job, cid)
@@ -127,14 +139,30 @@ def create_app(data_dir=None):
                 job = store.get(jid)
                 clip = find_clip(job, cid)
                 base = f"/api/jobs/{jid}/clips/{cid}"
-                clip.update(status="ready", file_url=base + "/video", download_url=base + "/download",
+                clip.update(status="ready", rendered_at=time.time_ns(), file_url=base + "/video", download_url=base + "/download",
                             thumbnail_url=base + "/thumbnail")
                 store.save(job)
-        except Exception as error:
+        except Exception:
+            raise
+
+    def render(jid, cid):
+        for attempt in range(1, 4):
             with store.lock:
                 job = store.get(jid)
-                find_clip(job, cid).update(status="failed", error=str(error))
+                find_clip(job, cid).update(attempt=attempt, status="rendering", error=None)
                 store.save(job)
+            try:
+                render_attempt(jid, cid)
+                return
+            except Exception as error:
+                with store.lock:
+                    job = store.get(jid)
+                    find_clip(job, cid).update(status="failed" if attempt == 3 else "rendering",
+                                              error=str(error))
+                    job["stage"] = "Clip failed" if attempt == 3 else f"Retrying clip in {attempt * 2}s (attempt {attempt + 1}/3)"
+                    store.save(job)
+                if attempt < 3:
+                    time.sleep(attempt * 2)
 
     def finish(jid):
         with store.lock:
@@ -201,7 +229,7 @@ def create_app(data_dir=None):
     @app.post("/api/jobs", status_code=202)
     def create_job(request: JobRequest):
         jid = uuid.uuid4().hex
-        job = dict(id=jid, url=request.url, request=request.model_dump(), status="queued", stage="Queued",
+        job = dict(id=jid, created_at=datetime.now(timezone.utc).isoformat(), url=request.url, request=request.model_dump(), status="queued", stage="Queued",
                    progress=0, metadata=None, activity=[], clips=[], error=None)
         with store.lock:
             store.save(job)
@@ -217,6 +245,34 @@ def create_app(data_dir=None):
     def get_job(jid: str):
         with store.lock:
             return store.get(jid)
+
+    @app.patch("/api/jobs/{jid}/clips/{cid}")
+    def keep_clip(jid: str, cid: str, request: KeepRequest):
+        with store.lock:
+            job = store.get(jid)
+            clip = find_clip(job, cid)
+            clip["kept"] = request.kept
+            store.save(job)
+        return {"id": cid, "kept": request.kept}
+
+    @app.get("/api/jobs/{jid}/download-kept")
+    def download_kept(jid: str):
+        with store.lock:
+            job = store.get(jid)
+            clips = [c for c in job["clips"] if c.get("kept") and c["status"] == "ready"]
+            if not clips:
+                raise HTTPException(409, "Keep at least one ready clip first")
+            archive_dir = Path(tempfile.mkdtemp(dir=store.root))
+            archive = archive_dir / "kept-clips.zip"
+            try:
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
+                    for index, clip in enumerate(clips, 1):
+                        bundle.write(store.root / jid / clip["id"] / "clip.mp4", f"highlight-{index}.mp4")
+            except Exception:
+                shutil.rmtree(archive_dir)
+                raise
+        return FileResponse(archive, media_type="application/zip", filename="kept-clips.zip",
+                            background=BackgroundTask(shutil.rmtree, archive_dir))
 
     @app.post("/api/jobs/{jid}/clips/{cid}/render", status_code=202)
     def rerender(jid: str, cid: str, request: RenderRequest):
@@ -270,6 +326,7 @@ def create_app(data_dir=None):
             shutil.rmtree(store.root / jid / cid, ignore_errors=True)
         return {"id": cid, "status": "deleted"}
 
+    app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="studio")
     return app
 
 

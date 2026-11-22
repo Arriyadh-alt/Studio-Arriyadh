@@ -14,7 +14,16 @@ pip install -r requirements.txt
 uvicorn clipper_studio.api:app --host 127.0.0.1 --port 8000
 ```
 
-Activate the venv so yt-dlp can find the bundled Deno JavaScript runtime. The
+For a one-command production start after installation:
+
+```sh
+CLIPPER_DATA_DIR=~/clipper-data .venv/bin/uvicorn clipper_studio.api:app --host 0.0.0.0 --port 8080
+```
+
+Open `http://localhost:8080`, or your laptop's LAN IP on an iPhone on the same
+trusted Wi-Fi. The root serves the responsive static UI, including a web manifest
+and app icons; no build step or service worker is used. Deno is located alongside
+the venv interpreter automatically. The
 first caption render downloads faster-whisper's `base` model; subsequent renders
 use its cache. Caption generation runs on CPU. `/docs` serves OpenAPI docs.
 
@@ -39,16 +48,25 @@ authentication: do not expose it publicly without access controls and quotas.
 - `GET /api/jobs/{id}/clips/{cid}/download` → MP4 attachment.
 - `GET /api/jobs/{id}/clips/{cid}/thumbnail` → JPEG.
 - `DELETE /api/jobs/{id}/clips/{cid}` → `{id:cid,status:"deleted"}`; removes files.
+- `PATCH /api/jobs/{id}/clips/{cid}` with `{kept:true}` → `{id,kept}`. Persisted
+  during processing and across re-renders; defaults to false for older clips.
+- `GET /api/jobs/{id}/download-kept` → ZIP attachment of ready kept clips; 409
+  if none. The temporary archive is removed after streaming.
 
 Job shape: `{id,url,request,status,stage,progress,metadata,activity,clips,error}`.
 Status: `queued`, `running`, `completed`, `completed_with_errors`, `failed`.
-Progress is 0–1. Metadata: `{id,title,duration,thumbnail}`. Once chat is fetched,
+Progress is 0–1. New jobs include UTC `created_at`. Metadata: `{id,title,duration,thumbnail}`. Once chat is fetched,
 `chat_seconds` and `message_count` are added; on completion `elapsed_seconds`
 records pipeline time (or the latest re-render time).
 Activity points: `{time,count,baseline,intensity,score}` in 5-second bins.
 Clip shape: `{id,onset,peak,score,start,end,message_sample,mode,captions,status,
 error,file_url,download_url,thumbnail_url}`; status `queued`, `rendering`, `ready`,
 or `failed`. URLs are null until ready. Errors are explicit strings.
+Each clip gets at most three full attempts (initial + two retries) across section
+download, transcription, video conversion and thumbnail creation, with 2s/4s
+backoff. `attempt` and stage expose retry progress. Final errors remain visible
+on the clip with a Re-render action. `rendered_at` changes on successful renders
+to avoid stale video caching. Kept clips can be downloaded together as a ZIP.
 
 Validation errors: 422; missing job/clip: 404; unavailable file or attempting
 edits/deletion while a job is active: 409. A video without replay makes the
