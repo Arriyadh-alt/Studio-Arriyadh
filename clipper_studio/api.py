@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.background import BackgroundTask
 
-from shorts_clipper.captions import to_ass, transcribe
+from shorts_clipper.captions import CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.video import make_vertical_clip, video_duration
 from shorts_clipper.youtube import YouTubeAccessError
@@ -50,6 +50,8 @@ class JobRequest(BaseModel):
     lead: float = Field(default=18, ge=15, le=20)
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
+    language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
+    caption_style: dict | None = None
 
     @field_validator("url")
     @classmethod
@@ -82,6 +84,8 @@ class RenderRequest(BaseModel):
     end: float = Field(gt=0, allow_inf_nan=False)
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
+    language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
+    caption_style: dict | None = None
 
 
 class KeepRequest(BaseModel):
@@ -171,10 +175,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 source = download_section(job["url"], work, spec["start"], spec["end"])
                 duration = min(video_duration(source), spec["end"] - spec["start"])
                 subtitles = None
+                caption_language = None
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     subtitles = work / "captions.ass"
-                    subtitles.write_text(to_ass(transcribe(source, clip_end=duration)), encoding="utf-8")
+                    transcript = transcribe(source, language=spec.get("language"), clip_end=duration)
+                    caption_language = getattr(transcript, "language", None)
+                    subtitles.write_text(to_ass(transcript, CaptionStyle.from_dict(spec.get("caption_style"))), encoding="utf-8")
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
                 make_vertical_clip(source, video, 0, duration,
@@ -190,7 +197,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     thumbnail.replace(output_dir / "thumbnail.jpg")
                     base = f"/api/jobs/{jid}/clips/{cid}"
                     clip.update(status="ready", rendered_at=time.time_ns(), file_url=base + "/video", download_url=base + "/download",
-                                thumbnail_url=base + "/thumbnail")
+                                thumbnail_url=base + "/thumbnail", caption_language=caption_language)
                     clip.pop("previous_render", None)
                     store.save(job)
         except Exception:
@@ -296,6 +303,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                             clips=job["request"]["clips"], lead=job["request"]["lead"])
             clips = [dict(spike, number=number, id=uuid.uuid4().hex, status="queued", error=None,
                           mode=job["request"]["mode"], captions=job["request"]["captions"],
+                          language=job["request"].get("language", "auto"), caption_style=job["request"].get("caption_style"),
                           file_url=None, download_url=None, thumbnail_url=None)
                      for number, spike in enumerate(sorted(spikes, key=lambda s: s["start"]), 1)]
             with store.lock:
@@ -456,6 +464,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 clip["previous_render"] = {key: clip[key] for key in (
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
                     "rendered_at", "attempt") if key in clip}
+                clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language")})
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
             if job["status"] not in ACTIVE_STATUSES:

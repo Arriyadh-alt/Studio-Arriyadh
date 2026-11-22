@@ -10,6 +10,7 @@
   <link rel="manifest" href="./manifest.webmanifest" crossorigin="use-credentials">
   <link rel="apple-touch-icon" href="./icon-192.png">
   <link rel="stylesheet" href="./style.css">
+  <script src="./captions.js" defer></script>
   <script src="./app.js" defer></script>
 </head>
 <body>
@@ -28,6 +29,7 @@
           <label>Layout<select id="mode"><option value="crop">Center crop</option><option value="blur">Blurred background</option></select></label>
           <label class="check"><input id="captions" type="checkbox" checked> Burn in captions</label>
         </div></details>
+        <div id="create-caption-style"></div>
         <p class="hint">✦ Chat-led detection <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
       </form>
       <div class="section-heading"><div><span class="eyebrow">Your workspace</span><h2>Recent streams</h2></div><button id="refresh-jobs" class="quiet">Refresh ↻</button></div>

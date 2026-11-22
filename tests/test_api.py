@@ -16,6 +16,59 @@ from shorts_clipper.youtube import YouTubeAccessError, blocking_message
 REPLAY_URL = "https://www.youtube.com/watch?v=LIxBN4AHMEE"
 
 
+def test_caption_request_defaults():
+    from clipper_studio.api import RenderRequest
+    for request in (JobRequest(url=REPLAY_URL), RenderRequest(start=0, end=10)):
+        assert request.captions is True
+        assert request.language == "auto" and request.caption_style is None
+    with pytest.raises(ValidationError):
+        RenderRequest(start=0, end=10, language="not-a-code")
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_caption_options_worker_and_rerender(monkeypatch, tmp_path, media, legacy):
+    from shorts_clipper.captions import Caption, Transcript
+    calls, styles = [], []
+    def speech(source, **kwargs):
+        calls.append(kwargs)
+        return Transcript([Caption(0, 1, "Halo dunia!")], "id")
+    def serialize(captions, style):
+        styles.append(style)
+        return "ASS"
+    monkeypatch.setattr("clipper_studio.api.transcribe", speech)
+    monkeypatch.setattr("clipper_studio.api.to_ass", serialize)
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration":600}, []))
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([{"start":10,"end":40}], []))
+    app = create_app(tmp_path, render_workers=1)
+    if legacy:
+        job = saved_job("old", "running")
+        job["clips"][0].update(status="queued", captions=True)
+        app.state.store.save(job)
+    with TestClient(app) as client:
+        jid = "old" if legacy else client.post("/api/jobs", json={"url":REPLAY_URL,
+            "language":"id", "caption_style":{"preset":"minimal","size":100}}).json()["id"]
+        app.state.pending.join()
+        clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
+        assert clip["status"] == "ready" and clip["caption_language"] == "id"
+        assert calls[-1]["language"] == (None if legacy else "id")
+        assert styles[-1].preset == ("pop" if legacy else "minimal")
+        if not legacy:
+            assert clip["language"] == "id" and clip["caption_style"]["size"] == 100
+        base = f"/api/jobs/{jid}/clips/{clip['id']}"
+        response = client.post(base + "/render", json={"start":12,"end":35,"language":"en",
+            "caption_style":{"preset":"pop","position":"top","size":999,"highlight_color":"#123456"}})
+        assert response.status_code == 202
+        app.state.pending.join()
+        clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
+        assert clip["status"] == "ready" and clip["language"] == "en"
+        assert calls[-1]["language"] == "en"
+        assert styles[-1].position == "top" and styles[-1].size == 130
+        assert styles[-1].highlight_color == "#123456"
+        assert client.post(base + "/render", json={"start":12,"end":35,"captions":False}).status_code == 202
+        app.state.pending.join()
+        assert client.get(f"/api/jobs/{jid}").json()["clips"][0]["caption_language"] is None
+
+
 @pytest.mark.parametrize("phase", ["metadata", "chat", "section"])
 @pytest.mark.parametrize("configured", [False, True])
 def test_cookie_blocking_is_a_friendly_job_error(monkeypatch, tmp_path, phase, configured):

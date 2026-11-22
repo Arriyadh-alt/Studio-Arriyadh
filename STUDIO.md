@@ -77,7 +77,7 @@ and use only media you are authorized to access.
 ## API
 
 - `POST /api/jobs` → 202 `{id}`. Body:
-  `{url, clips:8, lead:18, mode:"crop", captions:true}`. Use an HTTPS YouTube
+  `{url, clips:8, lead:18, mode:"crop", captions:true, language:"auto", caption_style:null}`. Use an HTTPS YouTube
   video link (`watch`, `live`, or `youtu.be`, including mobile) for a finished
   livestream; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
 - `GET /api/jobs` → array of jobs; add `?summary=true` for recent-stream cards
@@ -90,7 +90,7 @@ and use only media you are authorized to access.
   A generation token prevents old work from publishing after cancel/re-render.
   Cancelling a finished job returns 409; repeated cancellation is safe.
 - `POST /api/jobs/{id}/clips/{cid}/render` → 202 `{id:cid,status:"queued"}`.
-  Body `{start,end,mode:"crop",captions:true}`. Seconds, within the original
+  Body `{start,end,mode:"crop",captions:true,language:"auto",caption_style:null}`. Seconds, within the original
   duration, end after start, maximum 60 seconds. Preserves detection metadata.
 - `GET /api/jobs/{id}/clips/{cid}/video` → inline MP4, supports byte ranges (206).
 - `GET /api/jobs/{id}/clips/{cid}/download` → MP4 attachment.
@@ -112,8 +112,37 @@ Progress is 0–1. New jobs include UTC `created_at`. Metadata: `{id,title,durat
 records pipeline time (or the latest re-render time).
 Activity points: `{time,count,baseline,intensity,score}` in 5-second bins.
 Clip shape: `{id,onset,peak,score,start,end,message_sample,mode,captions,status,
-error,file_url,download_url,thumbnail_url}`; status `queued`, `rendering`, `ready`,
+error,file_url,download_url,thumbnail_url,language,caption_style,caption_language}`; status `queued`, `rendering`, `ready`,
 `failed`, or `cancelled`. URLs are null until ready. Errors are explicit strings.
+
+### Caption options
+
+`captions` remains a boolean. `language` is `"auto"`/null (Whisper auto-detection)
+or a Whisper language code such as `"en"` or `"id"`; it is not a translation target.
+`caption_language` records Whisper's language result (null when captions are off).
+Generated clips inherit language/style from the job. Old clips without these fields
+use automatic language detection and the default pop style. Re-renders transcribe
+again; cancellation restores the previous render's caption settings and language.
+`CLIPPER_WHISPER_MODEL` selects the CPU/int8 model (fallback `base`).
+
+`caption_style` is an optional object; null uses defaults:
+```json
+{"preset":"pop","font":"DejaVu Sans","size":80,"position":"bottom",
+ "text_color":"#FFFFFF","highlight_color":"#FFE34D","emphasis_color":"#67F5B5",
+ "uppercase":false,"emphasis":true}
+```
+Unknown keys/invalid values fall back to defaults; numeric size clamps to 40–130.
+Presets: `pop` (word-active color/scale animation, stable chunk wrapping), `classic`
+(original static 76px look at default settings), `minimal` (80% size, no emphasis,
+fade in/out). Fonts: `DejaVu Sans`, `Liberation Sans`, `JetBrains Mono`; these are
+installed on the development host and used by libass. Other hosts should install
+them or libass will substitute. Position: `bottom`, `middle`, `top`; top/bottom
+reserve platform UI space and all positions retain the wider right-rail margin.
+Colors are `#RRGGBB`. Keyword emphasis picks up to two words using numbers,
+punctuation, uppercase and English/Indonesian content-word heuristics, not an LLM.
+Studio exposes these controls in collapsible create/per-clip sections. Changes
+are drafts until Re-render; detected language is shown separately on the clip.
+
 New clips also have a stable `number`, assigned in start order and preserved on deletion.
 Older clips fall back to their list position. Single downloads use
 `<title-slug>-highlight-02.mp4`; kept ZIPs use `<title-slug>-kept-clips.zip`
