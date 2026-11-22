@@ -10,9 +10,48 @@ from pydantic import ValidationError
 
 from clipper_studio.api import JobRequest, Store, create_app, title_slug
 from clipper_studio.chat import ChatReplayError, Message
+from shorts_clipper.youtube import YouTubeAccessError, blocking_message
 
 
 REPLAY_URL = "https://www.youtube.com/watch?v=LIxBN4AHMEE"
+
+
+@pytest.mark.parametrize("phase", ["metadata", "chat", "section"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_cookie_blocking_is_a_friendly_job_error(monkeypatch, tmp_path, phase, configured):
+    monkeypatch.delenv("CLIPPER_YTDLP_COOKIES", raising=False)
+    monkeypatch.delenv("YOUTUBE_COOKIES", raising=False)
+    if configured:
+        monkeypatch.setenv("YOUTUBE_COOKIES", "mock cookies")
+    calls = []
+
+    def fail(*args):
+        calls.append(phase)
+        error = YouTubeAccessError if phase == "section" else ChatReplayError
+        raise error(blocking_message("HTTP Error 429: Too Many Requests"))
+
+    if phase == "metadata":
+        monkeypatch.setattr("clipper_studio.api.fetch_metadata", fail)
+    elif phase == "chat":
+        monkeypatch.setattr("clipper_studio.api.fetch_chat", fail)
+    else:
+        monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 600}, []))
+        monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: (
+            [{"start": 10, "end": 40}, {"start": 100, "end": 130}], []))
+        monkeypatch.setattr("clipper_studio.api.download_section", fail)
+    app = create_app(tmp_path, render_workers=1)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        app.state.pending.join()
+        job = client.get(f"/api/jobs/{jid}").json()
+        assert job["status"] == "failed"
+        assert job["error"].startswith("YouTube is blocking this server")
+        if configured:
+            assert "configured but may be rejected or expired" in job["error"]
+        else:
+            assert "No cookies configured" in job["error"]
+        assert all(clip["status"] == "failed" for clip in job["clips"])
+        assert calls == [phase]
 
 
 @pytest.fixture(autouse=True)

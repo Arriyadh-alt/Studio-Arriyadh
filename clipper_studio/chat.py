@@ -10,6 +10,8 @@ from tempfile import TemporaryDirectory
 import yt_dlp
 from yt_dlp.utils import DownloadCancelled, DownloadError
 
+from shorts_clipper.youtube import blocking_message, cookie_options
+
 
 MAX_REPLAY_SECONDS = 300
 MAX_REPLAY_BYTES = 128 * 1024 * 1024
@@ -77,9 +79,10 @@ def validate_metadata(info):
 
 
 def fetch_metadata(url: str):
-    with yt_dlp.YoutubeDL({"skip_download": True, "writesubtitles": False, "noplaylist": True,
-                          "quiet": True, "noprogress": True, "socket_timeout": 10,
-                          "retries": 1, "extractor_retries": 1}) as ydl:
+    options = {"skip_download": True, "writesubtitles": False, "noplaylist": True,
+               "quiet": True, "noprogress": True, "socket_timeout": 10,
+               "retries": 1, "extractor_retries": 1}
+    with cookie_options() as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
         except DownloadError as error:
@@ -105,14 +108,14 @@ def fetch_chat(url: str, directory: Path, info=None):
                    "outtmpl": str(work / "replay.%(ext)s"), "noplaylist": True,
                    "quiet": True, "noprogress": True, "retries": 2, "fragment_retries": 2,
                    "socket_timeout": 20, "progress_hooks": [check_replay_limit]}
-        with yt_dlp.YoutubeDL(options) as ydl:
+        with cookie_options() as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
             download_start = time.monotonic()
             try:
                 ydl.process_ie_result(info, download=True)
             except DownloadCancelled as error:
                 raise ChatReplayError(REPLAY_LIMIT_MESSAGE) from error
             except DownloadError as error:
-                raise ChatReplayError(REPLAY_DOWNLOAD_ERROR) from error
+                raise ChatReplayError(blocking_message(error) or REPLAY_DOWNLOAD_ERROR) from None
 
         replay = work / "replay.live_chat.json"
         if not replay.is_file():
@@ -136,4 +139,7 @@ def _video_error(message):
                                          "video is unavailable", "video unavailable", "this video is not available",
                                          "not available in your country", "confirm your age", "has been removed")):
         return "This YouTube video is private, restricted, or unavailable. Check the link and use a publicly accessible livestream replay."
+    blocked = blocking_message(message)
+    if blocked:
+        return blocked
     return "Studio couldn’t load this YouTube video. Check the link and try again, or choose another public replay."

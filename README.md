@@ -32,6 +32,45 @@ clips and cancelled jobs.
 See [STUDIO.md](STUDIO.md) for the API and [E2E.md](E2E.md) for backend evidence.
 The original CLI remains available below.
 
+## Optional YouTube cookies
+
+If YouTube responds with a bot check, sign-in prompt or HTTP 429, Studio shows
+`YouTube is blocking this server — add or refresh YouTube cookies (see README)`
+and says whether no cookies are configured or configured cookies may be rejected
+or expired. Cookies are optional and are not guaranteed to bypass an IP block;
+wait before retrying rate-limited requests.
+
+Export a **Netscape cookies.txt** from your own authorized browser session using
+[yt-dlp's official YouTube cookie export instructions](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
+Use a **spare account**, not your primary account: automated access carries account
+risk. Treat the export like a password. Store it outside the repository, restrict
+permissions (for example `chmod 600 /secure/youtube-cookies.txt`), and never commit,
+log or share its contents. Only use cookies for videos you are authorized to access.
+
+Set the path in the environment of the server or CLI:
+
+```sh
+export CLIPPER_YTDLP_COOKIES=/secure/youtube-cookies.txt
+```
+
+Alternatively, inject **`YOUTUBE_COOKIES`** through your secret manager containing
+the full cookies.txt text, including newlines. It is used only when no cookie path
+is configured. Studio writes it to a private **0600** temporary file under
+`CLIPPER_DATA_DIR` (default `~/clipper-data`). Do not paste the secret into command
+history or enable shell tracing while handling it.
+
+The CLI also accepts `--cookies /secure/youtube-cookies.txt`. Precedence is:
+**CLI `--cookies` > `CLIPPER_YTDLP_COOKIES` path > `YOUTUBE_COOKIES` text**. These
+settings cover metadata, chat replay and section downloads. Each yt-dlp invocation
+uses its own writable private copy (0600 file in a 0700 temporary directory),
+removed afterward even on failure; the source file is never rewritten, so read-only
+secret mounts work. Cookie-jar changes from yt-dlp are discarded. An invalid or
+unreadable configured path fails rather than silently falling back to another secret.
+With neither variable set (and no CLI option), no cookie option or file is added.
+Refresh the export if rejected or expired, then submit/re-render again. Set server
+environment variables at your next planned server start; this does not hot-update
+an already running process.
+
 ## License
 
 Licensed under the [MIT License](LICENSE).
@@ -90,6 +129,7 @@ python -m shorts_clipper "https://www.youtube.com/watch?v=aqz-KE-bpKQ" 1:05 1:17
 | `-o, --output` | `short.mp4` | Output file |
 | `-m, --mode` | `crop` | `crop` fills the frame from the centre; `blur` fits the full frame over a blurred copy |
 | `--keep-download DIR` | temp folder | Keep the downloaded horizontal section in `DIR` |
+| `--cookies FILE` | environment fallback | Netscape cookies.txt; overrides `CLIPPER_YTDLP_COOKIES` and `YOUTUBE_COOKIES` |
 | `--no-captions` | off | Disable captions |
 | `--model MODEL` | `base` | faster-whisper model name or local model directory |
 | `--language CODE` | auto-detect | Speech language code, e.g. `en` (not translation) |

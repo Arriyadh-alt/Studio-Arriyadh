@@ -3,10 +3,13 @@
 from pathlib import Path
 
 import yt_dlp
-from yt_dlp.utils import download_range_func
+from yt_dlp.utils import DownloadError, download_range_func
+
+from .youtube import YouTubeAccessError, blocking_message, cookie_options
 
 
-def download_section(url: str, output_dir: Path, start: float, end: float, max_height: int = 1080) -> Path:
+def download_section(url: str, output_dir: Path, start: float, end: float, max_height: int = 1080,
+                     cookies: Path | None = None) -> Path:
     """Download only `start`..`end` (seconds) of `url` as an MP4 and return its path.
 
     Raises ValueError if the range starts past the end of the video.
@@ -24,13 +27,20 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
         "no_warnings": True,
         "noprogress": True,
     }
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=False)
-        duration = info.get("duration")
-        if duration and start >= duration:
-            raise ValueError(f"Start time is past the end of the video ({duration:.0f}s long)")
-        info = ydl.process_ie_result(info, download=True)
-        files = [Path(d["filepath"]) for d in info.get("requested_downloads", []) if d.get("filepath")]
+    with cookie_options(cookies) as authentication:
+        try:
+            with yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                duration = info.get("duration")
+                if duration and start >= duration:
+                    raise ValueError(f"Start time is past the end of the video ({duration:.0f}s long)")
+                info = ydl.process_ie_result(info, download=True)
+                files = [Path(d["filepath"]) for d in info.get("requested_downloads", []) if d.get("filepath")]
+        except DownloadError as error:
+            message = blocking_message(error, cookies)
+            if message:
+                raise YouTubeAccessError(message) from None
+            raise
     if not files or not files[0].exists():
         raise FileNotFoundError("Download finished but the video file was not found")
     return files[0]
