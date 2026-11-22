@@ -10,6 +10,7 @@ let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
 const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}`;
+const thumbnailUrl = clip => clip.thumbnail_url ? `.${clip.thumbnail_url}?v=${clip.thumbnail_version || clip.rendered_at || 0}` : '';
 
 function timestamp(value) {
   const total = Math.max(0, Math.round(value));
@@ -84,10 +85,11 @@ function clipHtml(clip,index,job) {
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
   return `<article id="clip-${clip.id}" class="clip" data-id="${clip.id}" data-version="${clipVersion(clip)}">
     <div class="clip-top"><div><h3>Highlight ${String(number).padStart(2,'0')}</h3>${badge(clip.status, clip.queue_position)}</div><button class="keep" aria-label="Keep highlight ${number}" aria-pressed="${!!clip.kept}" data-action="keep">${clip.kept?'★ Kept':'☆ Keep'}</button></div>
-    <div class="preview">${clip.status==='ready' ? `<video controls playsinline preload="metadata" poster=".${clip.thumbnail_url}"><source src=".${clip.file_url}?v=${clip.rendered_at || 0}-${clip.start}-${clip.end}-${clip.mode}-${clip.captions}" type="video/mp4"></video>` : `<div class="placeholder"><span style="font-size:30px">${clip.status==='failed'?'!':'✂'}</span><span>${clip.status==='failed'?'This clip needs another try':clip.status==='cancelled'?'Cancelled — re-render to try again':clip.status==='queued'?escapeHtml(queueLabel(clip.queue_position)):`Creating your highlight…<br>Attempt ${clip.attempt || 1} of 3`}</span></div>`}</div>
+    <div class="preview${clip.status==='ready' ? ' with-thumbnail' : ''}">${clip.status==='ready' ? `<video controls playsinline preload="metadata" poster="${escapeHtml(thumbnailUrl(clip))}"><source src=".${clip.file_url}?v=${clip.rendered_at || 0}-${clip.start}-${clip.end}-${clip.mode}-${clip.captions}" type="video/mp4"></video><figure class="thumbnail-preview" ${clip.thumbnail_url ? '' : 'hidden'}><img src="${escapeHtml(thumbnailUrl(clip))}" alt="Thumbnail for highlight ${number}" loading="lazy"><figcaption>Thumbnail</figcaption></figure>` : `<div class="placeholder"><span style="font-size:30px">${clip.status==='failed'?'!':'✂'}</span><span>${clip.status==='failed'?'This clip needs another try':clip.status==='cancelled'?'Cancelled — re-render to try again':clip.status==='queued'?escapeHtml(queueLabel(clip.queue_position)):`Creating your highlight…<br>Attempt ${clip.attempt || 1} of 3`}</span></div>`}</div>
     <div class="clip-body"><div class="clip-meta"><span class="score">↗ ${clip.score.toFixed(2)} spike score</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">Onset ${timestamp(clip.onset)} · Peak ${timestamp(clip.peak)}</p>
     <div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>
     ${clip.error ? `<p class="error">${escapeHtml(clip.error)}${clip.status==='failed'?'<br>Adjust the settings below or try Re-render again.':''}</p>` : ''}
+    ${clip.status==='ready' ? `<form class="thumbnail-editor"><label>Thumbnail text<input name="text" maxlength="64" value="${escapeHtml(clip.thumbnail_text)}" placeholder="${escapeHtml(clip.thumbnail_hook || 'Automatic hook')}" autocomplete="off"></label><p class="hint">Leave blank to use the automatic hook.</p><div class="actions"><button type="submit">Regenerate ↻</button><a class="button thumbnail-download">Download JPG ↓</a></div><p class="hint thumbnail-status" role="status" hidden></p></form>` : ''}
     <form class="review"><div class="time-grid"><div>${timeField('start')}</div><div>${timeField('end')}</div></div>
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
       <p class="draft-note hint" hidden><span>Changes not applied — Re-render to update</span> <button type="button" class="quiet" data-action="reset">Reset</button></p><p class="draft-error error" role="status" hidden></p>
@@ -132,10 +134,23 @@ function drawJob(job) {
     const keep = $('[data-action=keep]',node);
     keep.setAttribute('aria-pressed',String(!!clip.kept));
     keep.textContent = clip.kept ? '★ Kept' : '☆ Keep';
-    node.querySelectorAll('[type=submit],[data-action=delete]').forEach(button=>button.disabled=locked(clip));
+    node.querySelectorAll('.review [type=submit],[data-action=delete]').forEach(button=>button.disabled=locked(clip));
+    if (clip.status==='ready') updateThumbnail(node, clip);
     draftFeedback(node);
   });
   if (!job.clips.length) container.innerHTML = `<p class="empty">${busy(job)?'Your clips will appear here as they finish.':job.status==='cancelled'?'This job was cancelled. Return to All streams to start another.':job.error?'The stream could not be processed. Return to All streams to try another URL.':'No significant chat spikes found. Try a livelier replay.'}</p>`;
+}
+function updateThumbnail(node, clip) {
+  const url = thumbnailUrl(clip);
+  const figure = $('.thumbnail-preview',node), image = $('img',figure);
+  const download = $('.thumbnail-download',node), input = $('.thumbnail-editor input',node);
+  if (image.getAttribute('src') !== url) {
+    image.setAttribute('src',url);
+    $('video',node).setAttribute('poster',url);
+  }
+  figure.hidden = download.hidden = !url;
+  if (url) download.href = url + '&download=true';
+  input.placeholder = clip.thumbnail_hook || 'Automatic hook';
 }
 async function refresh() {
   if (poll) return;
@@ -202,7 +217,7 @@ function draftFeedback(node) {
   $('.draft-note',node).hidden=!changed;
   $('.draft-error',node).hidden=!error;
   $('.draft-error',node).textContent=error;
-  $('[type=submit]',node).disabled=locked(clip)||!!error;
+  $('.review [type=submit]',node).disabled=locked(clip)||!!error;
 }
 $('#cancel-job').addEventListener('click',async event=>{
   if(!current || !busy(current) || !confirm('Cancel this job? Ready clips will be kept.'))return;
@@ -218,8 +233,8 @@ $('#delete-unkept').addEventListener('click',async event=>{
   try {for(const clip of clips){await api(`./api/jobs/${current.id}/clips/${clip.id}`,'DELETE');drafts.delete(clip.id);}}
   catch(error){notice(error.message);}finally{event.target.disabled=false;await refresh();}
 });
-$('#clips').addEventListener('input',event=>{const node=event.target.closest('.clip');if(node)saveDraft(node);});
-$('#clips').addEventListener('change',event=>{const node=event.target.closest('.clip');if(node)saveDraft(node);});
+$('#clips').addEventListener('input',event=>{if(event.target.closest('.review'))saveDraft(event.target.closest('.clip'));});
+$('#clips').addEventListener('change',event=>{if(event.target.closest('.review'))saveDraft(event.target.closest('.clip'));});
 $('#clips').addEventListener('click',async event=>{
   const button=event.target.closest('button'); if(!button || !current)return;
   const node=button.closest('.clip'), cid=node.dataset.id;
@@ -250,13 +265,32 @@ $('#clips').addEventListener('click',async event=>{
 });
 $('#clips').addEventListener('submit',async event=>{
   event.preventDefault(); if(!current)return;
-  const node=event.target.closest('.clip'), cid=node.dataset.id; saveDraft(node);
-  const draft=drafts.get(cid), button=$('[type=submit]',node);
+  const form=event.target, node=form.closest('.clip'), cid=node.dataset.id;
+  const jid=current.id, button=$('[type=submit]',form);
+  if (form.matches('.thumbnail-editor')) {
+    const input=$('input',form), status=$('.thumbnail-status',form);
+    status.hidden=false; status.textContent='Generating thumbnail…';
+    button.disabled=input.disabled=true;
+    try {
+      const result=await api(`./api/jobs/${jid}/clips/${cid}/thumbnail`,'POST',{text:input.value});
+      const clip=current?.id===jid && current.clips.find(c=>c.id===cid);
+      if (clip?.status==='ready' && node.isConnected) {
+        Object.assign(clip,result);
+        input.value=result.thumbnail_text || '';
+        updateThumbnail(node,clip);
+      }
+      status.textContent='Thumbnail updated.';
+    } catch(error) { status.textContent=error.message; }
+    finally { button.disabled=input.disabled=false; }
+    return;
+  }
+  saveDraft(node);
+  const draft=drafts.get(cid);
   try {
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${current.id}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
 function jump(event) {const mark=event.target.closest('[data-clip]');if(mark)document.getElementById(`clip-${mark.dataset.clip}`)?.scrollIntoView({behavior:'smooth',block:'start'});}

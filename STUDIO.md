@@ -94,7 +94,10 @@ and use only media you are authorized to access.
   duration, end after start, maximum 60 seconds. Preserves detection metadata.
 - `GET /api/jobs/{id}/clips/{cid}/video` → inline MP4, supports byte ranges (206).
 - `GET /api/jobs/{id}/clips/{cid}/download` → MP4 attachment.
-- `GET /api/jobs/{id}/clips/{cid}/thumbnail` → JPEG.
+- `GET /api/jobs/{id}/clips/{cid}/thumbnail` → JPEG; add `?download=true` for an attachment.
+- `POST /api/jobs/{id}/clips/{cid}/thumbnail` → regenerate the ready clip’s
+  thumbnail without changing its MP4. Send `{"text":"Custom hook"}` (up to 64
+  characters), or omit/clear `text` to restore the automatic hook.
 - `DELETE /api/jobs/{id}/clips/{cid}` → `{id:cid,status:"deleted"}`; removes files.
 - `PATCH /api/jobs/{id}/clips/{cid}` with `{kept:true}` → `{id,kept}`. Persisted
   during processing and across re-renders; defaults to false for older clips.
@@ -117,7 +120,8 @@ error,file_url,download_url,thumbnail_url}`; status `queued`, `rendering`, `read
 New clips also have a stable `number`, assigned in start order and preserved on deletion.
 Older clips fall back to their list position. Single downloads use
 `<title-slug>-highlight-02.mp4`; kept ZIPs use `<title-slug>-kept-clips.zip`
-and contain `highlight-02.mp4` entries matching the review numbers. Slugs are
+and contain `highlight-02.mp4` and, when available, `highlight-02.jpg` entries
+matching the review numbers. Slugs are
 ASCII lowercase hyphenated titles, at most 40 characters, with `clipper-studio`
 as the empty-title fallback.
 Each clip gets at most three full attempts (initial + two retries) across section
@@ -125,6 +129,12 @@ download, transcription, video conversion and thumbnail creation, with 2s/4s
 backoff. `attempt` and stage expose retry progress. Final errors remain visible
 on the clip with a Re-render action. `rendered_at` changes on successful renders
 to avoid stale video caching. Kept clips can be downloaded together as a ZIP.
+
+Ready clips get a 9:16 thumbnail automatically. Studio samples the rendered
+clip locally, favoring visible faces, detected smiles, clear frames, and frames
+near the chat peak. It styles the selected still with a short hook from nearby
+captions, chat reactions, or the stream title. The clip card previews the JPG
+and lets you download it or change its text; custom text is kept on re-render.
 
 Validation errors: 422; missing job/clip: 404; unavailable file or attempting
 edits while that clip is queued/rendering or deletion while it is rendering: 409.
