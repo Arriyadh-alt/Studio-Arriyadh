@@ -8,11 +8,13 @@ const CaptionControls = (() => {
   }
   function html(clip = {}) {
     const {language,caption_style:s} = options(clip);
+    const languages = [['auto','Auto-detect'],['en','English'],['id','Indonesian']];
+    if(!languages.some(([code])=>code===language))languages.push([language,language]);
     const select = (key, label, values, selected) => `<label>${label}<select data-caption="${key}">${values.map(([value,name])=>`<option value="${esc(value)}" ${selected===value?'selected':''}>${esc(name)}</option>`).join('')}</select></label>`;
     const color = (key, label) => `<label>${label}<input type="color" data-caption="${key}" value="${esc(s[key])}"></label>`;
     const check = (key,label) => `<label class="check"><input type="checkbox" data-caption="${key}" ${s[key]?'checked':''}>${label}</label>`;
     return `<details class="caption-settings"><summary>Caption style</summary><div class="caption-grid">
-      ${select('language','Speech language',[['auto','Auto-detect'],['en','English'],['id','Indonesian']],language)}
+      ${select('language','Speech language',languages,language)}
       ${select('preset','Preset',[['pop','Pop · active word'],['classic','Classic · static'],['minimal','Minimal · fade']],s.preset)}
       ${select('font','Font',['Montserrat','Anton','Bebas Neue','DejaVu Sans','Liberation Sans','JetBrains Mono'].map(f=>[f,f]),s.font)}
       <label>Size <output data-caption-size>${Number(s.size)} px</output><input type="range" data-caption="size" min="40" max="130" value="${Number(s.size)}"></label>
