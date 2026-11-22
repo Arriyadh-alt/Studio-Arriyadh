@@ -25,10 +25,11 @@ def test_spikes_onset_peak_and_non_overlap():
 def test_empty_flat_and_boundaries():
     assert detect_spikes([], 100)[0] == []
     assert detect_spikes(stream(), 600)[0] == []
-    for time in (0, 99):
+    for time in (0, 79):
         spikes, _ = detect_spikes([Message(time, str(i), "W") for i in range(20)], 100)
         assert len(spikes) == 1
         assert 0 <= spikes[0]["start"] < spikes[0]["end"] <= 100
+    assert detect_spikes([Message(99, str(i), "W") for i in range(20)], 100)[0] == []
 
 
 def test_nms_top_n_and_lead():
@@ -48,12 +49,56 @@ def test_invalid(kwargs):
 def test_reaction_intensity():
     assert all(reaction(t) for t in ("🔥🔥", "OMG", "nooooo", "LOL", "W", "KEKW", "wkwk", "!!!", ":fire:"))
     assert not reaction("ordinary message")
-    _, normal = detect_spikes([Message(50, str(i), f"hello {i}") for i in range(10)], 100)
-    _, spam = detect_spikes([Message(50, str(i), "same") for i in range(10)], 100)
-    assert spam[10]["score"] > normal[10]["score"]
+    _, normal = detect_spikes([Message(50, str(i), "ordinary message") for i in range(10)], 100)
+    _, hype = detect_spikes([Message(50, str(i), "OMG") for i in range(10)], 100)
+    assert hype[10]["score"] > normal[10]["score"]
+    assert hype[10]["intensity"] == 10
 
 
 def test_sustained_rise_keeps_peak_inside_window():
     messages = stream() + [Message(t, str(i), "W") for t in range(100, 200, 5) for i in range(t)]
     spikes, _ = detect_spikes(messages, 600)
     assert all(s["start"] <= s["peak"] < s["end"] and s["end"] - s["start"] <= 60 for s in spikes)
+
+
+def test_start_and_outro_greeting_floods_not_picked():
+    messages = [Message(t, str(i), text) for t, text in ((0, "hi"), (5, "hello"),
+                (595, "bye bye krew")) for i in range(1000)]
+    assert detect_spikes(messages, 600)[0] == []
+
+
+def test_midstream_greeting_flood_not_picked():
+    messages = stream() + [Message(300, str(i), "HEY everyone!!!") for i in range(200)]
+    assert detect_spikes(messages, 600)[0] == []
+
+
+def test_nonreacting_boundary_flood_and_flat_reactions_not_picked():
+    messages = [Message(t, str(i), "ordinary message") for t in (0, 590) for i in range(100)]
+    assert detect_spikes(messages, 600)[0] == []
+    flat = [Message(t, str(i), "LOL") for t in range(0, 600, 5) for i in range(10)]
+    assert detect_spikes(flat, 600)[0] == []
+
+
+def test_single_author_spam_not_picked():
+    messages = stream() + [Message(t, "spammer", text) for t in range(200, 240)
+                           for text in ("P", "E", "D", "WOW OMG!!!", "copypasta" * 50)]
+    assert detect_spikes(messages, 600)[0] == []
+
+
+def test_big_volume_spike_detected():
+    messages = [Message(t, str(i), "ordinary message") for t in range(0, 600, 5)
+                for i in range(100)]
+    messages += [Message(t, str(i), "WHAT!!!") for t in (295, 300, 305) for i in range(300)]
+    picks, _ = detect_spikes(messages, 600)
+    assert len(picks) == 1
+    assert 295 <= picks[0]['peak'] <= 305
+    assert picks[0]['onset'] == 295
+    assert picks[0]['start'] == 277
+
+
+def test_samples_are_reaction_first_and_deduplicated():
+    messages = [Message(200, str(i), text) for i, text in enumerate(
+        ['hello', 'ordinary message', 'OMG', 'OMG', 'LOL', 'WHAT!!!'])]
+    picks, _ = detect_spikes(messages, 600)
+    assert picks[0]['message_sample'][:3] == ['OMG', 'LOL', 'WHAT!!!']
+    assert picks[0]['message_sample'].count('OMG') == 1
