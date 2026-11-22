@@ -158,6 +158,7 @@ def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_p
     from clipper_studio.api import create_app
     from shorts_clipper.captions import Transcript
     captions = captions_for([t / 2 for t in range(24) if not 8 <= t < 12], loud_at=8.5)
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda url: {"id": "x", "duration": 600, "title": "Stream"})
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 600, "title": "Stream"}, []))
     monkeypatch.setattr("clipper_studio.api.detect_spikes",
                         lambda *a, **k: ([{"start": 10, "end": 22, "peak": 18.5, "score": 3.0}], []))

@@ -30,17 +30,23 @@ class DirectorOptions:
     edits: bool = True
     sfx: bool = True
     music: str = "auto"
+    story: bool = True
+    voiceover: bool = False
+    hook_text: str | None = None
 
     @classmethod
     def from_dict(cls, value=None):
         if not isinstance(value, dict):
             return cls()
         result = cls()
-        for key in ("enabled", "hook", "edits", "sfx"):
+        for key in ("enabled", "hook", "edits", "sfx", "story", "voiceover"):
             if isinstance(value.get(key), bool):
                 setattr(result, key, value[key])
         if value.get("music") in MUSIC_MODES:
             result.music = value["music"]
+        text = value.get("hook_text")
+        if isinstance(text, str) and text.strip():
+            result.hook_text = " ".join(text.split())[:64]
         return result
 
 
@@ -77,6 +83,7 @@ class Plan:
     suggestions: list = field(default_factory=list)
     trimmed_start: float = 0.0
     removed: float = 0.0
+    voiceover: str | None = None
 
     @property
     def duration(self):
@@ -91,7 +98,7 @@ class Plan:
 
     def map_time(self, t, include_hook=False):
         for offset, segment in zip(self.offsets(), self.segments):
-            if (include_hook or segment.role != "hook") and segment.start <= t < segment.end:
+            if (include_hook or segment.role == "main") and segment.start <= t < segment.end:
                 return offset + t - segment.start
         return None
 
@@ -261,32 +268,51 @@ def score_clip(levels, words, duration, peak, hook_strength, spike_score, cut_se
 
 # ---------------------------------------------------------------- planning
 
-def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, spike_score=None, hook_text=None) -> Plan:
+def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, spike_score=None, hook_text=None,
+              story=None) -> Plan:
+    """Plan the edit. With a `story` context (streamer, game, language, chat) and the story option on,
+    the clip opens on a written storytelling hook and is re-cut to build-up, event, reaction and ending."""
     words = transcript_words(captions)
     z = _zscores(levels)
-    hook = find_hook(levels, words, duration, peak) if options.hook else None
-    strength = hook[2] if hook else 0.0
+    arc = None
+    if options.hook and options.story and story is not None:
+        from .story import story_arc
+        arc = story_arc(levels, words, duration, peak)
+    hook = find_hook(levels, words, duration, peak) if options.hook and arc is None else None
+    strength = hook[2] if hook else (0.8 if arc else 0.0)
     if hook and strength < 0.35:
         hook = None
-    main_start = 0.0
-    if options.edits:
+    main_start, end = 0.0, duration
+    if arc:
+        main_start, end = arc["start"], arc["end"]
+        peak = arc["event"]
+    elif options.edits:
         active = [i * STEP for i in range(min(len(z), int(3 / STEP))) if z[i] > -0.5]
         first_word = words[0].start if words else None
         candidates = [t for t in (first_word, active[0] if active else None) if t is not None]
         if candidates:
             main_start = max(0.0, min(2.5, min(candidates) - 0.3))
     protect = [(peak - 1.5, peak + 3.0)] if peak is not None else []
-    cuts = find_silences(levels, words, main_start, duration, protect) if options.edits else []
+    intro = None
+    if arc:
+        intro = _story_intro(story, options, words, arc, duration)
+        over = intro["duration"] + end - main_start - MAX_OUTPUT
+        if over > 0:
+            main_start = min(main_start + over, max(main_start, arc["event"] - 3.0))
+            end = min(end, main_start + MAX_OUTPUT - intro["duration"])
+    cuts = find_silences(levels, words, main_start, end, protect) if options.edits else []
     pieces, cursor = [], main_start
     for a, b in cuts:
         if a - cursor >= 0.6:
             pieces.append(Segment(cursor, a))
             cursor = b
-    if duration - cursor > 0.3:
-        pieces.append(Segment(cursor, duration))
+    if end - cursor > 0.3:
+        pieces.append(Segment(cursor, end))
     elif pieces:
-        pieces[-1].end = duration
+        pieces[-1].end = end
     segments = ([Segment(hook[0], hook[1], "hook")] if hook else []) + pieces
+    if intro:
+        segments.insert(0, Segment(main_start, main_start + intro["duration"], "intro"))
     over = sum(s.length for s in segments) - MAX_OUTPUT
     while over > 0 and segments:
         last = segments[-1]
@@ -296,8 +322,21 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         else:
             over -= last.length
             segments.pop()
-    plan = Plan(segments, trimmed_start=main_start, removed=sum(b - a for a, b in cuts))
+    plan = Plan(segments, trimmed_start=main_start + duration - end, removed=sum(b - a for a, b in cuts))
     offsets = plan.offsets()
+    if intro:
+        plan.voiceover = intro.pop("voice", None)
+        plan.hook = {**intro, "style": "story", "text": options.hook_text or intro["options"][0],
+                     "source_start": round(main_start, 2), "source_end": round(main_start, 2),
+                     "event": arc["event"], "end": round(end, 2),
+                     "build_up": round(arc["event"] - main_start, 2), "payoff": round(end - arc["event"], 2)}
+        boundary = intro["duration"]
+        plan.zooms.append([0.0, boundary, 0.12, 1.0, "hook"])
+        plan.flashes.append(boundary)
+        plan.sfx.append([0.0, "hit"])
+        plan.sfx.append([0.15, "boing"] if intro["category"] in ("funny", "fail", "karma") else
+                        [max(0.0, boundary - 1.35), "riser"])
+        plan.sfx.append([max(0.0, boundary - 0.25), "whoosh"])
     if hook:
         plan.hook = {"source_start": round(hook[0], 2), "source_end": round(hook[1], 2),
                      "duration": round(hook[1] - hook[0], 2), "text": hook_text}
@@ -339,10 +378,26 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     audible = levels[levels > -70]
     quiet_mix = (float(np.median(audible)) if len(audible) else -90) < -28
     plan.music = bool(options.music == "on" or (options.music == "auto" and speaking < 0.35 and quiet_mix))
-    plan.score, plan.suggestions = score_clip(levels, words, duration, peak, strength if hook else
+    plan.score, plan.suggestions = score_clip(levels, words, duration, peak, strength if hook or arc else
                                               min(1.0, max(0.0, float(np.mean(z[:30])) + 0.5) / 2),
                                               spike_score, plan.removed + main_start)
     return plan
+
+
+def _story_intro(story, options, words, arc, duration):
+    from .story import intro_length, write_hooks
+    written = write_hooks(story, words, arc["event"], seed=story.get("seed", ""))
+    text = options.hook_text or written["options"][0]
+    voice = None
+    seconds = None
+    if options.voiceover and story.get("voice"):
+        try:
+            voice, seconds = story["voice"](text, written["language"])
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Hook voice-over unavailable", exc_info=True)
+    length = intro_length(text, seconds)
+    return {**written, "duration": length, "voice": str(voice) if voice else None, "voiceover": bool(voice)}
 
 
 # ---------------------------------------------------------------- captions
@@ -352,6 +407,8 @@ def remap_captions(captions, plan: Plan) -> list:
     words = transcript_words(captions)
     moved = []
     for offset, segment in zip(plan.offsets(), plan.segments):
+        if segment.role == "intro":
+            continue
         for w in words:
             middle = (w.start + w.end) / 2
             if segment.start <= middle < segment.end:
@@ -363,21 +420,22 @@ def remap_captions(captions, plan: Plan) -> list:
 
 
 HOOK_SIZE = 88
+STORY_SIZE = 96
 
 
-def hook_height(text: str) -> int:
+def hook_height(text: str, size=HOOK_SIZE) -> int:
     """Height of the hook banner box at its peak scale, in 1080x1920 output pixels."""
-    lines = max(1, math.ceil(len(text) * HOOK_SIZE * 0.62 / 860))
-    return round((lines * HOOK_SIZE * 1.25 + 28) * 1.08)
+    lines = max(1, math.ceil(len(text) * size * 0.62 / 860))
+    return round((lines * size * 1.25 + 28) * 1.08)
 
 
 def _bands_overlap(a, b, gap=0):
     return a[0] < b[1] + gap and a[1] + gap > b[0]
 
 
-def hook_band(text: str, rect=None, style=None, preferred=380):
+def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE):
     """Vertical band for the hook banner clear of the facecam and the captions."""
-    height = hook_height(text)
+    height = hook_height(text, size)
     blocked = ([(rect.y, rect.y + rect.h)] if rect is not None else []) + \
               ([caption_band(style, getattr(style, "size", 80))] if style is not None else [])
     candidates = [preferred, 960 - height / 2] + [b[1] + 40 for b in blocked] + [b[0] - 40 - height for b in blocked]
@@ -387,18 +445,39 @@ def hook_band(text: str, rect=None, style=None, preferred=380):
     return top, top + height
 
 
-def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position="bottom", top=None) -> str:
-    """Add an animated hook banner over the opening seconds of an ASS script."""
+def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position="bottom", top=None,
+                   story=False, highlight=None) -> str:
+    """Add an animated hook banner over the opening seconds of an ASS script.
+
+    A storytelling hook is larger, white, and pops in word by word with the streamer's name in yellow."""
     ass_text = ass_text or _classic_ass([])
     if top is not None:
         alignment, margin = 8, int(top)
     else:
         alignment, margin = (5, 0) if caption_position == "top" else (8, 380)
-    style = (f"Style: Hook,Montserrat Black,{HOOK_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00101317,-1,0,0,0,100,100,0,0,"
+    style = (f"Style: Hook,Montserrat Black,{STORY_SIZE if story else HOOK_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00101317,-1,0,0,0,100,100,0,0,"
              f"3,14,0,{alignment},110,110,{margin},1\n")
     ass_text = ass_text.replace("\n\n[Events]", "\n" + style + "\n[Events]", 1)
     label = literal_text(text.upper())
     banner = (r"{\fad(80,160)\fscx70\fscy70\t(0,160,\fscx108\fscy108)\t(160,260,\fscx100\fscy100)\1c&H4DE3FF&}" + label)
+    if story:
+        tokens = text.upper().split()
+        named = set((highlight or "").upper().split())
+        gap = min(150, 1300 // max(1, len(tokens)))
+        pieces = []
+        for i, token in enumerate(tokens):
+            at = 80 + i * gap
+            bare = re.sub(r"(?:['’]S)?[!?.,…]*$", "", token)
+            color = r"\1c&H00D7FF&" if bare in named else r"\1c&HFFFFFF&"
+            pieces.append("{" + rf"\alpha&HFF&{color}\t({at},{at + 90},\alpha&H00&)" + "}" + literal_text(token))
+        per_line, lines, width = int(860 / (STORY_SIZE * 0.5)), [[]], 0
+        for token, piece in zip(tokens, pieces):
+            if lines[-1] and width + 1 + len(token) > per_line:
+                lines.append([])
+                width = 0
+            width += len(token) + (1 if lines[-1] else 0)
+            lines[-1].append(piece)
+        banner = r"{\fad(0,200)\fscx85\fscy85\t(0,260,\fscx100\fscy100)}" + r"\N".join(" ".join(l) for l in lines)
     from .captions import timestamp
     return ass_text + f"Dialogue: 1,{timestamp(0, True)},{timestamp(max(0.8, end), True)},Hook,,0,0,0,,{banner}\n"
 
@@ -415,6 +494,14 @@ def cut_command(source: Path, output: Path, plan: Plan) -> list:
     audio = _has_audio(source)
     parts, labels = [], ""
     for i, segment in enumerate(plan.segments):
+        if segment.role == "intro":
+            # A dimmed still of the build-up's first frame sits under the storytelling hook.
+            parts.append(f"[0:v]trim=start={segment.start:.3f}:end={segment.start + 0.2:.3f},setpts=PTS-STARTPTS,"
+                         f"fps={FPS},trim=end_frame=1,tpad=stop_mode=clone:stop_duration={segment.length:.3f},"
+                         f"trim=duration={segment.length:.3f},setpts=PTS-STARTPTS,eq=brightness=-0.08:saturation=0.7[v{i}]")
+            parts.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={segment.length:.3f}[a{i}]")
+            labels += f"[v{i}][a{i}]"
+            continue
         parts.append(f"[0:v]trim=start={segment.start:.3f}:end={segment.end:.3f},setpts=PTS-STARTPTS,fps={FPS}[v{i}]")
         if audio:
             parts.append(f"[0:a]atrim=start={segment.start:.3f}:end={segment.end:.3f},asetpts=PTS-STARTPTS,"
@@ -465,6 +552,9 @@ SFX = {
     "whoosh": "anoisesrc=d=0.5:c=pink:a=0.9,highpass=f=500,lowpass=f=5000,afade=t=in:d=0.3,afade=t=out:st=0.3:d=0.2,volume=0.55",
     "hit": "aevalsrc='0.9*sin(2*PI*(45+110*exp(-t*18))*t)*exp(-t*7)':d=0.7:s=48000,volume=0.9",
     "pop": "aevalsrc='0.6*sin(2*PI*(900-500*t)*t)*exp(-t*30)':d=0.18:s=48000,volume=0.6",
+    # Rising tone under a dramatic hook; a wobbly spring under a funny one.
+    "riser": "aevalsrc='0.3*sin(2*PI*(160+260*t*t)*t)*min(1,t*1.5)':d=1.3:s=48000,afade=t=out:st=1.15:d=0.15,volume=0.6",
+    "boing": "aevalsrc='0.55*sin(2*PI*(260+90*sin(2*PI*8*t))*t)*exp(-t*3.5)':d=0.9:s=48000,volume=0.7",
 }
 CHORDS = ((220.0, 261.63, 329.63), (174.61, 220.0, 261.63), (261.63, 329.63, 392.0), (196.0, 246.94, 293.66))
 
@@ -483,6 +573,12 @@ def mix_command(video: Path, output: Path, plan: Plan) -> list:
     duration = plan.duration
     parts = [f"[0:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={duration:.3f}[voice0]"]
     beds = ["[voicemix]"]
+    inputs = ["-i", str(video)]
+    if plan.voiceover:
+        inputs += ["-i", str(plan.voiceover)]
+        parts.append(f"[1:a]aresample=48000,aformat=channel_layouts=stereo,adelay=150|150,volume=1.3,"
+                     f"apad=whole_dur={duration:.3f}[vo]")
+        beds.append("[vo]")
     if plan.music:
         parts[0] += ";[voice0]asplit[voicemix][key]"
         parts.append(f"{music_source(duration)},aformat=channel_layouts=stereo[bed]")
@@ -498,7 +594,7 @@ def mix_command(video: Path, output: Path, plan: Plan) -> list:
     mix = "".join(beds) + (f"amix=inputs={len(beds)}:duration=first:dropout_transition=0,volume={len(beds)}"
                            if len(beds) > 1 else "anull")
     parts.append(f"{mix},loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11,aformat=sample_rates=48000:channel_layouts=stereo,atrim=duration={duration:.3f}[out]")
-    return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video), "-filter_complex", ";".join(parts),
+    return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *inputs, "-filter_complex", ";".join(parts),
             "-map", "0:v", "-map", "[out]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
             "-movflags", "+faststart", str(output)]
 

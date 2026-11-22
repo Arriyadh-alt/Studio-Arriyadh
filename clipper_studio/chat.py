@@ -13,6 +13,8 @@ from yt_dlp.utils import DownloadCancelled, DownloadError
 from shorts_clipper.youtube import blocking_message, cookie_options
 
 
+METADATA_KEYS = ("id", "title", "duration", "thumbnail", "channel", "uploader")
+
 MAX_REPLAY_SECONDS = 300
 MAX_REPLAY_BYTES = 128 * 1024 * 1024
 REPLAY_LIMIT_MESSAGE = "This chat replay exceeded Studio’s processing limit. Try a shorter or quieter livestream replay."
@@ -130,7 +132,7 @@ def fetch_chat(url: str, directory: Path, info=None):
         if not messages:
             raise ChatReplayError("This chat replay has no timestamped messages. Choose a stream with an active chat.")
         replay.replace(directory / replay.name)
-    return {key: info.get(key) for key in ("id", "title", "duration", "thumbnail")}, messages
+    return {key: info.get(key) for key in METADATA_KEYS}, messages
 
 
 def _video_error(message):
