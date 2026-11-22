@@ -31,10 +31,9 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
     filters = FILTERS[mode]
     if captions is not None:
         path = str(captions.resolve())
-        for char in ("\\", "'", ":", ",", "[", "]", ";", " "):
-            path = path.replace(char, "\\" + char)
-        # Escape once more for the filtergraph parser.
-        path = path.replace("\\", "\\\\").replace("'", "\\'")
+        # Escape the option value, then the enclosing filtergraph.
+        path = "".join("\\" + char if char in "\\': " else char for char in path)
+        path = "".join("\\" + char if char in "\\'[],; " else char for char in path)
         filters += f",ass=filename={path}"
     return [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",

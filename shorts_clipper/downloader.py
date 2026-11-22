@@ -12,10 +12,11 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
     Raises ValueError if the range starts past the end of the video.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    window = f"{float(start)!r}-{float(end)!r}"
     options = {
         "format": f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
         "merge_output_format": "mp4",
-        "outtmpl": str(output_dir / "%(id)s_%(section_start)d-%(section_end)d.%(ext)s"),
+        "outtmpl": str(output_dir / f"%(id)s_{window}.%(ext)s"),
         "download_ranges": download_range_func(None, [(start, end)]),
         "force_keyframes_at_cuts": True,
         "noplaylist": True,
