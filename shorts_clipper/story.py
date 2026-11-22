@@ -259,7 +259,14 @@ def story_arc(levels, words, duration, peak=None) -> dict:
     starts = [w.start for i, w in enumerate(words) if i == 0 or w.start - words[i - 1].end >= 0.45]
     window = [s for s in starts if event - 14 <= s <= event - 5]
     wanted = event - (10 if len([w for w in words if event - 12 <= w.start < event]) > 18 else 8)
-    start = min(window, key=lambda s: abs(s - wanted)) - 0.25 if window else wanted
+    if window:
+        start = min(window, key=lambda s: abs(s - wanted)) - 0.25
+    else:
+        start = wanted
+        inside = next((i for i, w in enumerate(words) if w.start < start < w.end), None)
+        if inside is not None:
+            before = words[inside - 1].end if inside else 0.0
+            start = max(before, words[inside].start - 0.25)
     start = max(0.0, start)
 
     mask = np.zeros(len(z), dtype=bool)
@@ -275,9 +282,10 @@ def story_arc(levels, words, duration, peak=None) -> dict:
         i += 1
     if end is None:
         end = limit * STEP
-        inside = next((w for w in words if w.start < end < w.end), None)
-        if inside:
-            end = inside.end + 0.25
+        inside = next((i for i, w in enumerate(words) if w.start < end < w.end), None)
+        if inside is not None:
+            after = words[inside + 1].start if inside + 1 < len(words) else duration
+            end = min(after, words[inside].end + 0.25)
     return {"start": round(start, 2), "event": round(event, 2), "end": round(min(duration, end), 2)}
 
 

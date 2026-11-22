@@ -99,6 +99,10 @@ def test_story_arc_builds_up_before_the_event_and_ends_after_the_reaction():
     # A long reaction keeps going until it settles instead of a fixed length.
     long = story_arc(levels(40, loud=[(20, 23)], quiet=[(33.5, 40)]), speech([(5, 33)]), 40, peak=21)
     assert long["end"] > 33
+    # Non-stop talking: both boundaries still fall between words.
+    words = speech([(0, 40)])
+    nonstop = story_arc(levels(40, loud=[(20, 23)]), words, 40, peak=21)
+    assert not any(w.start + 0.01 < t < w.end - 0.01 for w in words for t in (nonstop["start"], nonstop["end"]))
 
 
 def test_intro_length_fits_text_and_voice():
@@ -121,6 +125,7 @@ def test_plan_opens_with_story_intro_then_build_up_event_and_reaction():
     assert hook["text"] == hook["options"][0] and hook["build_up"] >= 5 and hook["payoff"] >= 3.5
     assert plan.map_time(hook["event"]) > intro.length
     assert [kind for _, kind in plan.sfx][:2] == ["hit", "boing"]
+    assert plan.score["hook"] == 80  # scored on the written hook, not the original opening
     shown = remap_captions(captions(words), plan)
     assert shown[0].start >= intro.length - 0.01  # no captions over the hook card
     custom = plan_edit(levels(40, loud=[(20, 23)]), captions(words), 40,
