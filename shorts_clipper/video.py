@@ -71,7 +71,7 @@ def detect_focal_x(source: Path, start: float, end: float) -> float:
         capture.release()
 
 
-def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None) -> list:
+def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None) -> list:
     if mode not in FILTERS:
         raise ValueError(f"Unknown mode {mode!r}; choose from {', '.join(FILTERS)}")
     if end <= start:
@@ -79,11 +79,16 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
     filters = FILTERS[mode]
     if mode == 'crop':
         focal_x = 0.5 if facecam is not None else detect_focal_x(source, start, end)
+        focal = f"({effects.focal})" if effects is not None and effects.focal and facecam is None else f"{focal_x:.6f}"
         filters = (
             f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={WIDTH}:{HEIGHT}:x='max(0,min(iw-ow,iw*{focal_x:.6f}-ow/2))':"
+            f"crop={WIDTH}:{HEIGHT}:x='max(0,min(iw-ow,iw*{focal}-ow/2))':"
             f"y=(ih-oh)/2,setsar=1"
         )
+    if effects is not None and effects.zoom:
+        # Zoom only the main picture so the facecam overlay stays put.
+        filters += (f",zoompan=z='{effects.zoom}':x='iw/2-(iw/zoom/2)+({effects.shake or 0})':"
+                    f"y='ih/2-(ih/zoom/2)':d=1:s={WIDTH}x{HEIGHT}:fps=30,setsar=1")
     if facecam is not None:
         box, rect = facecam.box, facecam.rect
         filters = (
@@ -95,6 +100,8 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
             f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3[cam];"
             f"[main][cam]overlay={rect.x}:{rect.y}"
         )
+    if effects is not None and effects.flash:
+        filters += f",eq=brightness='{effects.flash}':eval=frame"
     if captions is not None:
         path = str(captions.resolve())
         fonts = str(FONT_DIR.resolve())
@@ -115,11 +122,14 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
     ]
 
 
-def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None) -> Path:
+def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None) -> Path:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not found on PATH; install it first")
     output.parent.mkdir(parents=True, exist_ok=True)
-    command = build_ffmpeg_command(source, output, start, end, mode, captions) if facecam is None else build_ffmpeg_command(source, output, start, end, mode, captions, facecam)
+    if effects is not None:
+        command = build_ffmpeg_command(source, output, start, end, mode, captions, facecam, effects)
+    else:
+        command = build_ffmpeg_command(source, output, start, end, mode, captions) if facecam is None else build_ffmpeg_command(source, output, start, end, mode, captions, facecam)
     subprocess.run(command, check=True)
     return output
 

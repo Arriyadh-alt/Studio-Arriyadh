@@ -11,6 +11,7 @@
   <link rel="apple-touch-icon" href="./icon-192.png">
   <link rel="stylesheet" href="./style.css">
   <link rel="stylesheet" href="./facecam.css">
+  <link rel="stylesheet" href="./director.css">
   <script src="./captions.js" defer></script>
   <script src="./app.js" defer></script>
 </head>
@@ -30,9 +31,11 @@
           <label>Layout<select id="mode"><option value="crop">Center crop</option><option value="blur">Blurred background</option></select></label>
           <label class="check"><input id="captions" type="checkbox" checked> Burn in captions</label>
           <label class="check"><input id="facecam" type="checkbox" checked> Facecam overlay</label>
+          <label class="check"><input id="director" type="checkbox" checked> AI Director edits</label>
+          <label>Background music<select id="director-music"><option value="auto">Auto (quiet clips)</option><option value="on">Always</option><option value="off">Off</option></select></label>
         </div></details>
         <div id="create-caption-style"></div>
-        <p class="hint">✦ Chat-led detection <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
+        <p class="hint">✦ Chat-led detection <span>·</span> AI Director <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
       </form>
       <div class="section-heading"><div><span class="eyebrow">Your workspace</span><h2>Recent streams</h2></div><button id="refresh-jobs" class="quiet">Refresh ↻</button></div>
       <div id="jobs" class="jobs"></div>

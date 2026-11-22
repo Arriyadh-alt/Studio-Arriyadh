@@ -31,7 +31,9 @@ from starlette.background import BackgroundTask
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.video import make_vertical_clip, video_duration
+from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_title_ass,
+                                     loudness, mix_audio, plan_edit, plan_record, quality_check, remap_captions)
+from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
                                     layout_facecam, save_source_still)
 from shorts_clipper.youtube import YouTubeAccessError
@@ -72,6 +74,18 @@ class FacecamSpec(BaseModel):
     box: FacecamBox | None = None
 
 
+class DirectorSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    enabled: bool = True
+    hook: bool = True
+    edits: bool = True
+    sfx: bool = True
+    music: Literal["auto", "on", "off"] = "auto"
+
+
+LEGACY_DIRECTOR = {**DirectorSpec().model_dump(), "enabled": False}
+
+
 class JobRequest(BaseModel):
     url: str
     clips: int = Field(default=8, ge=1, le=50)
@@ -81,6 +95,7 @@ class JobRequest(BaseModel):
     facecam: FacecamSpec = Field(default_factory=FacecamSpec)
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
+    director: DirectorSpec = Field(default_factory=DirectorSpec)
 
     @field_validator("url")
     @classmethod
@@ -116,6 +131,7 @@ class RenderRequest(BaseModel):
     facecam: FacecamSpec = Field(default_factory=FacecamSpec)
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
+    director: DirectorSpec = Field(default_factory=DirectorSpec)
 
 
 class KeepRequest(BaseModel):
@@ -153,8 +169,10 @@ class Store:
             try:
                 job = json.loads((self.root / jid / "job.json").read_text())
                 job.setdefault("request", {}).setdefault("facecam", FacecamSpec().model_dump())
+                job["request"].setdefault("director", dict(LEGACY_DIRECTOR))
                 for clip in job.get("clips", []):
                     clip.setdefault("facecam", FacecamSpec().model_dump())
+                    clip.setdefault("director", dict(LEGACY_DIRECTOR))
                 return job
             except FileNotFoundError:
                 raise HTTPException(404, "Job not found") from None
@@ -225,12 +243,34 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 duration = min(video_duration(source), spec["end"] - spec["start"])
                 subtitles, captions = None, []
                 caption_language = None
+                director = DirectorOptions.from_dict(spec.get("director") or LEGACY_DIRECTOR)
+                style = CaptionStyle.from_dict(spec.get("caption_style"))
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
-                    subtitles = work / "captions.ass"
                     captions = transcribe(source, language=spec.get("language"), clip_end=duration)
                     caption_language = getattr(captions, "language", None)
-                    subtitles.write_text(to_ass(captions, CaptionStyle.from_dict(spec.get("caption_style"))), encoding="utf-8")
+                elif director.enabled:
+                    update(jid, generation, stage=f"{clip_label} · Transcribing")
+                    try:
+                        captions = transcribe(source, language=spec.get("language"), clip_end=duration)
+                    except Exception:
+                        captions = []
+                        logger.debug("Transcription for AI Director unavailable", exc_info=True)
+                plan, directed, director_result = None, None, {"status": "disabled"}
+                peak = thumbnail_peak(spec, duration)
+                hook = thumbnail_hook(job, spec, peak, captions)
+                if director.enabled:
+                    update(jid, generation, stage=f"{clip_label} · AI Director planning edits")
+                    try:
+                        plan = plan_edit(loudness(source, duration), captions, duration, director, peak,
+                                         spec.get("score"), spec.get("thumbnail_text") or hook)
+                        directed = cut_source(source, work / "directed.mp4", plan)
+                    except Exception:
+                        plan, directed = None, None
+                        director_result = {"status": "unavailable"}
+                        logger.warning("AI Director unavailable for %s/%s; rendering unedited", jid, cid, exc_info=True)
+                render_source = directed or source
+                render_duration = plan.duration if plan else duration
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
                 overlay = None
@@ -243,13 +283,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 try:
                     options = FacecamSpec.model_validate(spec.get("facecam", {}))
                     if options.enabled:
-                        box = SourceBox(**options.box.model_dump()) if options.box else detect_facecam(source, 0, duration)
+                        box = SourceBox(**options.box.model_dump()) if options.box else detect_facecam(render_source, 0, render_duration)
                         result = {"status": "not_found", "box": None}
                         if box is not None:
                             if options.position == "auto":
-                                overlay = auto_layout_facecam(source, 0, duration, box, spec["mode"], options.size)
+                                overlay = auto_layout_facecam(render_source, 0, render_duration, box, spec["mode"], options.size)
                             else:
-                                capture = cv2.VideoCapture(str(source))
+                                capture = cv2.VideoCapture(str(render_source))
                                 try:
                                     size = (int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
                                 finally:
@@ -263,18 +303,44 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     overlay = None
                     result = {"status": "unavailable", "box": None}
                     logger.debug("Facecam unavailable; rendering without overlay", exc_info=True)
+                shown, fixes = captions, []
+                if plan:
+                    shown = remap_captions(captions, plan) if spec["captions"] else []
+                    if spec["captions"]:
+                        style, note = framing_fix(style, overlay.rect if overlay else None)
+                        fixes.append(note)
+                    if spec["mode"] == "crop" and overlay is None:
+                        plan.focal = [detect_focal_x(render_source, offset, offset + segment.length)
+                                      for offset, segment in zip(plan.offsets(), plan.segments)]
+                ass = to_ass(shown, style) if spec["captions"] else None
+                if plan and plan.hook and plan.hook.get("text"):
+                    ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + 0.7, style.position)
+                if ass is not None:
+                    subtitles = work / "captions.ass"
+                    subtitles.write_text(ass, encoding="utf-8")
+                effects = {"effects": effects_for(plan)} if plan else {}
                 if overlay is None:
-                    make_vertical_clip(source, video, 0, duration, spec["mode"], subtitles)
+                    make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles, **effects)
                 else:
                     try:
-                        make_vertical_clip(source, video, 0, duration, spec["mode"], subtitles, facecam=overlay)
+                        make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles, facecam=overlay, **effects)
                     except Exception:
                         result = {"status": "unavailable", "box": None}
-                        make_vertical_clip(source, video, 0, duration, spec["mode"], subtitles)
+                        make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles, **effects)
+                if plan:
+                    update(jid, generation, stage=f"{clip_label} · AI Director mixing audio")
+                    mixed = work / "mixed.mp4"
+                    try:
+                        mix_audio(video, mixed, plan)
+                        mixed.replace(video)
+                    except Exception:
+                        fixes.append("Sound effects and music skipped (audio mix failed)")
+                        logger.warning("AI Director audio mix failed for %s/%s", jid, cid, exc_info=True)
+                    update(jid, generation, stage=f"{clip_label} · AI Director quality check")
+                    director_result = plan_record(plan, director, quality_check(video, plan, shown, fixes))
+                    peak = plan.map_time(peak) if peak is not None else None
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
                 thumbnail = work / "thumbnail.jpg"
-                peak = thumbnail_peak(spec, duration)
-                hook = thumbnail_hook(job, spec, peak, captions)
                 try:
                     generate_thumbnail(video, thumbnail, spec.get("thumbnail_text") or hook, peak)
                 except (ImageProcessingError, OSError, ValueError):
@@ -293,6 +359,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     else:
                         clip.pop("source_still_url", None)
                     clip["facecam_result"] = result
+                    clip["director_result"] = director_result
                     revision = str(time.time_ns())
                     clip.update(status="ready", rendered_at=int(revision), file_url=base + "/video",
                                 download_url=base + "/download", thumbnail_url=base + "/thumbnail",
@@ -404,6 +471,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                           mode=job["request"]["mode"], captions=job["request"]["captions"],
                           facecam=job["request"].get("facecam", FacecamSpec().model_dump()),
                           language=job["request"].get("language", "auto"), caption_style=job["request"].get("caption_style"),
+                          director=job["request"].get("director", dict(LEGACY_DIRECTOR)),
                           file_url=None, download_url=None, thumbnail_url=None)
                      for number, spike in enumerate(sorted(spikes, key=lambda s: s["start"]), 1)]
             with store.lock:
@@ -568,7 +636,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if clip["status"] == "ready":
                 clip["previous_render"] = {key: clip[key] for key in (
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
-                    "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url") if key in clip}
+                    "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url", "director",
+                    "director_result") if key in clip}
                 clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language")})
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)

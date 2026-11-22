@@ -169,6 +169,37 @@ near the chat peak. It styles the selected still with a short hook from nearby
 captions, chat reactions, or the stream title. The clip card previews the JPG
 and lets you download it or change its text; custom text is kept on re-render.
 
+### AI Director
+
+Jobs and re-renders accept `director` (`{"enabled": true, "hook": true, "edits": true,
+"sfx": true, "music": "auto"|"on"|"off"}`; new jobs default to enabled, clips from
+older jobs stay off until re-rendered with it). Before the final MP4 it plans the edit
+locally from Whisper word timings, audio loudness and the chat peak, with no external
+model or network call:
+
+- **Hook**: copies the strongest 1.5–3 s moment (loud reaction, excited words, near the
+  chat peak) to the front, with a punch-in zoom, the thumbnail hook text as a title,
+  a whoosh and a flash transition into the clip.
+- **Smart editing**: trims quiet lead-in, jump-cuts dead air over 0.8 s (never around
+  the peak), alternates punch-ins on cuts, adds a reaction zoom with a short shake and
+  hit at the peak, and up to four pop zooms on excited words or loudness spikes.
+- **Reframing**: in center crop without a facecam overlay, each shot gets its own focal
+  point with a short pan between shots. Zooms only apply to the main picture, so the
+  facecam overlay stays fixed.
+- **Sound**: synthesized whoosh/hit/pop effects; a soft music bed (`auto` adds it only
+  to quiet clips with little speech) ducked under the voice with a sidechain
+  compressor; the mix is normalized to −14 LUFS, −1.5 dBTP.
+- **Viral score and quality check**: `director_result` has a 0–100 `score` (hook,
+  pacing, emotion, dialogue, chat), `edits` counts, `suggestions`, and `quality`
+  checks (format 1080×1920 H.264/AAC ≤ 60 s, loudness, caption overlaps/flashes after
+  remapping to the edit, framing, black frames and very short shots). Captions are moved
+  to the middle when they would cover the facecam.
+
+If any director step fails the clip still renders unedited (`director_result.status`
+`"unavailable"`); a failed audio mix keeps the edited video with its original audio.
+Edited clips can be up to 60 s including the hook. The clip card shows the score,
+edits and checks, and per-clip toggles that apply on Re-render.
+
 Validation errors: 422; missing job/clip: 404; unavailable file or attempting
 edits while that clip is queued/rendering or deletion while it is rendering: 409.
 Ready clips can be re-rendered while Autopilot runs; queued clips may be deleted
