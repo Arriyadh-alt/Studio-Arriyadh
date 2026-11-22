@@ -29,6 +29,7 @@ from starlette.background import BackgroundTask
 from shorts_clipper.captions import to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.video import make_vertical_clip, video_duration
+from shorts_clipper.youtube import YouTubeAccessError
 
 from .chat import ChatReplayError, fetch_chat
 from .spikes import detect_spikes
@@ -191,6 +192,8 @@ def create_app(data_dir=None):
             try:
                 render_attempt(jid, cid)
                 return
+            except YouTubeAccessError:
+                raise
             except Exception as error:
                 with store.lock:
                     job = store.get(jid)
@@ -253,7 +256,7 @@ def create_app(data_dir=None):
                 finish(jid)
                 update(jid, elapsed_seconds=round(time.monotonic() - started, 2))
             except Exception as error:
-                if isinstance(error, ChatReplayError):
+                if isinstance(error, (ChatReplayError, YouTubeAccessError)):
                     message = str(error)
                 else:
                     logger.exception("Job %s failed unexpectedly", jid)

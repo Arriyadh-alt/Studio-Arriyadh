@@ -25,6 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="crop: fill the frame from the centre (default); blur: fit the frame over a blurred background")
     parser.add_argument("--keep-download", type=Path, metavar="DIR",
                         help="keep the downloaded section in DIR instead of a temp folder")
+    parser.add_argument("--cookies", type=Path, metavar="FILE",
+                        help="Netscape cookies.txt (overrides CLIPPER_YTDLP_COOKIES; source is never rewritten)")
     parser.add_argument("--no-captions", action="store_true", help="disable local transcription and captions")
     parser.add_argument("--model", default="base", help="faster-whisper model name or local model directory (default: base)")
     parser.add_argument("--language", default=None, help="speech language code, e.g. en (default: auto-detect)")
@@ -49,7 +51,8 @@ def main(argv=None) -> int:
                                 "-t", str(end - start), "-c:v", "libx264", "-c:a", "aac", str(section)], check=True)
             else:
                 print(f"Downloading {format_timestamp(start)} -> {format_timestamp(end)} of {args.url} ...", flush=True)
-                section = download_section(args.url, args.keep_download or Path(tmp), start, end)
+                section = download_section(args.url, args.keep_download or Path(tmp), start, end,
+                                           cookies=args.cookies)
 
             subtitles = None
             if not args.no_captions:

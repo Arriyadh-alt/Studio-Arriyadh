@@ -35,6 +35,29 @@ all jobs and clip renders. Interrupted jobs are marked failed at startup; clips
 can be re-rendered or the URL resubmitted. This is a local backend, with no
 authentication: do not expose it publicly without access controls and quotas.
 
+## Optional YouTube authentication
+
+Set **`CLIPPER_YTDLP_COOKIES`** to the path of a Netscape cookies.txt export, or,
+when that path is unset, inject **`YOUTUBE_COOKIES`** containing its full text.
+Export from your own authorized session following
+[yt-dlp's instructions](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies);
+a spare account is recommended. Keep exports outside the repo and never log or
+commit them. See [README.md](README.md#optional-youtube-cookies) for setup/security.
+
+All yt-dlp metadata/chat/section requests use these settings. A configured path
+is copied before use, allowing read-only mounts. Text secrets are written under
+`CLIPPER_DATA_DIR` (default `~/clipper-data`). Each invocation has a private 0700
+temporary directory and writable 0600 cookie file, cleaned up after yt-dlp closes;
+the original secret is not modified. Without either setting, cookie behavior is
+unchanged. The CLI's `--cookies FILE` overrides both environment settings.
+
+Bot-check/sign-in/HTTP 429 failures produce the friendly job error
+`YouTube is blocking this server — add or refresh YouTube cookies (see README)`,
+distinguishing missing cookies from configured cookies that may be rejected or
+expired. A section download blocked this way fails the job rather than repeatedly
+retrying every highlight. Cookies do not guarantee access; respect rate limits
+and use only media you are authorized to access.
+
 ## API
 
 - `POST /api/jobs` → 202 `{id}`. Body:
