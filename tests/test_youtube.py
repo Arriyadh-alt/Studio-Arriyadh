@@ -105,8 +105,8 @@ def test_malformed_cookie_lines_are_dropped_without_logging_secrets(
         ".youtube.com\tTRUE\t/\tTRUE\t0\tmissing-field-secret\n",
         ".youtube.com\tTRUE\t/\tTRUE\t0\tname\textra-field-secret\textra\n",
         ".youtube.com\tTRUE\t/\tTRUE\tinvalid\tname\tinvalid-expiry-secret\n",
-        ".youtube.com\tTRUE\t/\tTRUE\t\tname\tempty-expiry-secret\n",
-        ".youtube.com\tTRUE\t/\tTRUE\t1.5\tname\tfractional-expiry-secret\n",
+        ".youtube.com\tTRUE\t/\tTRUE\t.5\tname\tmissing-integer-expiry-secret\n",
+        ".youtube.com\tTRUE\t/\tTRUE\t1.\tname\tmissing-fraction-expiry-secret\n",
         ".youtube.com\tTRUE\t/\tTRUE\t-1\tname\tnegative-expiry-secret\n",
         "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\tinvalid\tname\thttp-only-secret\n",
     ]
@@ -130,6 +130,24 @@ def test_malformed_cookie_lines_are_dropped_without_logging_secrets(
     assert all(line.strip() not in caplog.text for line in malformed)
     assert source.read_text() == contents
     assert not private.exists()
+
+
+@pytest.mark.parametrize("expiry", ["", "0", "1700000000", "1700000000.5"])
+@pytest.mark.parametrize("prefix", ["", "#HttpOnly_"])
+def test_yt_dlp_accepted_expiries_are_preserved(monkeypatch, capfd, caplog, expiry, prefix):
+    contents = ("# Netscape HTTP Cookie File\n" +
+                f"{prefix}.youtube.com\tTRUE\t/\tTRUE\t{expiry}\taccepted\tfake-value\n")
+    monkeypatch.setenv("YOUTUBE_COOKIES", contents)
+    with cookie_options() as options:
+        assert Path(options["cookiefile"]).read_text() == contents
+        jar = YoutubeDLCookieJar(options["cookiefile"])
+        jar.load()
+        cookies = list(jar)
+        assert len(cookies) == 1
+        assert cookies[0].name == "accepted"
+        assert cookies[0].expires == (int(float(expiry)) if expiry and float(expiry) else None)
+    captured = capfd.readouterr()
+    assert captured.out == captured.err == caplog.text == ""
 
 
 def test_missing_cookie_source_fails_clearly_without_falling_back(monkeypatch, tmp_path):

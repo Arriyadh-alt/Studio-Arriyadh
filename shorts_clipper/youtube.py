@@ -14,11 +14,12 @@ class YouTubeAccessError(RuntimeError):
 def _sanitize_cookies(contents):
     kept = []
     for line in contents.splitlines(keepends=True):
-        if not line.strip() or (line.startswith("#") and not line.startswith("#HttpOnly_")):
+        entry = line.removeprefix("#HttpOnly_")
+        if not entry.strip() or entry.startswith("#"):
             kept.append(line)
             continue
-        fields = line.split("\t")
-        if len(fields) == 7 and re.fullmatch(r"[0-9]+", fields[4]):
+        fields = entry.split("\t")
+        if len(fields) == 7 and (not fields[4] or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", fields[4])):
             kept.append(line)
     return "".join(kept)
 
