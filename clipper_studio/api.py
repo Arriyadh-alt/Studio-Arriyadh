@@ -296,7 +296,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     try:
                         plan = plan_edit(loudness(source, duration), captions, duration, director, peak,
                                          spec.get("score"), spec.get("thumbnail_text") or hook,
-                                         story_context(job, spec, caption_language, work))
+                                         story_context(job, spec, caption_language or getattr(captions, "language", None), work))
                         directed = cut_source(source, work / "directed.mp4", plan)
                     except Exception:
                         plan, directed = None, None
