@@ -163,14 +163,22 @@ def key_phrase(words, category, event) -> str | None:
     """The streamer's own words that mark the moment ("thank you", "no way"), to anchor the hook in this clip."""
     pattern = PATTERNS.get(category)
     near = [w for w in words if event - 3 <= w.start <= event + 4]
-    for i, w in enumerate(near):
-        if pattern and pattern.search(w.word):
-            picked = [w.word]
-            if i + 1 < len(near) and near[i + 1].start - w.end < 0.4 and not re.search(r"[.!?,]$", w.word):
-                picked.append(near[i + 1].word)
-            phrase = re.sub(r"[^\w' ]", "", " ".join(picked)).strip()
-            if 2 <= len(phrase) <= 16:
-                return phrase.title().replace("'S", "'s").replace("'T", "'t")
+    if not pattern or not near:
+        return None
+    spans, text = [], ""
+    for w in near:
+        token = w.word.strip()
+        spans.append((len(text), len(text) + len(token)))
+        text += token + " "
+    for match in pattern.finditer(text):
+        hit = [i for i, (a, b) in enumerate(spans) if a < match.end() and b > match.start()]
+        first, last = hit[0], hit[-1]
+        if (first == last and last + 1 < len(near) and near[last + 1].start - near[last].end < 0.4
+                and not re.search(r"[.!?,]$", near[last].word.strip())):
+            last += 1
+        phrase = re.sub(r"[^\w' ]", "", " ".join(w.word.strip() for w in near[first:last + 1])).strip()
+        if 2 <= len(phrase) <= 16:
+            return phrase.title().replace("'S", "'s").replace("'T", "'t")
     return None
 
 

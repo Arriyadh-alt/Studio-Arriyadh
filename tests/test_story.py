@@ -229,3 +229,9 @@ def test_parallel_renders_download_each_voice_model_once(monkeypatch, tmp_path):
     for thread in threads:
         thread.join()
     assert not errors and len(calls) == 2 and all(r.is_file() for r in results)
+
+
+def test_multiword_cues_are_quoted():
+    from shorts_clipper.story import key_phrase
+    words = [word(17.0, " wait"), word(17.8, " no", 0.2), word(18.05, " way!", 0.3)]
+    assert key_phrase(words, "shock", 18.0) == "No Way"
