@@ -1,7 +1,7 @@
 import pytest
 
 from clipper_studio.chat import Message
-from clipper_studio.spikes import detect_spikes, reaction
+from clipper_studio.spikes import detect_spikes, reaction, reaction_category
 
 
 def stream():
@@ -102,3 +102,46 @@ def test_samples_are_reaction_first_and_deduplicated():
     picks, _ = detect_spikes(messages, 600)
     assert picks[0]['message_sample'][:3] == ['OMG', 'LOL', 'WHAT!!!']
     assert picks[0]['message_sample'].count('OMG') == 1
+
+
+def test_reaction_categories_ignore_unrelated_emoji_and_caps():
+    assert reaction_category(':face_with_tears_of_joy:') == 'laughter'
+    assert reaction_category(':rolling_on_the_floor_laughing:') == 'laughter'
+    assert reaction_category(':skull:') == 'shock'
+    assert reaction_category('WHAT???') == 'shock'
+    assert reaction_category('LETSGO 🔥 GG') == 'hype'
+    assert reaction_category('W') == 'weak_hype'
+    assert reaction_category('L') == 'weak_hype'
+    assert reaction_category('WWW!!!') == 'weak_hype'
+    assert all(not reaction(t) for t in (':potato:', ':new_moon:', 'GOT IT', 'I AM HERE', 'P', 'E', 'D'))
+
+
+def test_reaction_spike_with_capped_total_volume():
+    messages = []
+    for t in range(0, 600, 5):
+        laughing = 35 if t in (295, 300, 305) else 5
+        messages += [Message(t, str(i), 'LOL' if i < laughing else 'ordinary message') for i in range(100)]
+    picks, series = detect_spikes(messages, 600)
+    assert len(picks) == 1
+    assert 295 <= picks[0]['peak'] <= 305
+    assert picks[0]['onset'] == 295
+    assert all(point['count'] == 100 for point in series)
+
+
+def test_laughter_outscores_weak_hype():
+    messages = [Message(t, str(i), text) for t, text in ((200, 'W'), (400, 'LOL')) for i in range(30)]
+    _, series = detect_spikes(messages, 600)
+    assert series[80]['score'] > series[40]['score']
+
+
+def test_farewell_and_giveaway_context_suppresses_reaction_flood():
+    for context in ('bye everyone', 'I GOT IT giveaway'):
+        messages = [Message(300, str(i), 'NOOOO') for i in range(30)]
+        messages += [Message(310, f'context{i}', context) for i in range(30)]
+        assert detect_spikes(messages, 600)[0] == []
+
+
+def test_sparse_reactions_can_clear_threshold_without_volume_flood():
+    messages = [Message(t, str(i), 'LOL') for t in (200, 400) for i in range(5)]
+    picks, _ = detect_spikes(messages, 600)
+    assert [p['peak'] for p in picks] == [200, 400]
