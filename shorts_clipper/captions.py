@@ -32,6 +32,8 @@ def text_width(text: str) -> float:
 
 
 def join_tokens(tokens) -> str:
+    tokens = list(tokens)
+    has_whitespace = any(token and token[0].isspace() for token in tokens)
     text = ''
     hyphen_continuation = False
     for token in tokens:
@@ -40,8 +42,8 @@ def join_tokens(tokens) -> str:
             continue
         leading_space = token[0].isspace()
         continuation = (not leading_space and stripped[0] in "-’'"
-                        and not re.match(r"[-’']\d", stripped)
-                        and text and text[-1].isalpha())
+                        and (has_whitespace or not re.match(r"[-’']\d", stripped))
+                        and text)
         punctuation = stripped[0] in ',.;:!?%'
         separator = '' if not text or continuation or punctuation or (hyphen_continuation and not leading_space) else ' '
         text += separator + stripped

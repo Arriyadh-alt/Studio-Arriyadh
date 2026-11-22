@@ -78,6 +78,10 @@ def test_orphan_does_not_merge_across_pause_or_punctuation():
     ([' as', ' a', ' drop', '-in'], 'as a drop-in'),
     (['drop', '-', 'in', ','], 'drop-in,'),
     (['That', "'s", ' great', '!'], "That's great!"),
+    (['24', '-hour'], '24-hour'),
+    ([' 24', '-hour'], '24-hour'),
+    ([' 24', ' -hour'], '24 -hour'),
+    ([' route', '-5'], 'route-5'),
 ])
 def test_token_joining(tokens, expected):
     assert join_tokens(tokens) == expected
