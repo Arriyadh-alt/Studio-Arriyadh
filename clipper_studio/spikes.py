@@ -38,11 +38,14 @@ def normalized_message(text):
 
 
 def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_seconds=180,
-                  min_gap=60, tail=20):
+                  min_gap=60, tail=20, *, chat_delay=12):
+    """Estimate moments using a nonnegative chat lag prior, bounded by the clip budget."""
     if not math.isfinite(duration) or duration <= 0 or not 15 <= lead <= 20 or not 1 <= clips <= 50:
         raise ValueError("Positive duration, 1-50 clips and lead within 15-20 seconds are required")
     if bin_seconds <= 0 or baseline_seconds < bin_seconds or min_gap < 0 or tail < 0:
         raise ValueError("Invalid detector configuration")
+    if not math.isfinite(chat_delay) or chat_delay < 0:
+        raise ValueError("Chat delay must be finite and nonnegative")
     bins = [[] for _ in range(math.ceil(duration / bin_seconds))]
     for message in messages:
         if 0 <= message.offset_seconds < duration:
@@ -155,16 +158,35 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         giveaways = {m.author.strip().casefold() for m in context if re.search(r"\b(?:got it|giveaway|free nitro|discord nitro|redeem)\b", m.text, re.I)}
         if len(farewells) >= max(3, .1 * len(context_authors)) or len(giveaways) >= max(3, .2 * len(context_authors)):
             continue
+        outros = {m.author.strip().casefold() for m in context if re.search(
+            r"\b(?:bye+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
+            r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
+            r"(?:(?:great|awesome|fun) )?(?:stream|live(?:stream)?))\b", m.text, re.I)}
+        if point['time'] >= .85 * duration and len(outros) >= max(2, .1 * len(context_authors)):
+            continue
         onset = i
-        while onset > 0 and (i - onset + 1) * bin_seconds <= 30:
-            previous = onset - 1
-            above_reaction_baseline = signal[previous] > series[previous]['baseline']
-            above_volume_baseline = volume_led and totals[previous] > volume_stats[previous][0]
-            if not (above_reaction_baseline or above_volume_baseline):
+        gap = 0
+        gap_limit = 15 if minimum_reactors == 2 else 5
+        support_radius = max(radius, math.ceil((gap_limit + bin_seconds) / bin_seconds)) if minimum_reactors == 2 else radius
+        for previous in range(i - 1, max(-1, i - math.floor(45 / bin_seconds) - 1), -1):
+            support = range(max(0, previous - support_radius), min(len(bins), previous + support_radius + 1))
+            reaction_authors = set().union(*(reactors[j] for j in support))
+            volume_authors = set().union(*(active_authors[j] for j in support))
+            above_reaction_baseline = (signal[previous] > series[previous]['baseline'] and
+                                       len(reaction_authors) >= minimum_reactors)
+            above_volume_baseline = (volume_led and totals[previous] > volume_stats[previous][0] and
+                                     len(volume_authors) >= minimum_reactors)
+            if above_reaction_baseline or above_volume_baseline:
+                onset = previous
+                gap = 0
+            else:
+                gap += bin_seconds
+            if gap > gap_limit:
                 break
-            onset = previous
-        start = max(0, series[onset]['time'] - lead)
-        end = min(duration, start + 60, max(start + 30, point['time'] + tail))
+        peak_room = min(5, max(1, tail))
+        moment = max(0, series[onset]['time'] - chat_delay, point['time'] + lead + peak_room - 60)
+        start = max(0, moment - lead)
+        end = min(duration, start + 60, max(start + 30, point['time'] + max(1, tail)))
         if end - start < min(30, duration) or point['time'] >= end:
             continue
         samples = []
@@ -173,7 +195,7 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
                 samples.append(message.text)
             if len(samples) == 5:
                 break
-        candidates.append({"onset": series[onset]['time'], "peak": point['time'],
+        candidates.append({"onset": moment, "peak": point['time'],
                            "score": point['score'], "start": start, "end": end,
                            "message_sample": samples})
     chosen = []
