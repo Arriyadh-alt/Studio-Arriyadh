@@ -63,7 +63,34 @@ def parse_chat(lines):
     return sorted(messages, key=lambda message: message.offset_seconds)
 
 
-def fetch_chat(url: str, directory: Path):
+def validate_metadata(info):
+    status = info.get("live_status")
+    if status == "not_live" or (status is None and not info.get("was_live") and not info.get("is_live")):
+        raise ChatReplayError("This is a regular YouTube video, with no live-chat replay. Paste a finished livestream link with chat replay.")
+    if status in ("is_live", "is_upcoming", "post_live") or info.get("is_live"):
+        raise ChatReplayError("This livestream replay isn’t ready yet. Try again after the stream ends and chat replay is available.")
+    if not info.get("subtitles", {}).get("live_chat"):
+        raise ChatReplayError("This livestream has no live-chat replay. Choose a finished stream with chat replay enabled.")
+    duration = info.get("duration")
+    if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
+        raise ChatReplayError("YouTube hasn’t published the replay duration yet. Try again later.")
+
+
+def fetch_metadata(url: str):
+    with yt_dlp.YoutubeDL({"skip_download": True, "writesubtitles": False, "noplaylist": True,
+                          "quiet": True, "noprogress": True, "socket_timeout": 10,
+                          "retries": 1, "extractor_retries": 1}) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+        except DownloadError as error:
+            raise ChatReplayError(_video_error(str(error))) from error
+    validate_metadata(info)
+    return info
+
+
+def fetch_chat(url: str, directory: Path, info=None):
+    info = info if info is not None else fetch_metadata(url)
+    validate_metadata(info)
     directory.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=directory, prefix="fetch-") as temporary:
         work = Path(temporary)
@@ -79,20 +106,6 @@ def fetch_chat(url: str, directory: Path):
                    "quiet": True, "noprogress": True, "retries": 2, "fragment_retries": 2,
                    "socket_timeout": 20, "progress_hooks": [check_replay_limit]}
         with yt_dlp.YoutubeDL(options) as ydl:
-            try:
-                info = ydl.extract_info(url, download=False)
-            except DownloadError as error:
-                raise ChatReplayError(_video_error(str(error))) from error
-            status = info.get("live_status")
-            if status == "not_live":
-                raise ChatReplayError("This is a regular YouTube video. Paste a finished livestream link with chat replay.")
-            if status in ("is_live", "is_upcoming", "post_live") or info.get("is_live"):
-                raise ChatReplayError("This livestream replay isn’t ready yet. Try again after the stream ends and chat replay is available.")
-            if not info.get("subtitles", {}).get("live_chat"):
-                raise ChatReplayError("This livestream has no live-chat replay. Choose a finished stream with chat replay enabled.")
-            duration = info.get("duration")
-            if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
-                raise ChatReplayError("YouTube hasn’t published the replay duration yet. Try again later.")
             download_start = time.monotonic()
             try:
                 ydl.process_ie_result(info, download=True)
