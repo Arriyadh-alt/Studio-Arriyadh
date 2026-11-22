@@ -177,12 +177,17 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         if point['time'] >= duration - min(300, .15 * duration):
             reaction_context = [m for j in range(max(0, i - radius), min(len(bins), math.ceil(end / bin_seconds)))
                                 for m in bins[j] if start <= m.offset_seconds < end]
-            reaction_authors = {m.author.strip().casefold() for m in reaction_context}
-            outros = {m.author.strip().casefold() for m in reaction_context if re.search(
-                r"\b(?:by+e+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
-                r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
-                r"(?:(?:great|awesome|fun|dual) )?(?:stream|live(?:stream)?))\b", m.text, re.I)}
-            if len(outros) >= 2 and len(outros) > .25 * len(reaction_authors):
+            leading_context = [m for j in range(int(start // bin_seconds), i + 1)
+                               for m in bins[j] if start <= m.offset_seconds < end]
+            outro_dominated = False
+            for neighborhood in (reaction_context, leading_context):
+                neighborhood_authors = {m.author.strip().casefold() for m in neighborhood}
+                outros = {m.author.strip().casefold() for m in neighborhood if re.search(
+                    r"\b(?:by+e+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
+                    r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
+                    r"(?:(?:great|awesome|fun|dual) )?(?:stream|live(?:stream)?))\b", m.text, re.I)}
+                outro_dominated |= len(outros) >= 2 and len(outros) > .25 * len(neighborhood_authors)
+            if outro_dominated:
                 continue
         samples = []
         for message, _ in sorted(zip(bins[i], message_weights[i]), key=lambda item: -item[1]):

@@ -380,11 +380,25 @@ def test_outro_filter_ignores_majority_farewells_beyond_clip_end():
     assert picks[0]['end'] < 575
 
 
-def test_outro_filter_does_not_use_earlier_unrelated_context():
-    messages = [Message(525, f'outro{i}', 'thanks for the stream') for i in range(4)]
+def test_outro_filter_does_not_use_earlier_context_before_clip():
+    messages = [Message(508, f'outro{i}', 'thanks for the stream') for i in range(4)]
     messages += [Message(550, str(i), 'LOL') for i in range(6)]
     picks, _ = detect_spikes(messages, 600)
     assert picks[0]['peak'] == 550
+    assert picks[0]['start'] > 508
+
+
+@pytest.mark.parametrize('text', ['gg everyone', 'thanks for the stream'])
+@pytest.mark.parametrize('outro_authors', [1, 2, 3])
+def test_building_outro_wave_uses_independent_leading_span(text, outro_authors):
+    messages = [Message(3470 + i * 5, f'outro{i}', text) for i in range(outro_authors)]
+    messages += [Message(3500.5, str(i), 'LOL') for i in range(6)]
+    picks, _ = detect_spikes(messages, 3600)
+    if outro_authors == 3:
+        assert picks == []
+    else:
+        assert len(picks) == 1
+        assert picks[0]['peak'] == 3500
 
 
 def test_outro_context_requires_independent_authors():
