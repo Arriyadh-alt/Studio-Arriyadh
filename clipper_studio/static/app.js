@@ -8,6 +8,8 @@ const drafts = new Map();
 const keeping = new Map();
 let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
+const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
+const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}`;
 
 function timestamp(value) {
   const total = Math.max(0, Math.round(value));
@@ -32,7 +34,7 @@ async function api(url, method = 'GET', data) {
   }
   return body;
 }
-function badge(status) { return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status.replaceAll('_', ' '))}</span>`; }
+function badge(status, position) { return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status==='queued' ? queueLabel(position) : status.replaceAll('_', ' '))}</span>`; }
 function safeImage(url) {
   try { const parsed = new URL(url); return parsed.protocol === 'https:' ? escapeHtml(parsed.href) : ''; } catch { return ''; }
 }
@@ -44,7 +46,7 @@ async function loadHome() {
   jobs.sort((a,b) => (b.created_at || '').localeCompare(a.created_at || ''));
   $('#jobs').innerHTML = jobs.length ? jobs.map(job => `<a href="#jobs/${job.id}" class="job-card">
     ${safeImage(job.metadata?.thumbnail) ? `<img src="${safeImage(job.metadata.thumbnail)}" alt="" loading="lazy">` : ''}
-    <div class="body">${badge(job.status)}<h3>${escapeHtml(job.metadata?.title || 'Preparing your stream…')}</h3><div class="card-meta"><span>${date(job)}</span><span>${job.clips.length} clips ↗</span></div></div></a>`).join('') : '<p class="empty">Your next great moment starts here. Paste a stream above.</p>';
+    <div class="body">${badge(job.status, job.queue_position)}<h3>${escapeHtml(job.metadata?.title || 'Preparing your stream…')}</h3><div class="card-meta"><span>${date(job)}</span><span>${job.clips.length} clips ↗</span></div></div></a>`).join('') : '<p class="empty">Your next great moment starts here. Paste a stream above.</p>';
 }
 function chart(job) {
   const key = JSON.stringify([job.id,job.activity,job.clips.map((c,i)=>[c.id,c.peak,c.number ?? i+1])]);
@@ -70,9 +72,9 @@ function clipHtml(clip,index,job) {
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
-  return `<article id="clip-${clip.id}" class="clip" data-id="${clip.id}" data-version="${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}">
-    <div class="clip-top"><div><h3>Highlight ${String(number).padStart(2,'0')}</h3>${badge(clip.status)}</div><button class="keep" aria-label="Keep highlight ${number}" aria-pressed="${!!clip.kept}" data-action="keep">${clip.kept?'★ Kept':'☆ Keep'}</button></div>
-    <div class="preview">${clip.status==='ready' ? `<video controls playsinline preload="metadata" poster=".${clip.thumbnail_url}"><source src=".${clip.file_url}?v=${clip.rendered_at || 0}-${clip.start}-${clip.end}-${clip.mode}-${clip.captions}" type="video/mp4"></video>` : `<div class="placeholder"><span style="font-size:30px">${clip.status==='failed'?'!':'✂'}</span><span>${clip.status==='failed'?'This clip needs another try':clip.status==='queued'?'Waiting for its moment…':`Creating your highlight…<br>Attempt ${clip.attempt || 1} of 3`}</span></div>`}</div>
+  return `<article id="clip-${clip.id}" class="clip" data-id="${clip.id}" data-version="${clipVersion(clip)}">
+    <div class="clip-top"><div><h3>Highlight ${String(number).padStart(2,'0')}</h3>${badge(clip.status, clip.queue_position)}</div><button class="keep" aria-label="Keep highlight ${number}" aria-pressed="${!!clip.kept}" data-action="keep">${clip.kept?'★ Kept':'☆ Keep'}</button></div>
+    <div class="preview">${clip.status==='ready' ? `<video controls playsinline preload="metadata" poster=".${clip.thumbnail_url}"><source src=".${clip.file_url}?v=${clip.rendered_at || 0}-${clip.start}-${clip.end}-${clip.mode}-${clip.captions}" type="video/mp4"></video>` : `<div class="placeholder"><span style="font-size:30px">${clip.status==='failed'?'!':'✂'}</span><span>${clip.status==='failed'?'This clip needs another try':clip.status==='cancelled'?'Cancelled — re-render to try again':clip.status==='queued'?escapeHtml(queueLabel(clip.queue_position)):`Creating your highlight…<br>Attempt ${clip.attempt || 1} of 3`}</span></div>`}</div>
     <div class="clip-body"><div class="clip-meta"><span class="score">↗ ${clip.score.toFixed(2)} spike score</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">Onset ${timestamp(clip.onset)} · Peak ${timestamp(clip.peak)}</p>
     <div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>
     ${clip.error ? `<p class="error">${escapeHtml(clip.error)}${clip.status==='failed'?'<br>Adjust the settings below or try Re-render again.':''}</p>` : ''}
@@ -87,10 +89,13 @@ function drawJob(job) {
   job.clips.forEach(c=>{if(keeping.has(c.id))c.kept=keeping.get(c.id);});
   current = job;
   const image = safeImage(job.metadata?.thumbnail);
-  $('#job-heading').innerHTML = `<div class="job-header">${image?`<img src="${image}" alt="Stream thumbnail">`:''}<div>${badge(job.status)}<h1>${escapeHtml(job.metadata?.title || 'Finding your next highlight…')}</h1><p>${date(job)} ${job.metadata?`· ${timestamp(job.metadata.duration)} stream`:''} · ${escapeHtml(job.request.mode)} layout</p></div></div>`;
+  $('#job-heading').innerHTML = `<div class="job-header">${image?`<img src="${image}" alt="Stream thumbnail">`:''}<div>${badge(job.status, job.queue_position)}<h1>${escapeHtml(job.metadata?.title || 'Finding your next highlight…')}</h1><p>${date(job)} ${job.metadata?`· ${timestamp(job.metadata.duration)} stream`:''} · ${escapeHtml(job.request.mode)} layout</p></div></div>`;
   $('#stage').textContent = job.stage;
   $('#progress').value = job.progress;
   $('#progress-label').textContent = `${Math.round(job.progress*100)}%`;
+  const cancellable = busy(job) && 'queue_position' in job;
+  $('#cancel-job').hidden = !cancellable;
+  $('#cancel-hint').hidden = !cancellable;
   $('#job-error').hidden = !job.error;
   $('#job-error').textContent = job.error || '';
   chart(job);
@@ -110,7 +115,7 @@ function drawJob(job) {
   job.clips.forEach((clip,index)=>{
     const existing = document.getElementById(`clip-${clip.id}`);
     const html = clipHtml(clip,index,job);
-    const version = `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}`;
+    const version = clipVersion(clip);
     if (!existing) container.insertAdjacentHTML('beforeend',html);
     else if (existing.dataset.version !== version) existing.outerHTML = html;
     const node = document.getElementById(`clip-${clip.id}`);
@@ -120,7 +125,7 @@ function drawJob(job) {
     node.querySelectorAll('[type=submit],[data-action=delete]').forEach(button=>button.disabled=locked(clip));
     draftFeedback(node);
   });
-  if (!job.clips.length) container.innerHTML = `<p class="empty">${busy(job)?'Your clips will appear here as they finish.':job.error?'The stream could not be processed. Return to All streams to try another URL.':'No significant chat spikes found. Try a livelier replay.'}</p>`;
+  if (!job.clips.length) container.innerHTML = `<p class="empty">${busy(job)?'Your clips will appear here as they finish.':job.status==='cancelled'?'This job was cancelled. Return to All streams to start another.':job.error?'The stream could not be processed. Return to All streams to try another URL.':'No significant chat spikes found. Try a livelier replay.'}</p>`;
 }
 async function refresh() {
   if (loading) return;
@@ -172,6 +177,13 @@ function draftFeedback(node) {
   $('.draft-error',node).textContent=error;
   $('[type=submit]',node).disabled=locked(clip)||!!error;
 }
+$('#cancel-job').addEventListener('click',async event=>{
+  if(!current || !busy(current) || !confirm('Cancel this job? Ready clips will be kept.'))return;
+  const jid=current.id;
+  event.target.disabled=true;
+  try {notice('');await api(`./api/jobs/${jid}/cancel`,'POST');await refresh();}
+  catch(error){notice(error.message);}finally{event.target.disabled=false;}
+});
 $('#delete-unkept').addEventListener('click',async event=>{
   const clips=current.clips.filter(c=>!c.kept && c.status!=='rendering');
   if(!confirm(`Delete ${clips.length} unkept ${clips.length===1?'highlight and its files':'highlights and their files'}?`))return;

@@ -80,3 +80,37 @@ Backend tests after adding retry, keep/ZIP and static-file coverage:
 failure, succeeds on attempt three, then verifies a permanent failure exhausts
 all three attempts and exposes its error. Browser viewport testing used Chrome,
 not native iPhone Safari; native share/save sheet behavior remains unverified.
+
+## Concurrent scheduler verification
+
+Real no-chat preflight check on `devin/concurrent-jobs`, using the venv Python
+and Deno on PATH, calling `fetch_chat` for
+`https://www.youtube.com/watch?v=jNQXAC9IVRw`:
+
+```text
+Error: This video has no live-chat replay (disabled, unavailable, or not a livestream VOD).
+Elapsed: 2.60s
+Replay directory created: False
+```
+
+The request stopped in metadata validation before creating a replay directory
+or starting a replay download. This is a real network check, not a mocked test;
+timing will vary with YouTube/network latency. The existing Python 3.10
+deprecation warning remains; the venv and Deno are correctly provisioned.
+
+```text
+...........................................................              [100%]
+59 passed in 1.49s
+```
+
+Deterministic event/barrier tests cover a blocked analysis alongside a successful
+re-render and a fast no-chat rejection, render priority/round-robin positions,
+separate pool limits, concurrent JSON updates, queued/running cancellation and
+stale-work protection, plus recovery of interrupted analysis and clips while
+preserving ready/failed clips and cancelled jobs. Recovery re-queues interrupted
+work rather than marking it failed.
+
+No new browser/visual check was requested or performed for queue/cancel controls.
+The existing 8080 process was not restarted or used for test requests. Cancellation
+is cooperative at stage boundaries, not process termination. The Cancel button
+is capability-gated so older running backends do not advertise the new endpoint.

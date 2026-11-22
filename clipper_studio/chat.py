@@ -49,17 +49,31 @@ def parse_chat(lines):
     return sorted(messages, key=lambda message: message.offset_seconds)
 
 
-def fetch_chat(url: str, directory: Path):
+def validate_metadata(info):
+    if not info.get("subtitles", {}).get("live_chat"):
+        raise ValueError("This video has no live-chat replay (disabled, unavailable, or not a livestream VOD).")
+    if (not info.get("duration") or info.get("is_live") or
+            not (info.get("was_live") or info.get("live_status") == "was_live")):
+        raise ValueError("A finished livestream VOD with a known duration is required.")
+
+
+def fetch_metadata(url: str):
+    with yt_dlp.YoutubeDL({"skip_download": True, "writesubtitles": False, "noplaylist": True,
+                          "quiet": True, "noprogress": True, "socket_timeout": 10,
+                          "retries": 1, "extractor_retries": 1}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    validate_metadata(info)
+    return info
+
+
+def fetch_chat(url: str, directory: Path, info=None):
+    info = info if info is not None else fetch_metadata(url)
+    validate_metadata(info)
     directory.mkdir(parents=True, exist_ok=True)
     options = {"skip_download": True, "writesubtitles": True, "subtitleslangs": ["live_chat"],
                "outtmpl": str(directory / "replay.%(ext)s"), "noplaylist": True,
                "quiet": True, "noprogress": True, "retries": 3, "socket_timeout": 30}
     with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=False)
-        if not info.get("subtitles", {}).get("live_chat"):
-            raise ValueError("This video has no live-chat replay (disabled, unavailable, or not a livestream VOD).")
-        if not info.get("duration") or info.get("is_live"):
-            raise ValueError("A finished livestream VOD with a known duration is required.")
         ydl.process_ie_result(info, download=True)
     files = list(directory.glob("*.live_chat.json"))
     if not files:
