@@ -87,11 +87,10 @@ def chunk_words(words, max_words: int = 4, clip_end: float | None = None) -> lis
             continue
         continuation = (not word.word[0].isspace()
                         and (word.word[0] in "-’'" or (group and group[-1].word == '-')))
-        if group and not continuation and (
+        if group and (word.start - group[-1].end > 0.5 or (not continuation and (
                 len(group) >= max_words
                 or group[-1].word.rstrip().endswith((".", "!", "?", ",", ";", ":"))
-                or word.start - group[-1].end > 0.5
-                or word.end - group[0].start > 2.5):
+                or word.end - group[0].start > 2.5))):
             groups.append(group)
             group = []
         group.append(word)

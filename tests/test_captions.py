@@ -80,6 +80,12 @@ def test_quoted_orphan_preserves_space_after_number():
     assert chunk_words(words) == [Caption(0, 1, "Say the number 5 'yes'")]
 
 
+@pytest.mark.parametrize('stem, suffix', [('Wi', '-Fi'), ('don', "'t")])
+def test_pause_splits_continuation_tokens(stem, suffix):
+    captions = chunk_words([word(' ' + stem, 0, .2), word(suffix, 2, 2.2)])
+    assert captions == [Caption(0, .8, stem), Caption(2, 2.2, suffix)]
+
+
 @pytest.mark.parametrize('stem, suffix, expected', [('Wi', '-Fi', 'Wi-Fi'), ('don', "'t", "don't")])
 def test_continuations_stay_in_group_at_word_limit(stem, suffix, expected):
     words = [word(t, i * .2, (i + 1) * .2)
