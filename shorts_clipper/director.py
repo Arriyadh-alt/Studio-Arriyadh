@@ -362,11 +362,39 @@ def remap_captions(captions, plan: Plan) -> list:
     return chunk_words(moved, clip_end=plan.duration) if moved else []
 
 
-def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position="bottom") -> str:
+HOOK_SIZE = 88
+
+
+def hook_height(text: str) -> int:
+    """Height of the hook banner box at its peak scale, in 1080x1920 output pixels."""
+    lines = max(1, math.ceil(len(text) * HOOK_SIZE * 0.62 / 860))
+    return round((lines * HOOK_SIZE * 1.25 + 28) * 1.08)
+
+
+def _bands_overlap(a, b, gap=0):
+    return a[0] < b[1] + gap and a[1] + gap > b[0]
+
+
+def hook_band(text: str, rect=None, style=None, preferred=380):
+    """Vertical band for the hook banner clear of the facecam and the captions."""
+    height = hook_height(text)
+    blocked = ([(rect.y, rect.y + rect.h)] if rect is not None else []) + \
+              ([caption_band(style, getattr(style, "size", 80))] if style is not None else [])
+    candidates = [preferred, 960 - height / 2] + [b[1] + 40 for b in blocked] + [b[0] - 40 - height for b in blocked]
+    clear = [top for top in candidates if 60 <= top and top + height <= 1860
+             and not any(_bands_overlap((top, top + height), b, 20) for b in blocked)]
+    top = round(min(clear, key=lambda t: abs(t - preferred)) if clear else preferred)
+    return top, top + height
+
+
+def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position="bottom", top=None) -> str:
     """Add an animated hook banner over the opening seconds of an ASS script."""
     ass_text = ass_text or _classic_ass([])
-    alignment, margin = (5, 0) if caption_position == "top" else (8, 380)
-    style = (f"Style: Hook,Montserrat Black,88,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00101317,-1,0,0,0,100,100,0,0,"
+    if top is not None:
+        alignment, margin = 8, int(top)
+    else:
+        alignment, margin = (5, 0) if caption_position == "top" else (8, 380)
+    style = (f"Style: Hook,Montserrat Black,{HOOK_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00101317,-1,0,0,0,100,100,0,0,"
              f"3,14,0,{alignment},110,110,{margin},1\n")
     ass_text = ass_text.replace("\n\n[Events]", "\n" + style + "\n[Events]", 1)
     label = literal_text(text.upper())
@@ -480,6 +508,29 @@ def mix_audio(video: Path, output: Path, plan: Plan) -> Path:
     return output
 
 
+PEAK_LIMIT = 10 ** (-1.5 / 20)
+
+
+def gain_command(video: Path, output: Path, gain: float) -> list:
+    return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video), "-map", "0:v", "-map", "0:a",
+            "-c:v", "copy", "-af", f"volume={gain:.2f}dB,alimiter=limit={PEAK_LIMIT:.4f}:attack=5:release=50:level=0,"
+            "aformat=sample_rates=48000:channel_layouts=stereo",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", str(output)]
+
+
+def normalize_loudness(video: Path, tolerance=0.5, attempts=3):
+    """Correct the final mix in place until it measures at the loudness target; returns the last LUFS reading."""
+    lufs = measure(video, audio_only=True)["lufs"]
+    for _ in range(attempts):
+        if lufs is None or abs(lufs - TARGET_LUFS) <= tolerance:
+            break
+        corrected = video.with_name(video.stem + ".level" + video.suffix)
+        subprocess.run(gain_command(video, corrected, TARGET_LUFS - lufs), check=True)
+        corrected.replace(video)
+        lufs = measure(video, audio_only=True)["lufs"]
+    return lufs
+
+
 # ---------------------------------------------------------------- quality check
 
 def caption_band(style, size=80):
@@ -504,6 +555,15 @@ def framing_fix(style, rect):
     return style, None
 
 
+def framing_conflicts(rect=None, style=None, hook=None) -> list:
+    """Overlaps between the facecam, the caption band and the hook banner in the rendered layout."""
+    facecam = (rect.y, rect.y + rect.h) if rect is not None else None
+    captions = caption_band(style, getattr(style, "size", 80)) if style is not None else None
+    pairs = (("Hook title covers the facecam", hook, facecam), ("Captions cover the facecam", captions, facecam),
+             ("Hook title covers the captions", hook, captions))
+    return [label for label, a, b in pairs if a and b and _bands_overlap(a, b)]
+
+
 def probe(video: Path) -> dict:
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                              "stream=codec_type,codec_name,width,height,avg_frame_rate,sample_rate:format=duration",
@@ -511,10 +571,10 @@ def probe(video: Path) -> dict:
     return json.loads(result.stdout)
 
 
-def measure(video: Path) -> dict:
-    result = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(video),
-                             "-vf", "blackdetect=d=0.4:pix_th=0.08", "-af", "ebur128=peak=true",
-                             "-f", "null", "-"], capture_output=True, text=True)
+def measure(video: Path, audio_only=False) -> dict:
+    picture = ["-vn"] if audio_only else ["-vf", "blackdetect=d=0.4:pix_th=0.08"]
+    result = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(video), *picture,
+                             "-af", "ebur128=peak=true", "-f", "null", "-"], capture_output=True, text=True)
     log = result.stderr
     summary = log[log.rfind("Summary:"):] if "Summary:" in log else ""
     lufs = re.search(r"I:\s+(-?[\d.]+) LUFS", summary)
@@ -524,7 +584,7 @@ def measure(video: Path) -> dict:
             "true_peak": float(peak.group(1)) if peak and peak.group(1) != "-inf" else None, "black_seconds": black}
 
 
-def quality_check(video: Path, plan: Plan, captions, fixes=()) -> list:
+def quality_check(video: Path, plan: Plan, captions, fixes=(), layout=None) -> list:
     checks = []
 
     def add(name, status, detail):
@@ -565,7 +625,9 @@ def quality_check(video: Path, plan: Plan, captions, fixes=()) -> list:
     else:
         add("Subtitle timing", "skip", "No captions in this clip")
     framing = [f for f in fixes if f]
-    add("Framing", "pass", "; ".join(framing) if framing else "Captions, hook and facecam stay clear of each other")
+    conflicts = framing_conflicts(**(layout or {}))
+    add("Framing", "warn" if conflicts else "pass",
+        "; ".join(conflicts + framing) or "Captions, hook and facecam stay clear of each other")
     microcuts = sum(s.length < 0.6 for s in plan.segments)
     black = stats["black_seconds"]
     add("Visual consistency", "pass" if not microcuts and black < 0.5 else "warn",
