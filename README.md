@@ -25,6 +25,10 @@ server process; do not use `--workers` or `--reload` during processing.
 See [STUDIO.md](STUDIO.md) for the API and [E2E.md](E2E.md) for backend evidence.
 The original CLI remains available below.
 
+## License
+
+Licensed under the [MIT License](LICENSE).
+
 # shorts-clipper
 
 Cut a time range out of a YouTube video and turn it into a 1080x1920 (9:16) vertical MP4 for YouTube Shorts / TikTok.
