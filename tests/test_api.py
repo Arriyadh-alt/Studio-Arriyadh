@@ -99,7 +99,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr("clipper_studio.api.time.sleep", lambda seconds: None)
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: (
         {"title": "🔴 Test!", "duration": 600, "thumbnail": None},
-        [Message(t, "user", "W") for t in (100, 300, 500) for _ in range(20)]))
+        [Message(t, str(i), "W") for t in (100, 300, 500) for i in range(20)]))
     download_attempts = []
     def section(url, directory, start, end):
         download_attempts.append(start)
