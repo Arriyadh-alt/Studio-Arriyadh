@@ -70,6 +70,18 @@ def test_detection_failure():
         assert detect_facecam(Path('source'), 0, 10) is None
 
 
+@pytest.mark.parametrize('name', ['jacksepticeye', 'markiplier'])
+def test_real_corner_face_regression(name):
+    frame = cv2.imread(str(Path(__file__).parent/'fixtures'/f'facecam_{name}.jpg'))
+    assert frame is not None
+    with patch('shorts_clipper.facecam._sample_frames', return_value=[frame]*8):
+        box = detect_facecam(Path('source'), 0, 20)
+    assert box is not None
+    assert box.x < .1 and box.y < .1
+    assert box.x+box.w > .14 and box.y+box.h > .2
+    assert box.w < .4 and box.h < .7
+
+
 def test_auto_layout():
     blank = np.zeros((480, 270, 3), np.uint8)
     box = SourceBox(.1, .1, .2, .2)

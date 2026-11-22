@@ -97,7 +97,7 @@ def detect_facecam(source: Path, start: float, end: float) -> SourceBox | None:
         detections = []
         for frame in frames:
             height, width = frame.shape[:2]
-            gray = cv2.equalizeHist(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = list(frontal.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24)))
             if not profile.empty():
                 faces.extend(profile.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24)))
