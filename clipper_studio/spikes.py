@@ -123,7 +123,7 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
     series = []
     for i, (baseline, z) in enumerate(reaction_stats):
         reaction_score = .7 * z + .3 * min(z * 2, share_stats[i][1])
-        score = max(reaction_score, volume_stats[i][1]) + .1 * z
+        score = reaction_score + .25 * volume_stats[i][1]
         series.append({"time": i * bin_seconds, "count": len(bins[i]), "baseline": baseline,
                        "intensity": len(reactors[i]), "score": round(score, 3)})
     positive = sorted(point['score'] for point in series if point['score'] > 0)
