@@ -25,7 +25,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from cv2 import error as ImageProcessingError
-from pydantic import BaseModel, Field, field_validator
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
