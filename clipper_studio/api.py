@@ -31,8 +31,8 @@ from starlette.background import BackgroundTask
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_title_ass,
-                                     loudness, mix_audio, plan_edit, plan_record, quality_check, remap_captions)
+from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_band, hook_title_ass,
+                                     loudness, mix_audio, normalize_loudness, plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
                                     layout_facecam, save_source_still)
@@ -324,8 +324,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         plan.focal = [detect_focal_x(render_source, offset, offset + segment.length)
                                       for offset, segment in zip(plan.offsets(), plan.segments)]
                 ass = to_ass(shown, style) if spec["captions"] else None
+                layout = {"rect": overlay.rect if overlay else None, "style": style if spec["captions"] else None}
                 if plan and plan.hook and plan.hook.get("text"):
-                    ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + 0.7, style.position)
+                    layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"])
+                    ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + 0.7, top=layout["hook"][0])
                 if ass is not None:
                     subtitles = work / "captions.ass"
                     subtitles.write_text(ass, encoding="utf-8")
@@ -347,8 +349,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     except Exception:
                         fixes.append("Sound effects and music skipped (audio mix failed)")
                         logger.warning("AI Director audio mix failed for %s/%s", jid, cid, exc_info=True)
+                    try:
+                        normalize_loudness(video)
+                    except Exception:
+                        logger.warning("AI Director loudness correction failed for %s/%s", jid, cid, exc_info=True)
                     update(jid, generation, stage=f"{clip_label} · AI Director quality check")
-                    director_result = plan_record(plan, director, quality_check(video, plan, shown, fixes))
+                    director_result = plan_record(plan, director, quality_check(video, plan, shown, fixes, layout))
                     peak = plan.map_time(peak) if peak is not None else None
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
                 thumbnail = work / "thumbnail.jpg"

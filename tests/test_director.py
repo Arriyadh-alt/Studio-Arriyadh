@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from shorts_clipper.captions import Caption, CaptionStyle, to_ass
-from shorts_clipper.director import (DirectorOptions, Plan, Segment, cut_source, effects_for, framing_fix,
-                                     hook_title_ass, loudness, mix_audio, mix_command, plan_edit, plan_record, quality_check,
+from shorts_clipper.director import (DirectorOptions, Plan, Segment, cut_source, effects_for, framing_conflicts, framing_fix,
+                                     hook_band, hook_title_ass, normalize_loudness, measure, loudness, mix_audio, mix_command, plan_edit, plan_record, quality_check,
                                      remap_captions)
 from shorts_clipper.facecam import OutputRect
 from shorts_clipper.video import build_ffmpeg_command, make_vertical_clip
@@ -105,6 +105,22 @@ def test_hook_title_and_framing_fix():
     assert framing_fix(CaptionStyle(position="bottom"), OutputRect(24, 24, 450, 450))[1] is None
 
 
+def test_hook_band_clears_a_top_corner_facecam():
+    facecam = OutputRect(414, 24, 450, 520)
+    top, bottom = hook_band("Thank you", facecam, CaptionStyle())
+    assert top >= 544 + 20 and not framing_conflicts(facecam, CaptionStyle(), (top, bottom))
+    ass = hook_title_ass(to_ass([], CaptionStyle()), "Thank you", 2, top=top)
+    assert f",8,110,110,{top},1" in ass
+    assert hook_band("Thank you", OutputRect(24, 1400, 450, 450), CaptionStyle(position="middle"))[0] == 380
+
+
+def test_framing_check_flags_overlaps():
+    facecam = OutputRect(414, 24, 450, 520)
+    assert framing_conflicts(facecam, CaptionStyle(), (380, 530)) == ["Hook title covers the facecam"]
+    assert framing_conflicts(OutputRect(24, 1300, 450, 450), CaptionStyle(), None) == ["Captions cover the facecam"]
+    assert framing_conflicts() == []
+
+
 @pytest.fixture(scope="module")
 def source(tmp_path_factory):
     path = tmp_path_factory.mktemp("director") / "source.mp4"
@@ -184,3 +200,34 @@ def test_rendered_offset_maps_peaks_onto_the_edit():
     clip = {"director_result": {"edits": {"timeline": [[0, 5, 2.5], [8, 14, 7.5]]}}}
     assert rendered_offset(clip, 10) == 9.5 and rendered_offset(clip, 6) is None
     assert rendered_offset({"director_result": {"status": "disabled"}}, 10) == 10
+
+
+def test_normalize_loudness_brings_a_quiet_mix_to_target(source, tmp_path):
+    quiet = tmp_path / "quiet.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-c:v", "copy", "-af", "volume=-14dB",
+                    "-c:a", "aac", str(quiet)], check=True)
+    assert measure(quiet, audio_only=True)["lufs"] < -16
+    lufs = normalize_loudness(quiet)
+    stats = measure(quiet)
+    assert abs(lufs + 14) <= 0.5 and abs(stats["lufs"] + 14) <= 0.5 and stats["true_peak"] <= -0.5
+
+
+def test_quality_check_framing_warns_on_hook_over_facecam(source):
+    plan = Plan([Segment(0, 12)])
+    checks = {c["check"]: c for c in quality_check(source, plan, [], layout={
+        "rect": OutputRect(414, 24, 450, 520), "style": CaptionStyle(), "hook": (380, 530)})}
+    assert checks["Framing"]["status"] == "warn" and "Hook title covers the facecam" in checks["Framing"]["detail"]
+
+
+def test_loudness_correction_keeps_audio_in_sync(tmp_path):
+    from shorts_clipper.director import gain_command
+    clip = tmp_path / "impulse.mov"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=s=64x64:d=1", "-f", "lavfi", "-i",
+                    "aevalsrc='if(between(t,0.5,0.501),0.3,0)':d=1:s=48000", "-c:v", "libx264", "-c:a", "pcm_s16le",
+                    "-shortest", str(clip)], check=True)
+    out = tmp_path / "level.mp4"
+    subprocess.run(gain_command(clip, out, 2.0), check=True)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
+                         capture_output=True, check=True).stdout
+    audio = np.abs(np.frombuffer(raw, dtype=np.int16))
+    assert abs(int(np.argmax(audio)) - 24000) < 48 and len(audio) >= 47000
