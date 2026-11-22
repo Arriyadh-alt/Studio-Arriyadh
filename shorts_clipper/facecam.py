@@ -7,7 +7,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .captions import MARGIN_BOTTOM, MARGIN_RIGHT
+from .captions import FONT_SIZE, MARGIN_BOTTOM, MARGIN_RIGHT
+
+
+CAPTION_BAND_TOP = 1920 - MARGIN_BOTTOM - 2 * FONT_SIZE - 10
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,50 @@ def find_facecam_border(frame: np.ndarray, face: SourceBox) -> SourceBox | None:
     return min(candidates, key=lambda b: b.w*b.h, default=None)
 
 
+def find_persistent_border(frames: list[np.ndarray], face: SourceBox) -> SourceBox | None:
+    if not frames:
+        return None
+    height, width = frames[0].shape[:2]
+    grays = [cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) for frame in frames]
+    vertical = np.percentile([np.abs(cv2.Sobel(g, cv2.CV_32F, 1, 0))/4 for g in grays], 20, axis=0)
+    horizontal = np.percentile([np.abs(cv2.Sobel(g, cv2.CV_32F, 0, 1))/4 for g in grays], 20, axis=0)
+    fx, fy, fw, fh = face.x*width, face.y*height, face.w*width, face.h*height
+
+    def boundary(edges, near, extent, other, other_extent, direction, bounds=None):
+        limit, span = edges.shape[1], edges.shape[0]
+        if direction < 0 and near < extent:
+            return 0
+        if direction > 0 and limit-near < extent:
+            return limit
+        lo, hi = bounds if bounds is not None else (max(0, int(other-.6*other_extent)), min(span, int(other+1.7*other_extent)))
+        candidates = []
+        for distance in range(max(2, round(.25*extent)), round(1.25*extent)+1):
+            index = round(near+direction*distance)
+            if not 1 <= index < limit-1:
+                continue
+            line = edges[lo:hi, index]
+            if (np.mean(line > 6) >= .48 and np.mean(line) >= 8
+                    and np.mean(line) >= np.mean(edges[lo:hi, index-direction])):
+                candidates.append((index, float(np.mean(line))))
+        if not candidates:
+            return None
+        strongest = max(score for _, score in candidates)
+        return next(index for index, score in candidates if score >= strongest*.85)
+
+    left = boundary(vertical, fx, fw, fy, fh, -1)
+    right = boundary(vertical, fx+fw, fw, fy, fh, 1)
+    bounds = (left, right) if left is not None and right is not None else None
+    top = boundary(horizontal.T, fy, fh, fx, fw, -1, bounds)
+    bottom = boundary(horizontal.T, fy+fh, fh, fx, fw, 1, bounds)
+    if any(v is None for v in (left, right, top, bottom)):
+        return None
+    w, h = right-left, bottom-top
+    if not (1.25*fw <= w <= 4*fw and 1.25*fh <= h <= 4*fh
+            and .7 <= w/h <= 2.2 and w*h < width*height*.35):
+        return None
+    return SourceBox(left/width, top/height, w/width, h/height)
+
+
 def detect_facecam(source: Path, start: float, end: float) -> SourceBox | None:
     try:
         frames = _sample_frames(source, start, end)
@@ -120,12 +167,19 @@ def detect_facecam(source: Path, start: float, end: float) -> SourceBox | None:
             return None
         track = max(tracks, key=lambda t: (len(t), np.median([b.w*b.h for b in t])))
         face = SourceBox(*np.median([[b.x, b.y, b.w, b.h] for b in track], axis=0))
+        persistent = find_persistent_border(frames, face)
+        if persistent is not None:
+            return persistent
         borders = [find_facecam_border(frame, face) for frame in frames]
         borders = [b for b in borders if b is not None]
         if len(borders) > len(frames)/2:
             return SourceBox(*np.median([[b.x, b.y, b.w, b.h] for b in borders], axis=0))
-        x, y = max(0, face.x-face.w), max(0, face.y-face.h*.65)
-        return SourceBox(x, y, min(1, face.x+face.w*2)-x, min(1, face.y+face.h*2.7)-y)
+        height, width = frames[0].shape[:2]
+        h = min(1, face.h*1.7)
+        w = min(1, max(face.w*1.65, h*height/width*4/3))
+        x = max(0, min(1-w, face.x+face.w/2-w/2))
+        y = max(0, min(1-h, face.y-face.h*.35))
+        return SourceBox(x, y, w, h)
     except Exception:
         return None
 
@@ -139,12 +193,12 @@ def layout_facecam(box: SourceBox, source_size: tuple[int, int], position: str =
     aspect = box.w*source_size[0]/(box.h*source_size[1])
     w = round(1080*min(.6, max(.25, width)))
     h = round(w/aspect)
-    if h > 640:
-        h, w = 640, max(2, round(640*aspect))
+    max_height = CAPTION_BAND_TOP-40
+    if h > max_height:
+        h, w = max_height, max(2, round(max_height*aspect))
     w, h = max(2, w//2*2), max(2, h//2*2)
     x = 1080-MARGIN_RIGHT-24-w if position.endswith('right') else 24
-    # Reserve multi-line caption height above the caption baseline.
-    y = 1920-MARGIN_BOTTOM-240-24-h if position.startswith('bottom') else 24
+    y = CAPTION_BAND_TOP-16-h if position.startswith('bottom') else 24
     return FacecamOverlay(box, OutputRect(x, y, w, h))
 
 
@@ -185,8 +239,12 @@ def auto_layout_facecam(source: Path, start: float, end: float, box: SourceBox,
         edges = np.mean([np.mean(cv2.Canny(p, 60, 160))/255 for p in regions])
         motion = np.mean([np.mean(cv2.absdiff(a, b))/255 for a, b in zip(regions, regions[1:])]) if len(regions)>1 else 0
         candidates.append((float(edges+motion), corner, spec))
-    score, corner, spec = min(candidates, key=lambda c: c[0])
-    return layout_facecam(box, size, corner, width*.85) if score > .20 else spec
+    top = min(candidates[:2], key=lambda c: c[0])
+    bottom = min(candidates[2:], key=lambda c: c[0])
+    score, corner, spec = bottom if top[0] > bottom[0] + .12 and top[0] > bottom[0]*1.5 else top
+    if score > .20 and width > .38:
+        return layout_facecam(box, size, corner, max(.38, width*.92))
+    return spec
 
 
 def save_source_still(source: Path, output: Path, timestamp: float = 0) -> Path:

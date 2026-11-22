@@ -10,7 +10,8 @@ import pytest
 from shorts_clipper.captions import MARGIN_BOTTOM, MARGIN_RIGHT
 from shorts_clipper.facecam import (SourceBox, OutputRect, detect_facecam,
                                     find_facecam_border, layout_facecam,
-                                    auto_layout_facecam, save_source_still)
+                                    auto_layout_facecam, save_source_still,
+                                    find_persistent_border, CAPTION_BAND_TOP)
 from shorts_clipper.video import build_ffmpeg_command, make_vertical_clip
 
 
@@ -31,7 +32,10 @@ def test_layout(corner, width):
     assert 270 <= r.w <= 648
     assert abs(r.w/r.h - (.2*1920)/(.3*1080)) < .01
     assert r.x+r.w <= 1080-MARGIN_RIGHT-24
-    assert r.y+r.h < 1920-MARGIN_BOTTOM-240
+    if corner.startswith('bottom'):
+        assert r.y+r.h == CAPTION_BAND_TOP-16
+    else:
+        assert r.y == 24
 
 
 def test_border():
@@ -79,7 +83,48 @@ def test_real_corner_face_regression(name):
     assert box is not None
     assert box.x < .1 and box.y < .1
     assert box.x+box.w > .14 and box.y+box.h > .2
-    assert box.w < .4 and box.h < .7
+    assert .16 < box.x+box.w < .21
+    assert .27 < box.y+box.h < .33
+
+
+@pytest.mark.parametrize('mirror_x,mirror_y', [(False,False),(True,False),(False,True),(True,True)])
+def test_persistent_border_rejects_moving_gameplay(mirror_x, mirror_y):
+    frames=[]
+    for index in range(8):
+        frame=np.full((360,640,3),30,dtype=np.uint8)
+        cv2.rectangle(frame,(190+index*35,40),(210+index*35,300),(255,255,255),-1)
+        frame[:108,:120]=180
+        if mirror_x:
+            frame=cv2.flip(frame,1)
+        if mirror_y:
+            frame=cv2.flip(frame,0)
+        frames.append(frame)
+    face=SourceBox((640-40-48 if mirror_x else 40)/640,
+                   (360-20-48 if mirror_y else 20)/360,48/640,48/360)
+    box=find_persistent_border(frames,face)
+    assert box is not None
+    assert abs(box.w-120/640)<.01 and abs(box.h-108/360)<.01
+    assert find_persistent_border([np.zeros_like(frames[0])]*8,face) is None
+    assert find_persistent_border([],face) is None
+
+
+@pytest.mark.parametrize('intensity,bottom', [(10,False),(255,True)])
+def test_auto_prefers_top_unless_clearly_busier(intensity,bottom):
+    blank=np.zeros((480,270,3),np.uint8)
+    changed=blank.copy()
+    changed[:160]=intensity
+    box=SourceBox(.1,.1,.2,.2)
+    with patch('shorts_clipper.facecam._sample_frames',return_value=[blank,changed]*4):
+        spec=auto_layout_facecam(Path('source'),0,1,box)
+    assert (spec.rect.y>24)==bottom
+
+
+def test_auto_size_stays_readable():
+    frames=[np.full((480,270,3),v,np.uint8) for v in (0,255)*4]
+    with patch('shorts_clipper.facecam._sample_frames',return_value=frames):
+        spec=auto_layout_facecam(Path('source'),0,1,SourceBox(.1,.1,.2,.2))
+    assert spec.rect.w/1080 >= .38
+    assert spec.rect.y==24
 
 
 def test_auto_layout():
