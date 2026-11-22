@@ -32,9 +32,21 @@ def text_width(text: str) -> float:
 
 
 def join_tokens(tokens) -> str:
-    text = ' '.join(token.strip() for token in tokens if token.strip())
-    text = re.sub(r"\s+([,.;:!?%’'])", r'\1', text)
-    return re.sub(r'\s*-\s*', '-', text)
+    text = ''
+    hyphen_continuation = False
+    for token in tokens:
+        stripped = token.strip()
+        if not stripped:
+            continue
+        leading_space = token[0].isspace()
+        continuation = (not leading_space and stripped[0] in "-’'"
+                        and not re.match(r"[-’']\d", stripped)
+                        and text and text[-1].isalpha())
+        punctuation = stripped[0] in ',.;:!?%'
+        separator = '' if not text or continuation or punctuation or (hyphen_continuation and not leading_space) else ' '
+        text += separator + stripped
+        hyphen_continuation = bool(continuation and stripped == '-')
+    return text
 
 
 def wrap_caption(text: str) -> list[str]:

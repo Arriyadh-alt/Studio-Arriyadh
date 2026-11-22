@@ -75,11 +75,28 @@ def test_orphan_does_not_merge_across_pause_or_punctuation():
 
 
 @pytest.mark.parametrize('tokens, expected', [
-    ([' as', ' a', ' drop', ' -in'], 'as a drop-in'),
+    ([' as', ' a', ' drop', '-in'], 'as a drop-in'),
     (['drop', '-', 'in', ','], 'drop-in,'),
     (['That', "'s", ' great', '!'], "That's great!"),
 ])
 def test_token_joining(tokens, expected):
+    assert join_tokens(tokens) == expected
+
+
+@pytest.mark.parametrize('tokens, expected', [
+    (['-5', ' -3', ' -1'], '-5 -3 -1'),
+    (['-5', '-3', '-1'], '-5 -3 -1'),
+    (['in', " '99"], "in '99"),
+    (['in', "'99"], "in '99"),
+    (['drop', ' -in'], 'drop -in'),
+    (['don', "'t"], "don't"),
+    (['don', " 't"], "don 't"),
+    (['don', '’t'], 'don’t'),
+    (['value', '-5'], 'value -5'),
+    ([], ''),
+    ([' ', ''], ''),
+])
+def test_token_joining_preserves_meaningful_boundaries(tokens, expected):
     assert join_tokens(tokens) == expected
 
 
