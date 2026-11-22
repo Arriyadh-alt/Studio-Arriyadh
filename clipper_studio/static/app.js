@@ -55,12 +55,13 @@ function drawHome(jobs) {
     <div class="body">${badge(job.status)}<h3>${escapeHtml(jobTitle(job))}</h3><div class="card-meta"><span>${date(job)}</span><span>${job.clip_count} clips ↗</span></div></div></a>`).join('') : '<p class="empty">Your next great moment starts here. Paste a stream above.</p>';
 }
 function chart(job) {
-  const key = JSON.stringify([job.id,job.activity,job.clips.map((c,i)=>[c.id,c.peak,c.number ?? i+1])]);
+  const containerWidth = $('#chart').clientWidth;
+  const key = JSON.stringify([containerWidth,job.id,job.activity,job.clips.map((c,i)=>[c.id,c.peak,c.number ?? i+1])]);
   if (key===chartKey)return;
   chartKey=key;
   const data = job.activity;
   if (!data.length) { $('#chart').innerHTML = '<p class="hint">Chat activity will appear after the replay is analyzed.</p>'; return; }
-  const width = Math.max(260, $('#chart').clientWidth), height = 125, duration = job.metadata.duration;
+  const width = Math.max(260, containerWidth), height = 125, duration = job.metadata.duration;
   const max = Math.max(1, ...data.map(p => p.count));
   // Group only for display; the original five-second data remains in the API.
   const stride = Math.max(1, Math.ceil(data.length / 250));
@@ -70,7 +71,8 @@ function chart(job) {
     const h = Math.max(1, count / max * 100);
     bars += `<rect x="${data[i].time / duration * width}" y="${height-h}" width="${Math.max(1,stride*5/duration*width-1)}" height="${h}" rx="1" fill="#64774e"/>`;
   }
-  const marks = job.clips.map((clip,index) => `<g class="chart-mark" tabindex="0" role="button" aria-label="Review highlight ${clip.number ?? index+1} at ${timestamp(clip.peak)}" data-clip="${clip.id}"><title>Highlight ${clip.number ?? index+1} · ${timestamp(clip.peak)}</title><rect x="${clip.peak/duration*width-26}" y="0" width="52" height="138" fill="transparent"/><line x1="${clip.peak/duration*width}" x2="${clip.peak/duration*width}" y1="17" y2="125" stroke="#b8f477" stroke-dasharray="3 4"/><circle cx="${clip.peak/duration*width}" cy="13" r="11" fill="#b8f477"/><text x="${clip.peak/duration*width}" y="17" text-anchor="middle" fill="#172210" font-size="11" font-weight="bold">${clip.number ?? index+1}</text></g>`).join('');
+  const markerScale = containerWidth / (width+44) * 138 / 150;
+  const marks = job.clips.map((clip,index) => `<g class="chart-mark" tabindex="0" role="button" aria-label="Review highlight ${clip.number ?? index+1} at ${timestamp(clip.peak)}" data-clip="${clip.id}"><title>Highlight ${clip.number ?? index+1} · ${timestamp(clip.peak)}</title><rect x="${clip.peak/duration*width-26}" y="0" width="52" height="138" fill="transparent"/><line x1="${clip.peak/duration*width}" x2="${clip.peak/duration*width}" y1="17" y2="125" stroke="#b8f477" stroke-dasharray="3 4"/><g transform="translate(0 13) scale(1 ${markerScale}) translate(0 -13)"><circle cx="${clip.peak/duration*width}" cy="13" r="11" fill="#b8f477"/><text x="${clip.peak/duration*width}" y="17" text-anchor="middle" fill="#172210" font-size="11" font-weight="bold">${clip.number ?? index+1}</text></g></g>`).join('');
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index,job) {
@@ -247,5 +249,6 @@ $('#clips').addEventListener('submit',async event=>{
 function jump(event) {const mark=event.target.closest('[data-clip]');if(mark)document.getElementById(`clip-${mark.dataset.clip}`)?.scrollIntoView({behavior:'smooth',block:'start'});}
 $('#chart').addEventListener('click',jump);
 $('#chart').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();jump(event);}});
+new ResizeObserver(()=>{if(current && !$('#job-view').hidden)chart(current);}).observe($('#chart'));
 window.addEventListener('hashchange',route);
 route();
