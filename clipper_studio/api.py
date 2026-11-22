@@ -165,7 +165,7 @@ def rendered_offset(clip, offset):
     return None
 
 
-def story_context(job, clip, caption_language, work):
+def story_context(job, clip, caption_language, work, voices):
     """What the storytelling hook writer knows about the stream and this clip."""
     metadata = job.get("metadata") or {}
     used = [hook["text"] for other in job.get("clips", []) if other.get("id") != clip.get("id")
@@ -174,7 +174,7 @@ def story_context(job, clip, caption_language, work):
 
     def voice(text, language):
         path = work / "hook-voice.wav"
-        return path, synthesize_voice(text, language, path, store.root / "voices")
+        return path, synthesize_voice(text, language, path, voices)
 
     return {"name": streamer_name(metadata), "game": game_name(metadata.get("title")),
             "title": metadata.get("title"), "language": hook_language(caption_language or requested, metadata.get("title")),
@@ -251,6 +251,22 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             raise WorkCancelled
         return job
 
+    def stream_metadata(jid, generation, job):
+        """Jobs made before channel names were kept get them fetched once, for the storytelling hook."""
+        metadata = job.get("metadata") or {}
+        if not job.get("url") or "channel" in metadata or "uploader" in metadata:
+            return job
+        try:
+            info = fetch_metadata(job["url"])
+        except Exception:
+            logger.debug("Channel lookup for the storytelling hook failed", exc_info=True)
+            return job
+        with store.lock:
+            job = active_job(jid, generation)
+            job["metadata"] = {**(job.get("metadata") or {}), **{key: info.get(key) for key in ("channel", "uploader")}}
+            store.save(job)
+        return job
+
     def update(jid, generation, **fields):
         with store.lock:
             job = active_job(jid, generation)
@@ -296,7 +312,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     try:
                         plan = plan_edit(loudness(source, duration), captions, duration, director, peak,
                                          spec.get("score"), spec.get("thumbnail_text") or hook,
-                                         story_context(job, spec, caption_language or getattr(captions, "language", None), work))
+                                         story_context(stream_metadata(jid, generation, job), spec,
+                                                       caption_language or getattr(captions, "language", None), work,
+                                                       store.root / "voices"))
                         directed = cut_source(source, work / "directed.mp4", plan)
                     except Exception:
                         plan, directed = None, None
