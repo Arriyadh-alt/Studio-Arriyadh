@@ -1,7 +1,7 @@
 import pytest
 
 from clipper_studio.chat import Message
-from clipper_studio.spikes import detect_spikes, reaction, reaction_category
+from clipper_studio.spikes import detect_spikes, normalized_message, reaction, reaction_category
 
 
 def stream():
@@ -73,7 +73,7 @@ def test_midstream_greeting_flood_not_picked():
 
 
 def test_nonreacting_boundary_flood_and_flat_reactions_not_picked():
-    messages = [Message(t, str(i), "ordinary message") for t in (0, 590) for i in range(100)]
+    messages = [Message(t, str(i), f"ordinary message {i}") for t in (0, 590) for i in range(100)]
     assert detect_spikes(messages, 600)[0] == []
     flat = [Message(t, str(i), "LOL") for t in range(0, 600, 5) for i in range(10)]
     assert detect_spikes(flat, 600)[0] == []
@@ -120,7 +120,7 @@ def test_reaction_spike_with_capped_total_volume():
     messages = []
     for t in range(0, 600, 5):
         laughing = 35 if t in (295, 300, 305) else 5
-        messages += [Message(t, str(i), 'LOL' if i < laughing else 'ordinary message') for i in range(100)]
+        messages += [Message(t, str(i), 'LOL' if i < laughing else f'ordinary message {i}') for i in range(100)]
     picks, series = detect_spikes(messages, 600)
     assert len(picks) == 1
     assert 295 <= picks[0]['peak'] <= 305
@@ -167,8 +167,57 @@ def test_sparse_stream_detects_several_independent_reaction_pairs():
     assert all(any(t <= pick['peak'] <= t + 5 for t in (200, 600, 1000, 1400)) for pick in picks)
 
 
-def test_sparse_stream_rejects_single_reactor_and_nonreaction_spam():
+def test_sparse_stream_rejects_single_author_reaction_and_copypasta_spam():
     messages = [Message(t, f'viewer{t}', 'ordinary message') for t in range(0, 1800, 10)]
     messages += [Message(t, 'spammer', 'LOL') for t in range(200, 240)]
-    messages += [Message(600, str(i), text) for i in range(20) for text in ('P', 'E', 'D', 'copypasta')]
+    messages += [Message(600, 'spammer', text) for _ in range(20) for text in ('P', 'E', 'D', 'copypasta')]
     assert detect_spikes(messages, 1800)[0] == []
+
+
+@pytest.mark.parametrize('texts', [
+    ['The moon is made of cheese!', 'THE MOOOON IS MADE OF CHEESE', 'the moon is made of cheese.'],
+    ['WWWWW', 'w', 'W!!!'],
+    [':potato:', ':POTATO:', ':potato:!'],
+    ['🥔🥔🥔', '🥔', '🥔!'],
+])
+def test_many_author_normalized_waves_are_reactions(texts):
+    messages = [Message(300 + i % 3 * 5, str(i), texts[i % 3]) for i in range(30)]
+    picks, series = detect_spikes(messages, 600)
+    assert len(picks) == 1
+    assert 300 <= picks[0]['peak'] <= 310
+    assert series[60]['intensity'] == 10
+    assert all(normalized_message(text) == normalized_message(texts[0]) for text in texts)
+
+
+def test_distinct_chatter_surge_without_reaction_words_is_picked():
+    messages = [Message(t, str(i), f'ordinary message {i}')
+                for t in range(0, 600, 5) for i in range(5)]
+    messages += [Message(t, str(i), f'unique sentence {i}')
+                 for t in (295, 300, 305) for i in range(5, 60)]
+    picks, series = detect_spikes(messages, 600)
+    assert len(picks) == 1
+    assert 295 <= picks[0]['peak'] <= 305
+    assert picks[0]['onset'] == 295
+    assert series[60]['intensity'] == 0
+    assert set(series[60]) == {'time', 'count', 'baseline', 'intensity', 'score'}
+
+
+def test_single_author_wave_does_not_count_as_many_reactors():
+    messages = [Message(t, 'one', ':potato:') for t in range(295, 310) for _ in range(20)]
+    picks, series = detect_spikes(messages, 600)
+    assert picks == []
+    assert max(point['intensity'] for point in series) == 0
+
+
+def test_mass_w_wave_has_same_weight_as_copypasta_wave():
+    def wave_score(text):
+        _, series = detect_spikes([Message(300, str(i), text) for i in range(10)], 600)
+        return series[60]['score']
+    assert wave_score('WWWWW') == wave_score('the moon is made of cheese')
+
+
+def test_wave_requires_three_distinct_authors():
+    messages = [Message(300, str(i), ':potato:') for i in range(2) for _ in range(20)]
+    picks, series = detect_spikes(messages, 600)
+    assert picks == []
+    assert series[60]['intensity'] == 0
