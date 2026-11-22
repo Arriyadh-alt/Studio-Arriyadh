@@ -1,4 +1,5 @@
 import wave
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -200,3 +201,31 @@ def test_hooks_quote_the_streamers_own_words_at_the_moment():
     assert anonymous[0] == 'It All Started With "Thank You"...'
     karma = template_hooks("karma", "id", "Windah Basudara", "GTA VI", quote="Karma")
     assert "Momen Ketika Windah Basudara Terkena Karma di GTA VI!" in karma and not any('"' in k for k in karma)
+
+
+def test_parallel_renders_download_each_voice_model_once(monkeypatch, tmp_path):
+    import threading
+    import time
+    from shorts_clipper.story import voice_model
+    calls = []
+
+    def fetch(url, path):
+        calls.append(url)
+        time.sleep(0.05)
+        Path(path).write_bytes(b"model")
+
+    monkeypatch.setattr("shorts_clipper.story.urllib.request.urlretrieve", fetch)
+    results, errors = [], []
+
+    def run():
+        try:
+            results.append(voice_model("en", tmp_path))
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors and len(calls) == 2 and all(r.is_file() for r in results)

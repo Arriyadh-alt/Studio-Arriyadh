@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import re
+import threading
 import urllib.request
 import wave
 from pathlib import Path
@@ -325,18 +326,20 @@ def intro_length(text: str, voice: float | None = None) -> float:
 
 VOICES = {"en": "en/en_US/ryan/medium/en_US-ryan-medium", "id": "id/id_ID/news_tts/medium/id_ID-news_tts-medium"}
 VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/{}{}"
+VOICE_DOWNLOAD = threading.Lock()
 
 
 def voice_model(language: str, cache: Path) -> Path:
     path = VOICES.get(language, VOICES["en"])
     model = cache / (Path(path).name + ".onnx")
-    if not model.is_file():
-        cache.mkdir(parents=True, exist_ok=True)
-        for suffix in (".onnx.json", ".onnx"):
-            target = cache / (Path(path).name + suffix)
-            partial = target.with_name(target.name + ".part")
-            urllib.request.urlretrieve(VOICE_URL.format(path, suffix), partial)
-            partial.replace(target)
+    with VOICE_DOWNLOAD:  # parallel renders share one download of each model
+        if not model.is_file():
+            cache.mkdir(parents=True, exist_ok=True)
+            for suffix in (".onnx.json", ".onnx"):
+                target = cache / (Path(path).name + suffix)
+                partial = target.with_name(target.name + ".part")
+                urllib.request.urlretrieve(VOICE_URL.format(path, suffix), partial)
+                partial.replace(target)
     return model
 
 
