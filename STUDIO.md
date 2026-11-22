@@ -172,12 +172,29 @@ and lets you download it or change its text; custom text is kept on re-render.
 ### AI Director
 
 Jobs and re-renders accept `director` (`{"enabled": true, "hook": true, "edits": true,
-"sfx": true, "music": "auto"|"on"|"off"}`; new jobs default to enabled, clips from
-older jobs stay off until re-rendered with it). Before the final MP4 it plans the edit
-locally from Whisper word timings, audio loudness and the chat peak, with no external
-model or network call:
+"sfx": true, "music": "auto"|"on"|"off", "story": true, "voiceover": false,
+"hook_text": null}`; new jobs default to enabled, clips from older jobs stay off until
+re-rendered with it). Before the final MP4 it plans the edit locally from Whisper word
+timings, audio loudness and the chat peak:
 
-- **Hook**: copies the strongest 1.5–3 s moment (loud reaction, excited words, near the
+- **Storytelling hook** (`story`, on by default): the clip opens on a ~3 s card, a dimmed
+  still of the build-up with a bold title popping in word by word, a hit and a riser (or a
+  spring for funny moments), then the story plays as build-up → main event → reaction →
+  natural ending. The event is the loudest reaction onset near the chat peak; the
+  build-up starts at a sentence 5–14 s earlier and the clip ends once speech and loudness
+  have settled after the reaction (never mid-word). The hook names the streamer (YouTube
+  channel) and the game when the stream title names one, in Indonesian or English to
+  match the transcript, from the event type read off the dialogue and chat (karma, fail,
+  scare, win, funny, rage, shock, wholesome). It teases the moment without telling the
+  outcome, and clips of one stream get different hooks. `director_result.edits.hook`
+  holds the text, up to three `options`, the event type, and the build-up and payoff
+  lengths; the clip card previews the hook, offers the options and takes your own text
+  as `hook_text` on re-render. Set `CLIPPER_LLM_API_KEY` (plus optional
+  `CLIPPER_LLM_BASE_URL`, `CLIPPER_LLM_MODEL`, default `gpt-4o-mini`) to have an
+  OpenAI-compatible model write the hooks from the transcript; any error falls back to
+  the offline writer. `voiceover` reads the hook with an offline Piper voice
+  (downloaded once into `<data dir>/voices`).
+- **Teaser hook** (`story: false`): copies the strongest 1.5–3 s moment (loud reaction, excited words, near the
   chat peak) to the front, with a punch-in zoom, the thumbnail hook text as a title,
   a whoosh and a flash transition into the clip.
 - **Smart editing**: trims quiet lead-in, jump-cuts dead air over 0.8 s (never around

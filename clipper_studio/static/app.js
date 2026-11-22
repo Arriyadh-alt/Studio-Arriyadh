@@ -17,14 +17,15 @@ const renderedOffset = (clip, offset) => {
   const shot=timeline.find(([start,end])=>offset<end) || timeline[timeline.length-1];
   return shot[2] + Math.min(shot[1]-shot[0], Math.max(0, offset-shot[0]));
 };
-const directorDefaults = value => ({enabled:true,hook:true,edits:true,sfx:true,music:'auto',...value});
+const directorDefaults = value => ({enabled:true,hook:true,edits:true,sfx:true,music:'auto',story:true,voiceover:false,hook_text:null,...value});
+const directorKeys = ['enabled','hook','edits','sfx','music','story','voiceover','hook_text'];
 const directorLabels = {hook:'Hook',pacing:'Pacing',emotion:'Emotion',dialogue:'Dialogue',chat:'Chat'};
 function directorHtml(clip, draft) {
   const d=directorDefaults(draft.director), r=clip.director_result;
   const edits=r?.edits, report=r?.status==='used' ? `<div class="director-report">
     <p class="director-score"><strong>${r.score.overall}</strong><span>viral score</span></p>
     <ul class="director-bars">${Object.entries(directorLabels).map(([k,l])=>`<li><span>${l}</span><meter min="0" max="100" value="${r.score[k]}"></meter><span>${r.score[k]}</span></li>`).join('')}</ul>
-    <p class="hint">${[edits.hook?`${edits.hook.duration.toFixed(1)} s hook from ${timestamp(edits.hook.source_start)}`:'No teaser hook',`${edits.cuts} jump cuts`,`${edits.removed_seconds.toFixed(1)} s trimmed`,`${edits.zooms} zooms`,`${edits.sound_effects} sound effects`,edits.music?'music bed':''].filter(Boolean).map(escapeHtml).join(' · ')}</p>
+    <p class="hint">${[edits.hook?.style==='story'?`${edits.hook.duration.toFixed(1)} s story hook · ${edits.hook.build_up.toFixed(1)} s build-up · ${edits.hook.payoff.toFixed(1)} s payoff & reaction`:edits.hook?`${edits.hook.duration.toFixed(1)} s hook from ${timestamp(edits.hook.source_start)}`:'No teaser hook',`${edits.cuts} jump cuts`,`${edits.removed_seconds.toFixed(1)} s trimmed`,`${edits.zooms} zooms`,`${edits.sound_effects} sound effects`,edits.music?'music bed':''].filter(Boolean).map(escapeHtml).join(' · ')}</p>
     <ul class="quality">${r.quality.map(q=>`<li class="${escapeHtml(q.status)}"><strong>${escapeHtml(q.check)}</strong> ${escapeHtml(q.detail)}</li>`).join('')}</ul>
     ${r.suggestions.length?`<ul class="suggestions">${r.suggestions.map(t=>`<li>${escapeHtml(t)}</li>`).join('')}</ul>`:''}</div>`
     : `<p class="hint">${r?.status==='unavailable'?'AI Director couldn’t edit this clip; it was rendered unedited.':d.enabled?'Re-render to let AI Director edit this clip.':'AI Director off'}</p>`;
@@ -34,7 +35,20 @@ function directorHtml(clip, draft) {
     <label class="check"><input type="checkbox" data-director="edits" ${d.edits?'checked':''}> Cuts &amp; zooms</label>
     <label class="check"><input type="checkbox" data-director="sfx" ${d.sfx?'checked':''}> Sound effects</label>
     <label>Music<select data-director="music">${['auto','on','off'].map(m=>`<option value="${m}" ${d.music===m?'selected':''}>${m==='auto'?'Auto':m==='on'?'Always':'Off'}</option>`).join('')}</select></label>
+    <label class="check"><input type="checkbox" data-director="story" ${d.story?'checked':''}> Storytelling hook</label>
+    <label class="check"><input type="checkbox" data-director="voiceover" ${d.voiceover?'checked':''}> AI voice-over</label>
+    ${storyHtml(clip,d)}
     ${report}</fieldset>`;
+}
+function storyHtml(clip, d) {
+  const hook=clip.director_result?.edits?.hook, story=hook?.style==='story';
+  const text=d.hook_text || (story ? hook.text : '');
+  const still=clip.source_still_url ? `.${escapeHtml(clip.source_still_url)}?v=${clip.rendered_at||0}` : '';
+  return `<div class="story-hook">
+    <div class="story-preview" ${still?`style="background-image:url('${still}')"`:''}><span class="story-preview-text">${escapeHtml(text || 'Your storytelling hook appears here')}</span></div>
+    <label>Hook text<input data-director="hook_text" maxlength="64" value="${escapeHtml(d.hook_text||'')}" placeholder="${escapeHtml(story ? hook.text : 'Written automatically when the clip renders')}" autocomplete="off"></label>
+    ${story && hook.options?.length ? `<div class="story-options" role="group" aria-label="Suggested hooks">${hook.options.map(o=>`<button type="button" data-hook-option="${escapeHtml(o)}">${escapeHtml(o)}</button>`).join('')}</div>` : ''}
+    <p class="hint">${story ? escapeHtml([hook.streamer, hook.game, hook.category, hook.language==='id'?'Indonesian':'English', hook.writer==='llm'?'written by LLM':'written offline'].filter(Boolean).join(' · ')) + '. ' : ''}Leave blank for the automatic hook; re-render to apply.</p></div>`;
 }
 function facecamHtml(clip, draft) {
   const f=facecamDefaults(draft.facecam), result=clip.facecam_result, box=f.box || result?.box;
@@ -237,7 +251,7 @@ $('#refresh-jobs').addEventListener('click',()=>refresh());
 $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
-    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value},...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked},...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
@@ -247,7 +261,7 @@ function saveDraft(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id);
   const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
   const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
-  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,director:Object.fromEntries(['enabled','hook','edits','sfx','music'].map(k=>{const el=$(`[data-director=${k}]`,node);return [k,el.type==='checkbox'?el.checked:el.value];})),...CaptionControls.read(node)});
+  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,director:Object.fromEntries(directorKeys.map(k=>{const el=$(`[data-director=${k}]`,node);return [k,k==='hook_text'?(el.value.trim()||null):el.type==='checkbox'?el.checked:el.value];})),...CaptionControls.read(node)});
   draftFeedback(node);
 }
 function draftFeedback(node) {
@@ -284,7 +298,20 @@ $('#delete-unkept').addEventListener('click',async event=>{
   try {for(const clip of clips){await api(`./api/jobs/${current.id}/clips/${clip.id}`,'DELETE');drafts.delete(clip.id);}}
   catch(error){notice(error.message);}finally{event.target.disabled=false;await refresh();}
 });
-$('#clips').addEventListener('input',event=>{if(event.target.closest('.review'))saveDraft(event.target.closest('.clip'));});
+$('#clips').addEventListener('input',event=>{
+  if(event.target.matches('[data-director=hook_text]')) {
+    const preview=$('.story-preview-text',event.target.closest('.story-hook'));
+    preview.textContent=event.target.value.trim() || event.target.placeholder;
+  }
+  if(event.target.closest('.review'))saveDraft(event.target.closest('.clip'));
+});
+$('#clips').addEventListener('click',event=>{
+  const option=event.target.closest('[data-hook-option]');
+  if(!option) return;
+  const input=$('[data-director=hook_text]',option.closest('.story-hook'));
+  input.value=option.dataset.hookOption;
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+});
 $('#clips').addEventListener('change',event=>{if(event.target.closest('.review'))saveDraft(event.target.closest('.clip'));});
 $('#clips').addEventListener('click',async event=>{
   const button=event.target.closest('button'); if(!button || !current)return;

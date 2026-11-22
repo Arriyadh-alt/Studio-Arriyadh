@@ -9,3 +9,10 @@
 .quality li::before{position:absolute;left:0}.quality .pass::before{content:"✓";color:#b8f477}
 .quality .warn::before{content:"!";color:#f5b04c;font-weight:700}.quality .skip::before{content:"–";opacity:.6}
 .suggestions li{font-size:.85rem;opacity:.85}.suggestions li::before{content:"✦ "}
+.story-hook{display:grid;gap:8px;min-width:0}
+.story-preview{aspect-ratio:9/6;border-radius:8px;background:#101317 center/cover no-repeat;display:grid;place-items:center;padding:12px;position:relative;overflow:hidden}
+.story-preview::before{content:"";position:absolute;inset:0;background:rgba(0,0,0,.45)}
+.story-preview-text{position:relative;font:900 1.15rem/1.2 "Montserrat",system-ui,sans-serif;text-transform:uppercase;text-align:center;color:#fff;background:rgba(16,19,23,.85);padding:6px 10px;border-radius:4px;animation:story-pop .35s ease-out}
+@keyframes story-pop{from{transform:scale(.85);opacity:0}to{transform:none;opacity:1}}
+.story-options{display:flex;flex-wrap:wrap;gap:6px}
+.story-options button{font-size:.8rem;padding:4px 8px;border-radius:999px}

@@ -31,14 +31,16 @@ from starlette.background import BackgroundTask
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_band, hook_title_ass,
-                                     loudness, mix_audio, normalize_loudness, plan_edit, plan_record, quality_check, remap_captions)
+from shorts_clipper.director import (STORY_SIZE, DirectorOptions, cut_source, effects_for, framing_fix, hook_band,
+                                     hook_title_ass, loudness, mix_audio, normalize_loudness, plan_edit, plan_record,
+                                     quality_check, remap_captions)
+from shorts_clipper.story import game_name, hook_language, streamer_name, synthesize_voice
 from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
                                     layout_facecam, save_source_still)
 from shorts_clipper.youtube import YouTubeAccessError
 
-from .chat import ChatReplayError, fetch_chat, fetch_metadata
+from .chat import METADATA_KEYS, ChatReplayError, fetch_chat, fetch_metadata
 from .scheduler import Scheduler
 from .spikes import detect_spikes
 
@@ -81,6 +83,9 @@ class DirectorSpec(BaseModel):
     edits: bool = True
     sfx: bool = True
     music: Literal["auto", "on", "off"] = "auto"
+    story: bool = True
+    voiceover: bool = False
+    hook_text: str | None = Field(default=None, max_length=64)
 
 
 LEGACY_DIRECTOR = {**DirectorSpec().model_dump(), "enabled": False}
@@ -158,6 +163,22 @@ def rendered_offset(clip, offset):
         if start <= offset < end:
             return at + offset - start
     return None
+
+
+def story_context(job, clip, caption_language, work):
+    """What the storytelling hook writer knows about the stream and this clip."""
+    metadata = job.get("metadata") or {}
+    used = [hook["text"] for other in job.get("clips", []) if other.get("id") != clip.get("id")
+            and (hook := ((other.get("director_result") or {}).get("edits") or {}).get("hook")) and hook.get("text")]
+    requested = clip.get("language") if clip.get("language") not in (None, "auto") else None
+
+    def voice(text, language):
+        path = work / "hook-voice.wav"
+        return path, synthesize_voice(text, language, path, store.root / "voices")
+
+    return {"name": streamer_name(metadata), "game": game_name(metadata.get("title")),
+            "title": metadata.get("title"), "language": hook_language(caption_language or requested, metadata.get("title")),
+            "messages": clip.get("message_sample", ()), "used": used, "seed": clip.get("id", ""), "voice": voice}
 
 
 def thumbnail_hook(job, clip, peak, captions=()):
@@ -274,7 +295,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     update(jid, generation, stage=f"{clip_label} · AI Director planning edits")
                     try:
                         plan = plan_edit(loudness(source, duration), captions, duration, director, peak,
-                                         spec.get("score"), spec.get("thumbnail_text") or hook)
+                                         spec.get("score"), spec.get("thumbnail_text") or hook,
+                                         story_context(job, spec, caption_language, work))
                         directed = cut_source(source, work / "directed.mp4", plan)
                     except Exception:
                         plan, directed = None, None
@@ -326,8 +348,14 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 ass = to_ass(shown, style) if spec["captions"] else None
                 layout = {"rect": overlay.rect if overlay else None, "style": style if spec["captions"] else None}
                 if plan and plan.hook and plan.hook.get("text"):
-                    layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"])
-                    ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + 0.7, top=layout["hook"][0])
+                    if plan.hook.get("style") == "story":
+                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"],
+                                                   preferred=760, size=STORY_SIZE)
+                        ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"], top=layout["hook"][0],
+                                             story=True, highlight=plan.hook.get("streamer"))
+                    else:
+                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"])
+                        ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + 0.7, top=layout["hook"][0])
                 if ass is not None:
                     subtitles = work / "captions.ass"
                     subtitles.write_text(ass, encoding="utf-8")
@@ -464,7 +492,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 job = active_job(jid, generation)
                 metadata_cache[jid, generation] = info
                 job.update(status="queued", stage="Queued for chat analysis",
-                           metadata={key: info.get(key) for key in ("id", "title", "duration", "thumbnail")})
+                           metadata={key: info.get(key) for key in METADATA_KEYS})
                 store.save(job)
                 pending.put((jid, None, generation))
         except WorkCancelled:
