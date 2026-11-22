@@ -54,7 +54,7 @@ def main(argv=None) -> int:
             subtitles = None
             if not args.no_captions:
                 print(f"Transcribing locally ({args.model}) ...", flush=True)
-                captions = transcribe(section, args.model, args.language)
+                captions = transcribe(section, args.model, args.language, clip_end=video_duration(section))
                 if not captions:
                     print("No speech detected; saving video without captions.", flush=True)
                 subtitles = Path(tmp) / "captions.ass"

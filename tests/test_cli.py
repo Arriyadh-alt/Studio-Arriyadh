@@ -11,7 +11,7 @@ def test_default_captions_and_srt(tmp_path):
          patch.object(cli, "transcribe", return_value=[Caption(0, 1, "Hello")]) as transcribe, \
          patch.object(cli, "make_vertical_clip") as render:
         assert cli.main(["URL", "0", "10", "--srt", "-o", str(output)]) == 0
-        transcribe.assert_called_once_with(tmp_path / "source.mp4", "base", None)
+        transcribe.assert_called_once_with(tmp_path / "source.mp4", "base", None, clip_end=10)
         assert render.call_args.args[-1].name == "captions.ass"
     assert "Hello" in output.with_suffix(".srt").read_text()
 
