@@ -348,11 +348,43 @@ def test_moment_invariants_with_nondefault_bins(bin_seconds):
 
 
 @pytest.mark.parametrize('text', ['gg everyone', 'ggs all', 'see ya', 'thanks for the stream',
-                                  'thank you for another great livestream'])
+                                  'thank you for another great livestream', 'byyeeee',
+                                  'thank you so much for the dual stream'])
 def test_sparse_late_outro_context_suppresses_copypasta_wave(text):
     messages = [Message(550, str(i), 'bop') for i in range(6)]
-    messages += [Message(555, f'outro{i}', text) for i in range(2)]
+    messages += [Message(555, f'outro{i}', text) for i in range(4)]
     assert detect_spikes(messages, 600)[0] == []
+
+
+@pytest.mark.parametrize('peak,farewell_delay', [(3300, 25), (3500, 25), (3500, 5)])
+def test_late_sparse_gameplay_survives_two_unrelated_farewells(peak, farewell_delay):
+    messages = [Message(peak, str(i), 'LOL') for i in range(6)]
+    messages += [Message(peak + farewell_delay, f'outro{i}', 'thanks for the stream') for i in range(2)]
+    picks, _ = detect_spikes(messages, 3600)
+    assert len(picks) == 1
+    assert picks[0]['peak'] == peak
+
+
+def test_outro_filter_does_not_cover_entire_last_fifteen_percent():
+    messages = [Message(3200, str(i), 'bop') for i in range(6)]
+    messages += [Message(3205, f'outro{i}', 'thanks for the stream') for i in range(4)]
+    picks, _ = detect_spikes(messages, 3600)
+    assert picks[0]['peak'] == 3200
+
+
+def test_outro_filter_ignores_majority_farewells_beyond_clip_end():
+    messages = [Message(550, str(i), 'LOL') for i in range(2)]
+    messages += [Message(575, f'outro{i}', 'thanks for the stream') for i in range(2)]
+    picks, _ = detect_spikes(messages, 600)
+    assert picks[0]['peak'] == 550
+    assert picks[0]['end'] < 575
+
+
+def test_outro_filter_does_not_use_earlier_unrelated_context():
+    messages = [Message(525, f'outro{i}', 'thanks for the stream') for i in range(4)]
+    messages += [Message(550, str(i), 'LOL') for i in range(6)]
+    picks, _ = detect_spikes(messages, 600)
+    assert picks[0]['peak'] == 550
 
 
 def test_outro_context_requires_independent_authors():

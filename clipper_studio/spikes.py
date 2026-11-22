@@ -158,12 +158,6 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         giveaways = {m.author.strip().casefold() for m in context if re.search(r"\b(?:got it|giveaway|free nitro|discord nitro|redeem)\b", m.text, re.I)}
         if len(farewells) >= max(3, .1 * len(context_authors)) or len(giveaways) >= max(3, .2 * len(context_authors)):
             continue
-        outros = {m.author.strip().casefold() for m in context if re.search(
-            r"\b(?:bye+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
-            r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
-            r"(?:(?:great|awesome|fun) )?(?:stream|live(?:stream)?))\b", m.text, re.I)}
-        if point['time'] >= .85 * duration and len(outros) >= max(2, .1 * len(context_authors)):
-            continue
         onset = i
         empty_bins = 0
         for previous in range(i - 1, max(-1, i - math.floor(30 / bin_seconds) - 1), -1):
@@ -180,6 +174,16 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         end = min(duration, start + 60, max(start + 30, point['time'] + tail))
         if end - start < min(30, duration) or point['time'] >= end:
             continue
+        if point['time'] >= duration - min(300, .15 * duration):
+            reaction_context = [m for j in range(max(0, i - radius), min(len(bins), math.ceil(end / bin_seconds)))
+                                for m in bins[j] if start <= m.offset_seconds < end]
+            reaction_authors = {m.author.strip().casefold() for m in reaction_context}
+            outros = {m.author.strip().casefold() for m in reaction_context if re.search(
+                r"\b(?:by+e+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
+                r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
+                r"(?:(?:great|awesome|fun|dual) )?(?:stream|live(?:stream)?))\b", m.text, re.I)}
+            if len(outros) >= 2 and len(outros) > .25 * len(reaction_authors):
+                continue
         samples = []
         for message, _ in sorted(zip(bins[i], message_weights[i]), key=lambda item: -item[1]):
             if message.text.strip().casefold() not in {s.strip().casefold() for s in samples}:
