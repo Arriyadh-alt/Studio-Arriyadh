@@ -101,7 +101,7 @@ def chunk_words(words, max_words: int = 4, clip_end: float | None = None) -> lis
     balanced = []
     for caption in captions:
         previous = balanced[-1] if balanced else None
-        combined = join_tokens([previous.text, caption.text]) if previous else ''
+        combined = f'{previous.text} {caption.text}' if previous else ''
         if (previous and len(caption.text.split()) == 1
                 and not previous.text.endswith(('.', '!', '?', ',', ';', ':'))
                 and caption.start - previous.end <= 0.5

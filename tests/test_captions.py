@@ -74,6 +74,12 @@ def test_orphan_does_not_merge_across_pause_or_punctuation():
     assert len(chunk_words([word('Hello', 0, 1), word('Next', 2, 3)])) == 2
 
 
+def test_quoted_orphan_preserves_space_after_number():
+    words = [word(t, i * .2, (i + 1) * .2)
+             for i, t in enumerate([' Say', ' the', ' number', ' 5', " 'yes'"])]
+    assert chunk_words(words) == [Caption(0, 1, "Say the number 5 'yes'")]
+
+
 @pytest.mark.parametrize('tokens, expected', [
     ([' as', ' a', ' drop', '-in'], 'as a drop-in'),
     (['drop', '-', 'in', ','], 'drop-in,'),
