@@ -7,6 +7,7 @@
 @font-face{font-family:'Bebas Neue';src:url('./caption-fonts/BebasNeue-Regular.ttf') format('truetype');font-weight:400 900;font-display:swap}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"}
 .caption-settings{border-top:1px solid var(--line);margin:8px 0 16px;min-width:0}.caption-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;padding:10px 0}.caption-grid label{min-width:0}.caption-grid input[type=color]{padding:5px}.caption-grid input[type=range]{min-height:44px}.caption-sample{background:#101419;border-radius:8px;padding:18px;text-align:center;color:white;font-size:24px;font-weight:800;overflow-wrap:anywhere;text-shadow:1px 2px 2px black}.caption-sample span{color:#ffe34d}.caption-grid .check{font-size:12px}.caption-grid select{max-width:100%}
+.caption-sample{display:grid;align-items:end;width:min(100%,144px);aspect-ratio:9/16;margin:8px auto;padding:12px}.caption-sample p{margin:0}
 .preview.with-thumbnail{align-items:center;gap:12px;padding:12px}
 .preview.with-thumbnail video,.thumbnail-preview{width:calc(50% - 6px);min-width:0}
 .thumbnail-preview{margin:0;position:relative;display:grid;place-items:center}
