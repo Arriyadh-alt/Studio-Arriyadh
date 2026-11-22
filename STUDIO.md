@@ -62,6 +62,12 @@ Activity points: `{time,count,baseline,intensity,score}` in 5-second bins.
 Clip shape: `{id,onset,peak,score,start,end,message_sample,mode,captions,status,
 error,file_url,download_url,thumbnail_url}`; status `queued`, `rendering`, `ready`,
 or `failed`. URLs are null until ready. Errors are explicit strings.
+New clips also have a stable `number`, assigned in start order and preserved on deletion.
+Older clips fall back to their list position. Single downloads use
+`<title-slug>-highlight-02.mp4`; kept ZIPs use `<title-slug>-kept-clips.zip`
+and contain `highlight-02.mp4` entries matching the review numbers. Slugs are
+ASCII lowercase hyphenated titles, at most 40 characters, with `clipper-studio`
+as the empty-title fallback.
 Each clip gets at most three full attempts (initial + two retries) across section
 download, transcription, video conversion and thumbnail creation, with 2s/4s
 backoff. `attempt` and stage expose retry progress. Final errors remain visible
@@ -69,7 +75,9 @@ on the clip with a Re-render action. `rendered_at` changes on successful renders
 to avoid stale video caching. Kept clips can be downloaded together as a ZIP.
 
 Validation errors: 422; missing job/clip: 404; unavailable file or attempting
-edits/deletion while a job is active: 409. A video without replay makes the
+edits while that clip is queued/rendering or deletion while it is rendering: 409.
+Ready clips can be re-rendered while Autopilot runs; queued clips may be deleted
+and are skipped by the worker. A video without replay makes the
 background job fail with a clear `error`. Fewer than the requested N highlights
 (including zero) are valid when there are insufficient separated spikes.
 
