@@ -114,3 +114,15 @@ No new browser/visual check was requested or performed for queue/cancel controls
 The existing 8080 process was not restarted or used for test requests. Cancellation
 is cooperative at stage boundaries, not process termination. The Cancel button
 is capability-gated so older running backends do not advertise the new endpoint.
+
+## Merge with PR #2 robustness
+
+The real no-chat check was attempted again after combining metadata preflight
+with PR #2's friendly errors and bounded replay downloads. YouTube returned
+`HTTP Error 429: Too Many Requests`, then `Sign in to confirm you’re not a bot`.
+The app returned the mapped friendly load error in **1.75 seconds**, without
+creating a replay directory. No retry was attempted against the rate limit.
+This verifies fast handling of that upstream failure, **not** the no-chat response
+for this run; the earlier successful no-chat timing above remains historical.
+Mocked tests cover no-chat rejection before downloading, including when the
+analysis pool is occupied, plus metadata reuse with bounded replay downloads.

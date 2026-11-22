@@ -1,6 +1,7 @@
 """Local, single-process API. Run with uvicorn clipper_studio.api:app."""
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -28,9 +29,14 @@ from shorts_clipper.captions import to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.video import make_vertical_clip, video_duration
 
-from .chat import fetch_chat, fetch_metadata
+from .chat import ChatReplayError, fetch_chat, fetch_metadata
 from .scheduler import Scheduler
 from .spikes import detect_spikes
+
+
+logger = logging.getLogger(__name__)
+YOUTUBE_URL_ERROR = "Paste a YouTube video link for a finished livestream (watch, live, or youtu.be)."
+ACTIVE_STATUSES = ("queued", "running")
 
 
 class WorkCancelled(Exception):
@@ -47,11 +53,27 @@ class JobRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def youtube_url(cls, value):
-        parsed = urlparse(value)
-        if parsed.scheme != "https" or parsed.hostname not in (
-            "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be") or parsed.username or parsed.password:
-            raise ValueError("Paste an HTTPS YouTube livestream VOD URL")
-        return value
+        value = value.strip()
+        try:
+            parsed = urlsplit(value)
+            if (parsed.scheme != "https" or parsed.username is not None
+                    or parsed.port not in (None, 443) or any(char.isspace() for char in value)):
+                raise ValueError
+        except ValueError:
+            raise ValueError(YOUTUBE_URL_ERROR) from None
+
+        path = parsed.path.removesuffix("/")
+        ids = []
+        if parsed.hostname == "youtu.be":
+            ids = [path.removeprefix("/")]
+        elif parsed.hostname in ("youtube.com", "www.youtube.com", "m.youtube.com"):
+            if path == "/watch":
+                ids = parse_qs(parsed.query, keep_blank_values=True).get("v", [])
+            elif path.startswith("/live/"):
+                ids = [path.removeprefix("/live/")]
+        if len(ids) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{11}", ids[0]):
+            raise ValueError(YOUTUBE_URL_ERROR)
+        return f"https://www.youtube.com/watch?v={ids[0]}"
 
 
 class RenderRequest(BaseModel):
@@ -218,6 +240,27 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                        elapsed_seconds=round(time.time() - job.get("processing_started", time.time()), 2))
             store.save(job)
 
+    def fail_job(jid, generation, error):
+        if isinstance(error, ChatReplayError):
+            message = str(error)
+        else:
+            logger.exception("Job %s failed unexpectedly", jid)
+            message = "Studio couldn’t process this replay. Try submitting it again."
+        try:
+            with store.lock:
+                job = active_job(jid, generation)
+                job.update(status="failed", stage="Failed", error=message, generation=generation + 1)
+                for clip in job["clips"]:
+                    if clip["status"] in ("queued", "rendering"):
+                        clip.update(status="failed", error=message)
+                store.save(job)
+                pending.cancel(jid)
+                metadata_cache.pop((jid, generation), None)
+        except WorkCancelled:
+            pass
+        except Exception:
+            logger.exception("Could not save failure for job %s", jid)
+
     def preflight(jid, generation):
         try:
             update(jid, generation, status="running", stage="Checking stream metadata", processing_started=time.time())
@@ -234,10 +277,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         except WorkCancelled:
             pass
         except Exception as error:
-            try:
-                update(jid, generation, status="failed", stage="Failed", error=str(error))
-            except WorkCancelled:
-                pass
+            fail_job(jid, generation, error)
 
     def analyze(jid, generation):
         try:
@@ -265,10 +305,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         except WorkCancelled:
             pass
         except Exception as error:
-            try:
-                update(jid, generation, status="failed", stage="Failed", error=str(error))
-            except WorkCancelled:
-                pass
+            fail_job(jid, generation, error)
 
     def render_job(jid, cid, generation):
         try:
@@ -276,6 +313,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             finish(jid, generation)
         except WorkCancelled:
             pass
+        except Exception as error:
+            fail_job(jid, generation, error)
 
     pending = Scheduler(analyze, render_job,
                         analysis_workers=analysis_workers if analysis_workers is not None else int(os.environ.get("CLIPPER_ANALYSIS_WORKERS", "3")),
@@ -292,7 +331,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         if position is None and waiting and not any(c["status"] == "rendering" for c in job["clips"]):
             position = min(waiting)
         job["queue_position"] = position
-        if position is not None and job["status"] in ("queued", "running"):
+        if position is not None and job["status"] in ACTIVE_STATUSES:
             job.update(status="queued", stage=f"Queued (position {position})")
         return job
 
@@ -304,7 +343,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     for number, clip in enumerate(job["clips"], 1):
                         clip.setdefault("number", number)
                     store.save(job)
-                if job["status"] in ("queued", "running"):
+                if job["status"] in ACTIVE_STATUSES:
                     generation = job.get("generation", 0)
                     job.update(status="queued", stage="Resuming after restart", error=None,
                                analysis_complete=job.get("analysis_complete", bool(job["clips"])))
@@ -337,9 +376,14 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         return {"id": jid}
 
     @app.get("/api/jobs")
-    def list_jobs():
+    def list_jobs(summary: bool = False):
         with store.lock:
-            return [queued_job(job) for job in store.jobs()]
+            jobs = [queued_job(job) for job in store.jobs()]
+        if not summary:
+            return jobs
+        return [dict(id=job["id"], url=job.get("url"), created_at=job.get("created_at"), status=job["status"],
+                     metadata=job.get("metadata"), clip_count=len(job["clips"]),
+                     queue_position=job["queue_position"]) for job in jobs]
 
     @app.get("/api/jobs/{jid}")
     def get_job(jid: str):
@@ -403,7 +447,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 raise HTTPException(422, "Clip must be within the video and between 0 and 60 seconds long")
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
-            if job["status"] not in ("running", "queued"):
+            if job["status"] not in ACTIVE_STATUSES:
                 job.update(status="queued", stage="Queued re-render", progress=0, error=None,
                            processing_started=time.time())
             job["analysis_complete"] = True

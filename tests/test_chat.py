@@ -1,12 +1,22 @@
 from pathlib import Path
 
 import pytest
+from yt_dlp.utils import DownloadError
 
-from clipper_studio.chat import Message, fetch_chat, fetch_metadata, parse_chat
+from clipper_studio.chat import ChatReplayError, Message, fetch_chat, fetch_metadata, parse_chat
+
+
+FIXTURE = Path(__file__).parent / "fixtures/chat.jsonl"
+REPLAY_URL = "https://www.youtube.com/watch?v=LIxBN4AHMEE"
+REPLAY_INFO = {
+    "live_status": "was_live",
+    "duration": 42403,
+    "subtitles": {"live_chat": [{"ext": "json"}]},
+}
 
 
 def test_parse_fixture():
-    with (Path(__file__).parent / "fixtures/chat.jsonl").open() as stream:
+    with FIXTURE.open() as stream:
         assert parse_chat(stream) == [Message(12.5, "Alice", "WOW :fire:"),
                                       Message(15, "Bob", "Great stream!"), Message(20, "Carol", "Sticker")]
 
@@ -17,87 +27,117 @@ def test_empty_and_malformed():
         parse_chat(["broken json"])
 
 
-def test_no_replay(monkeypatch, tmp_path):
+@pytest.fixture
+def stub_yt_dlp(monkeypatch):
     class Downloader:
+        info = REPLAY_INFO
+        extraction_error = None
+        download = None
+        extractions = 0
+        downloads = 0
+
         def __init__(self, options):
             assert options["skip_download"]
-            assert not options["writesubtitles"]
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def extract_info(self, *args, **kwargs):
-            assert kwargs == {"download": False}
-            return {"duration": 500}
-        def process_ie_result(self, *args, **kwargs):
-            pytest.fail("No-chat videos must fail before replay download")
-    monkeypatch.setattr("clipper_studio.chat.yt_dlp.YoutubeDL", Downloader)
-    with pytest.raises(ValueError, match="no live-chat replay"):
-        fetch_chat("https://youtube.com/watch?v=test", tmp_path)
-    assert not list(tmp_path.iterdir())
-
-
-@pytest.mark.parametrize("fields", [{"is_live": True, "was_live": True}, {"was_live": False},
-                                  {"was_live": True, "duration": None}])
-def test_metadata_requires_finished_replay(monkeypatch, fields):
-    class Downloader:
-        def __init__(self, options):
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def extract_info(self, *args, **kwargs):
-            return {"duration": 500, "subtitles": {"live_chat": [{}]}, **fields}
-    monkeypatch.setattr("clipper_studio.chat.yt_dlp.YoutubeDL", Downloader)
-    with pytest.raises(ValueError, match="finished livestream VOD"):
-        fetch_metadata("https://youtu.be/test")
-
-
-def test_preflight_metadata_reused_for_chat(monkeypatch, tmp_path):
-    info = {"id": "test", "title": "Replay", "duration": 500, "was_live": True,
-            "subtitles": {"live_chat": [{}]}}
-    calls = []
-
-    class Downloader:
-        def __init__(self, options):
             self.options = options
+
         def __enter__(self):
             return self
+
         def __exit__(self, *args):
             pass
+
         def extract_info(self, *args, **kwargs):
-            calls.append("metadata")
+            type(self).extractions += 1
+            assert kwargs == {"download": False}
             assert not self.options["writesubtitles"]
-            return info
-        def process_ie_result(self, received, download):
-            calls.append("download")
-            assert received is info and download
+            if self.extraction_error:
+                raise DownloadError(self.extraction_error)
+            return self.info
+
+        def process_ie_result(self, info, download):
+            type(self).downloads += 1
             assert self.options["writesubtitles"]
-            fixture = Path(__file__).parent / "fixtures/chat.jsonl"
-            (tmp_path / "replay.live_chat.json").write_text(fixture.read_text())
+            assert download and info == REPLAY_INFO
+            output = Path(self.options["outtmpl"]).parent / "replay.live_chat.json"
+            if self.download:
+                self.download(output, self.options["progress_hooks"][0])
+            else:
+                output.write_bytes(FIXTURE.read_bytes())
 
     monkeypatch.setattr("clipper_studio.chat.yt_dlp.YoutubeDL", Downloader)
-    metadata = fetch_metadata("https://youtu.be/test")
-    result, messages = fetch_chat("https://youtu.be/test", tmp_path, metadata)
-    assert calls == ["metadata", "download"]
-    assert result["title"] == "Replay" and len(messages) == 3
+    return Downloader
 
 
-@pytest.mark.parametrize("contents,error", [(None, "did not produce a chat file"),
-                                          ("", "no timestamped messages"), ("broken", "Expecting value")])
-def test_chat_download_empty_and_malformed(monkeypatch, tmp_path, contents, error):
-    class Downloader:
-        def __init__(self, options):
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def process_ie_result(self, *args, **kwargs):
-            if contents is not None:
-                (tmp_path / "replay.live_chat.json").write_text(contents)
-    monkeypatch.setattr("clipper_studio.chat.yt_dlp.YoutubeDL", Downloader)
-    info = {"duration": 500, "was_live": True, "subtitles": {"live_chat": [{}]}}
-    with pytest.raises(ValueError, match=error):
-        fetch_chat("https://youtu.be/test", tmp_path, info)
+@pytest.mark.parametrize("info,message", [
+    ({"duration": 500, "live_status": "not_live"}, "regular YouTube video"),
+    ({"duration": 500, "live_status": "was_live"}, "no live-chat replay"),
+    ({"live_status": "is_live"}, "replay isn’t ready yet"),
+    ({"live_status": "is_upcoming"}, "replay isn’t ready yet"),
+    ({"live_status": "post_live"}, "replay isn’t ready yet"),
+    (dict(REPLAY_INFO, duration=None), "hasn’t published the replay duration"),
+    (dict(REPLAY_INFO, duration=0), "hasn’t published the replay duration"),
+    (dict(REPLAY_INFO, duration=float("inf")), "hasn’t published the replay duration"),
+    (dict(REPLAY_INFO, duration=float("nan")), "hasn’t published the replay duration"),
+])
+def test_missing_replay_status(stub_yt_dlp, tmp_path, info, message):
+    stub_yt_dlp.info = info
+    with pytest.raises(ChatReplayError, match=message):
+        fetch_chat(REPLAY_URL, tmp_path)
+    assert stub_yt_dlp.downloads == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("error,message", [
+    ("ERROR: [youtube] LIxBN4AHMEE: Private video. Sign in.", "private, restricted, or unavailable"),
+    ("ERROR: [youtube] LIxBN4AHMEE: This video is unavailable", "private, restricted, or unavailable"),
+    ("Failed to connect", "couldn’t load this YouTube video"),
+])
+def test_youtube_error(stub_yt_dlp, tmp_path, error, message):
+    stub_yt_dlp.extraction_error = error
+    with pytest.raises(ChatReplayError, match=message):
+        fetch_chat(REPLAY_URL, tmp_path)
+
+
+def test_long_replay_download(stub_yt_dlp, tmp_path):
+    metadata, messages = fetch_chat(REPLAY_URL, tmp_path)
+    assert metadata["duration"] == 42403
+    assert len(messages) == 3
+    assert (tmp_path / "replay.live_chat.json").read_bytes() == FIXTURE.read_bytes()
+
+
+@pytest.mark.parametrize("limit", ["time", "size", "final_size"])
+def test_replay_limit_cleans_up_incomplete_download(stub_yt_dlp, tmp_path, monkeypatch, limit):
+    now = [0]
+    monkeypatch.setattr("clipper_studio.chat.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("clipper_studio.chat.MAX_REPLAY_SECONDS", 10)
+    monkeypatch.setattr("clipper_studio.chat.MAX_REPLAY_BYTES", 20)
+
+    def download(self, output, progress):
+        output.write_bytes(b"a" * 21)
+        now[0] = 11 if limit == "time" else 1
+        progress({"downloaded_bytes": 21 if limit == "size" else 1})
+
+    stub_yt_dlp.download = download
+    with pytest.raises(ChatReplayError, match="exceeded Studio’s processing limit"):
+        fetch_chat(REPLAY_URL, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preflight_metadata_reused_for_bounded_chat_download(stub_yt_dlp, tmp_path):
+    info = fetch_metadata(REPLAY_URL)
+    assert stub_yt_dlp.extractions == 1 and stub_yt_dlp.downloads == 0
+    result, messages = fetch_chat(REPLAY_URL, tmp_path, info)
+    assert stub_yt_dlp.extractions == 1 and stub_yt_dlp.downloads == 1
+    assert result["duration"] == 42403 and len(messages) == 3
+
+
+@pytest.mark.parametrize("contents,message", [(None, "couldn’t download"), ("", "no timestamped messages"),
+                                             ("broken", "couldn’t read")])
+def test_chat_download_empty_and_malformed(stub_yt_dlp, tmp_path, contents, message):
+    def download(self, output, progress):
+        if contents is not None:
+            output.write_text(contents)
+    stub_yt_dlp.download = download
+    with pytest.raises(ChatReplayError, match=message):
+        fetch_chat(REPLAY_URL, tmp_path)
+    assert list(tmp_path.iterdir()) == []
