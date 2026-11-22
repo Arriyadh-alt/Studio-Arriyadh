@@ -509,11 +509,15 @@ def mix_audio(video: Path, output: Path, plan: Plan) -> Path:
 
 
 PEAK_LIMIT = 10 ** (-1.5 / 20)
+LIMITER_DELAY = 240  # 5 ms attack at 48 kHz
 
 
 def gain_command(video: Path, output: Path, gain: float) -> list:
     return ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video), "-map", "0:v", "-map", "0:a",
-            "-c:v", "copy", "-af", f"volume={gain:.2f}dB,alimiter=limit={PEAK_LIMIT:.4f}:attack=5:release=50:level=0,"
+            "-c:v", "copy", "-af", f"aresample=48000,volume={gain:.2f}dB,"
+            f"alimiter=limit={PEAK_LIMIT:.4f}:attack=5:release=50:level=0,"
+            # alimiter delays audio by its attack time; trim that off and pad the tail to keep sync and length.
+            f"atrim=start_sample={LIMITER_DELAY},asetpts=PTS-STARTPTS,apad=pad_len={LIMITER_DELAY},"
             "aformat=sample_rates=48000:channel_layouts=stereo",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", str(output)]
 

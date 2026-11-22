@@ -217,3 +217,17 @@ def test_quality_check_framing_warns_on_hook_over_facecam(source):
     checks = {c["check"]: c for c in quality_check(source, plan, [], layout={
         "rect": OutputRect(414, 24, 450, 520), "style": CaptionStyle(), "hook": (380, 530)})}
     assert checks["Framing"]["status"] == "warn" and "Hook title covers the facecam" in checks["Framing"]["detail"]
+
+
+def test_loudness_correction_keeps_audio_in_sync(tmp_path):
+    from shorts_clipper.director import gain_command
+    clip = tmp_path / "impulse.mov"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=s=64x64:d=1", "-f", "lavfi", "-i",
+                    "aevalsrc='if(between(t,0.5,0.501),0.3,0)':d=1:s=48000", "-c:v", "libx264", "-c:a", "pcm_s16le",
+                    "-shortest", str(clip)], check=True)
+    out = tmp_path / "level.mp4"
+    subprocess.run(gain_command(clip, out, 2.0), check=True)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-f", "s16le", "-ac", "1", "-ar", "48000", "-"],
+                         capture_output=True, check=True).stdout
+    audio = np.abs(np.frombuffer(raw, dtype=np.int16))
+    assert abs(int(np.argmax(audio)) - 24000) < 48 and len(audio) >= 47000
