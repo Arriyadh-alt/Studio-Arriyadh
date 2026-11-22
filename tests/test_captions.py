@@ -80,6 +80,26 @@ def test_quoted_orphan_preserves_space_after_number():
     assert chunk_words(words) == [Caption(0, 1, "Say the number 5 'yes'")]
 
 
+@pytest.mark.parametrize('stem, suffix, expected', [('Wi', '-Fi', 'Wi-Fi'), ('don', "'t", "don't")])
+def test_continuations_stay_in_group_at_word_limit(stem, suffix, expected):
+    words = [word(t, i * .2, (i + 1) * .2)
+             for i, t in enumerate([' Use', ' the', ' new', ' ' + stem, suffix, ' next.'])]
+    captions = chunk_words(words)
+    assert captions[0].text == 'Use the new ' + expected + ' next.'
+    words[-1].start, words[-1].end = 3, 3.2
+    captions = chunk_words(words)
+    assert captions[0].text == 'Use the new ' + expected
+    assert captions[0].end == 1
+    assert captions[1].text == 'next.'
+
+
+@pytest.mark.parametrize('stem, suffix, expected', [('Wi', '-Fi', 'Wi-Fi'), ('don', "'t", "don't")])
+def test_orphan_merge_rejoins_original_continuation_tokens(stem, suffix, expected):
+    words = [word(t, i * .2, (i + 1) * .2)
+             for i, t in enumerate([' Use', ' the', ' new', ' word', ' ' + stem, suffix])]
+    assert chunk_words(words) == [Caption(0, pytest.approx(1.2), 'Use the new word ' + expected)]
+
+
 @pytest.mark.parametrize('tokens, expected', [
     ([' as', ' a', ' drop', '-in'], 'as a drop-in'),
     (['drop', '-', 'in', ','], 'drop-in,'),

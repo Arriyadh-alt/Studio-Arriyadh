@@ -81,36 +81,40 @@ class Caption:
 def chunk_words(words, max_words: int = 4, clip_end: float | None = None) -> list[Caption]:
     if max_words < 1:
         raise ValueError("max_words must be positive")
-    captions, group = [], []
+    groups, group = [], []
     for word in words:
         if not word.word.strip() or word.end <= word.start:
             continue
-        if group and (word.start - group[-1].end > 0.5 or word.end - group[0].start > 2.5):
-            captions.append(Caption(group[0].start, group[-1].end, join_tokens(w.word for w in group)))
+        continuation = (not word.word[0].isspace()
+                        and (word.word[0] in "-’'" or (group and group[-1].word == '-')))
+        if group and not continuation and (
+                len(group) >= max_words
+                or group[-1].word.rstrip().endswith((".", "!", "?", ",", ";", ":"))
+                or word.start - group[-1].end > 0.5
+                or word.end - group[0].start > 2.5):
+            groups.append(group)
             group = []
         group.append(word)
-        if len(group) >= max_words or word.word.rstrip().endswith((".", "!", "?", ",", ";", ":")):
-            captions.append(Caption(group[0].start, group[-1].end, join_tokens(w.word for w in group)))
-            group = []
     if group:
-        captions.append(Caption(group[0].start, group[-1].end, join_tokens(w.word for w in group)))
-    if clip_end is None and captions:
-        clip_end = captions[-1].end
-    if clip_end is not None:
-        captions = [Caption(c.start, min(c.end, clip_end), c.text) for c in captions if c.start < clip_end]
+        groups.append(group)
+    if clip_end is None and groups:
+        clip_end = groups[-1][-1].end
     balanced = []
-    for caption in captions:
-        previous = balanced[-1] if balanced else None
-        combined = f'{previous.text} {caption.text}' if previous else ''
-        if (previous and len(caption.text.split()) == 1
-                and not previous.text.endswith(('.', '!', '?', ',', ';', ':'))
-                and caption.start - previous.end <= 0.5
-                and caption.end - previous.start <= 2.5
+    for group in groups:
+        previous = balanced[-1] if balanced else []
+        text = join_tokens(w.word for w in group)
+        previous_text = join_tokens(w.word for w in previous)
+        combined = join_tokens(w.word for w in previous + group)
+        if (previous and len(text.split()) == 1
+                and not previous_text.endswith(('.', '!', '?', ',', ';', ':'))
+                and group[0].start - previous[-1].end <= 0.5
+                and group[-1].end - previous[0].start <= 2.5
                 and len(wrap_caption(combined)) <= 2):
-            previous.text = combined
-            previous.end = caption.end
+            previous.extend(group)
         else:
-            balanced.append(caption)
+            balanced.append(group)
+    balanced = [Caption(group[0].start, min(group[-1].end, clip_end), join_tokens(w.word for w in group))
+                for group in balanced if group[0].start < clip_end]
     for i, caption in enumerate(balanced):
         next_start = balanced[i + 1].start if i + 1 < len(balanced) else clip_end
         caption.end = min(max(caption.end, caption.start + MIN_DURATION), next_start)
