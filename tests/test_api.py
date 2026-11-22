@@ -336,7 +336,8 @@ def test_restart_and_busy_conflicts(tmp_path, media):
         assert job["status"] == "completed_with_errors"
         assert [c["status"] for c in job["clips"]] == ["ready", "ready", "failed"]
         assert job["clips"][1] == {"id": "ready", "status": "ready", "kept": True,
-                                   "number": 2, "queue_position": None}
+                                   "number": 2, "queue_position": None,
+                                   "facecam": {"enabled": True, "position": "auto", "size": 0.42, "box": None}}
         assert job["clips"][2]["error"] == "old error"
 
 

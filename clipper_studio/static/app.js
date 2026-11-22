@@ -9,7 +9,19 @@ const keeping = new Map();
 let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
-const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.language,clip.caption_style,clip.caption_language])}`;
+const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language])}`;
+const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:null,...value});
+function facecamHtml(clip, draft) {
+  const f=facecamDefaults(draft.facecam), result=clip.facecam_result, box=f.box || result?.box;
+  const status=result?.status==='used' ? `${result.origin==='manual'?'Manual camera area':'Facecam detected'} · ${result.position}` : result?.status==='disabled' ? 'Facecam overlay off' : 'No facecam found — draw the camera area';
+  return `<fieldset class="facecam-options" ${locked(clip)?'disabled':''}><legend>Facecam overlay</legend>
+    <label class="check"><input type="checkbox" data-facecam="enabled" ${f.enabled?'checked':''}> Enabled</label>
+    <label>Corner<select data-facecam="position">${['auto','top-left','top-right','bottom-left','bottom-right'].map(p=>`<option value="${p}" ${f.position===p?'selected':''}>${p==='auto'?'Auto':p.replace('-',' ')}</option>`).join('')}</select></label>
+    <label>Size<input type="range" data-facecam="size" min="0.25" max="0.6" step="0.01" value="${f.size}"></label>
+    <p class="hint">${escapeHtml(status)}</p><details><summary>Adjust camera area</summary>
+    ${clip.source_still_url?`<p class="hint">Draw an area, drag to move, or use a corner to resize. Re-render applies your changes.</p><div class="camera-editor"><img draggable="false" alt="Original source frame for camera area" src=".${escapeHtml(clip.source_still_url)}?v=${clip.rendered_at||0}"><div class="camera-box" ${box?'':'hidden'} style="left:${(box?.x||0)*100}%;top:${(box?.y||0)*100}%;width:${(box?.w||0)*100}%;height:${(box?.h||0)*100}%">${['nw','ne','sw','se'].map(c=>`<span class="camera-handle ${c}" data-corner="${c}"></span>`).join('')}</div></div>`:'<p class="hint">Source preview available after rendering.</p>'}
+    <button type="button" data-action="facecam-reset">Reset to auto-detect</button></details></fieldset>`;
+}
 $('#create-caption-style').innerHTML = CaptionControls.html();
 CaptionControls.preview($('#create-caption-style'));
 const thumbnailUrl = clip => clip.thumbnail_url ? `.${clip.thumbnail_url}?v=${clip.thumbnail_version || clip.rendered_at || 0}` : '';
@@ -81,7 +93,7 @@ function chart(job) {
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index,job) {
-  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,...CaptionControls.options(clip)};
+  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),...CaptionControls.options(clip)};
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
@@ -94,6 +106,7 @@ function clipHtml(clip,index,job) {
     ${clip.status==='ready' ? `<form class="thumbnail-editor"><label>Thumbnail text<input name="text" maxlength="64" value="${escapeHtml(clip.thumbnail_text)}" placeholder="${escapeHtml(clip.thumbnail_hook || 'Automatic hook')}" autocomplete="off"></label><p class="hint">Leave blank to use the automatic hook.</p><div class="actions"><button type="submit">Regenerate ↻</button><a class="button thumbnail-download">Download JPG ↓</a></div><p class="hint thumbnail-status" role="status" hidden></p></form>` : ''}
     <form class="review"><div class="time-grid"><div>${timeField('start')}</div><div>${timeField('end')}</div></div>
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
+      ${facecamHtml(clip,draft)}
       ${CaptionControls.html(draft)}
       ${clip.caption_language?`<p class="hint">Transcription language: ${escapeHtml(clip.caption_language)}</p>`:''}
       <p class="draft-note hint" hidden><span>Changes not applied — Re-render to update</span> <button type="button" class="quiet" data-action="reset">Reset</button></p><p class="draft-error error" role="status" hidden></p>
@@ -198,24 +211,30 @@ $('#refresh-jobs').addEventListener('click',()=>refresh());
 $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
-    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
   } finally { button.disabled=false; }
 });
 function saveDraft(node) {
-  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,...CaptionControls.read(node)});
+  const clip=current.clips.find(c=>c.id===node.dataset.id);
+  const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
+  const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
+  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,...CaptionControls.read(node)});
   draftFeedback(node);
 }
 function draftFeedback(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id), draft=drafts.get(clip.id);
   let error='',changed=false,length=clip.end-clip.start;
   if(draft) {
-    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions;
+    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam));
     changed=changed||JSON.stringify({language:draft.language,caption_style:draft.caption_style})!==JSON.stringify(CaptionControls.options(clip));
     try {
       const start=parseTime(draft.start),end=parseTime(draft.end); length=end-start;
+      const f=draft.facecam,b=f?.box;
+      if(!f || !Number.isFinite(f.size) || f.size<.25 || f.size>.6 || !['auto','top-left','top-right','bottom-left','bottom-right'].includes(f.position))throw Error('Choose valid facecam settings.');
+      if(b && (![b.x,b.y,b.w,b.h].every(Number.isFinite) || b.x<0 || b.y<0 || b.w<=0 || b.h<=0 || b.x+b.w>1 || b.y+b.h>1))throw Error('Camera area must fit inside the source frame.');
       if(end<=start || length>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
     } catch(e) {error=e.message;length=null;}
   }
@@ -262,6 +281,10 @@ $('#clips').addEventListener('click',async event=>{
       try {await api(base,'PATCH',{kept});}catch(error){const latest=current.clips.find(c=>c.id===cid);if(latest)latest.kept=previous;throw error;}
       finally {keeping.delete(cid);drawJob(current);}
       await refresh();
+    } else if(button.dataset.action==='facecam-reset') {
+      saveDraft(node); drafts.get(cid).facecam.box=null;
+      const box=$('.camera-box',node); if(box)box.hidden=true;
+      draftFeedback(node);
     } else if(button.dataset.action==='reset') {
       drafts.delete(cid); node.outerHTML=clipHtml(current.clips.find(c=>c.id===cid),current.clips.findIndex(c=>c.id===cid),current);
     } else if(button.dataset.action==='delete' && confirm('Delete this clip and its files?')) {
@@ -296,8 +319,41 @@ $('#clips').addEventListener('submit',async event=>{
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
+});
+let cameraDrag=null;
+$('#clips').addEventListener('pointerdown',event=>{
+  const editor=event.target.closest('.camera-editor'), node=editor?.closest('.clip');
+  if(!editor || locked(current.clips.find(c=>c.id===node.dataset.id)) || cameraDrag)return;
+  event.preventDefault(); saveDraft(node);
+  const bounds=editor.getBoundingClientRect(), x=Math.max(0,Math.min(1,(event.clientX-bounds.left)/bounds.width)), y=Math.max(0,Math.min(1,(event.clientY-bounds.top)/bounds.height));
+  const draft=drafts.get(node.dataset.id), used=current.clips.find(c=>c.id===node.dataset.id).facecam_result?.box;
+  const inside=event.target.closest('.camera-box'), box=draft.facecam.box || used;
+  cameraDrag={editor,node,id:event.pointerId,x,y,box:inside&&box?{...box}:null,corner:event.target.dataset.corner};
+  editor.setPointerCapture(event.pointerId);
+});
+$('#clips').addEventListener('pointermove',event=>{
+  const d=cameraDrag; if(!d || d.id!==event.pointerId)return;
+  const bounds=d.editor.getBoundingClientRect(), clamp=v=>Math.max(0,Math.min(1,v));
+  const x=clamp((event.clientX-bounds.left)/bounds.width), y=clamp((event.clientY-bounds.top)/bounds.height);
+  let box;
+  if(d.box && !d.corner) {
+    box={...d.box,x:Math.max(0,Math.min(1-d.box.w,d.box.x+x-d.x)),y:Math.max(0,Math.min(1-d.box.h,d.box.y+y-d.y))};
+  } else {
+    const anchorX=d.box?(d.corner.includes('w')?d.box.x+d.box.w:d.box.x):d.x;
+    const anchorY=d.box?(d.corner.includes('n')?d.box.y+d.box.h:d.box.y):d.y;
+    const left=Math.min(x,anchorX), top=Math.min(y,anchorY);
+    box={x:left,y:top,w:Math.abs(x-anchorX),h:Math.abs(y-anchorY)};
+    if(box.w<.02 || box.h<.02)return;
+  }
+  drafts.get(d.node.dataset.id).facecam.box=box;
+  const rect=$('.camera-box',d.editor); rect.hidden=false;
+  Object.assign(rect.style,{left:`${box.x*100}%`,top:`${box.y*100}%`,width:`${box.w*100}%`,height:`${box.h*100}%`});
+  draftFeedback(d.node);
+});
+for(const type of ['pointerup','pointercancel','lostpointercapture'])$('#clips').addEventListener(type,event=>{
+  if(cameraDrag?.id===event.pointerId)cameraDrag=null;
 });
 function jump(event) {const mark=event.target.closest('[data-clip]');if(mark)document.getElementById(`clip-${mark.dataset.clip}`)?.scrollIntoView({behavior:'smooth',block:'start'});}
 $('#chart').addEventListener('click',jump);

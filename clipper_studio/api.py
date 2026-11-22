@@ -19,17 +19,21 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
+import cv2
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from cv2 import error as ImageProcessingError
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.video import make_vertical_clip, video_duration
+from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
+                                    layout_facecam, save_source_still)
 from shorts_clipper.youtube import YouTubeAccessError
 
 from .chat import ChatReplayError, fetch_chat, fetch_metadata
@@ -46,12 +50,35 @@ class WorkCancelled(Exception):
     pass
 
 
+class FacecamBox(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    x: float = Field(ge=0, lt=1, allow_inf_nan=False)
+    y: float = Field(ge=0, lt=1, allow_inf_nan=False)
+    w: float = Field(gt=0, le=1, allow_inf_nan=False)
+    h: float = Field(gt=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def within_frame(self):
+        if self.x + self.w > 1 or self.y + self.h > 1:
+            raise ValueError("Camera area must fit inside the source frame")
+        return self
+
+
+class FacecamSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    enabled: bool = True
+    position: Literal["auto", "top-left", "top-right", "bottom-left", "bottom-right"] = "auto"
+    size: float = Field(default=0.42, ge=0.25, le=0.6, allow_inf_nan=False)
+    box: FacecamBox | None = None
+
+
 class JobRequest(BaseModel):
     url: str
     clips: int = Field(default=8, ge=1, le=50)
     lead: float = Field(default=18, ge=15, le=20)
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
+    facecam: FacecamSpec = Field(default_factory=FacecamSpec)
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
 
@@ -86,6 +113,7 @@ class RenderRequest(BaseModel):
     end: float = Field(gt=0, allow_inf_nan=False)
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
+    facecam: FacecamSpec = Field(default_factory=FacecamSpec)
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
 
@@ -123,7 +151,11 @@ class Store:
             raise HTTPException(404, "Job not found")
         with self.lock:
             try:
-                return json.loads((self.root / jid / "job.json").read_text())
+                job = json.loads((self.root / jid / "job.json").read_text())
+                job.setdefault("request", {}).setdefault("facecam", FacecamSpec().model_dump())
+                for clip in job.get("clips", []):
+                    clip.setdefault("facecam", FacecamSpec().model_dump())
+                return job
             except FileNotFoundError:
                 raise HTTPException(404, "Job not found") from None
 
@@ -201,8 +233,44 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     subtitles.write_text(to_ass(captions, CaptionStyle.from_dict(spec.get("caption_style"))), encoding="utf-8")
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
-                make_vertical_clip(source, video, 0, duration,
-                                   spec["mode"], subtitles)
+                overlay = None
+                result = {"status": "disabled", "box": None}
+                still = work / "source.jpg"
+                try:
+                    save_source_still(source, still, duration / 2)
+                except Exception:
+                    logger.debug("Could not save source still", exc_info=True)
+                try:
+                    options = FacecamSpec.model_validate(spec.get("facecam", {}))
+                    if options.enabled:
+                        box = SourceBox(**options.box.model_dump()) if options.box else detect_facecam(source, 0, duration)
+                        result = {"status": "not_found", "box": None}
+                        if box is not None:
+                            if options.position == "auto":
+                                overlay = auto_layout_facecam(source, 0, duration, box, spec["mode"], options.size)
+                            else:
+                                capture = cv2.VideoCapture(str(source))
+                                try:
+                                    size = (int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+                                finally:
+                                    capture.release()
+                                overlay = layout_facecam(box, size, options.position, options.size)
+                            rect = overlay.rect
+                            corner = ("top" if rect.y == 24 else "bottom") + ("-left" if rect.x == 24 else "-right")
+                            result = {"status": "used", "box": vars(box), "position": corner,
+                                      "size": rect.w / 1080, "origin": "manual" if options.box else "detected"}
+                except Exception:
+                    overlay = None
+                    result = {"status": "unavailable", "box": None}
+                    logger.debug("Facecam unavailable; rendering without overlay", exc_info=True)
+                if overlay is None:
+                    make_vertical_clip(source, video, 0, duration, spec["mode"], subtitles)
+                else:
+                    try:
+                        make_vertical_clip(source, video, 0, duration, spec["mode"], subtitles, facecam=overlay)
+                    except Exception:
+                        result = {"status": "unavailable", "box": None}
+                        make_vertical_clip(source, video, 0, duration, spec["mode"], subtitles)
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
                 thumbnail = work / "thumbnail.jpg"
                 peak = thumbnail_peak(spec, duration)
@@ -219,6 +287,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     video.replace(output_dir / "clip.mp4")
                     thumbnail.replace(output_dir / "thumbnail.jpg")
                     base = f"/api/jobs/{jid}/clips/{cid}"
+                    if still.is_file():
+                        still.replace(output_dir / "source.jpg")
+                        clip["source_still_url"] = base + "/source-still"
+                    else:
+                        clip.pop("source_still_url", None)
+                    clip["facecam_result"] = result
                     revision = str(time.time_ns())
                     clip.update(status="ready", rendered_at=int(revision), file_url=base + "/video",
                                 download_url=base + "/download", thumbnail_url=base + "/thumbnail",
@@ -328,6 +402,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                             clips=job["request"]["clips"], lead=job["request"]["lead"])
             clips = [dict(spike, number=number, id=uuid.uuid4().hex, status="queued", error=None,
                           mode=job["request"]["mode"], captions=job["request"]["captions"],
+                          facecam=job["request"].get("facecam", FacecamSpec().model_dump()),
                           language=job["request"].get("language", "auto"), caption_style=job["request"].get("caption_style"),
                           file_url=None, download_url=None, thumbnail_url=None)
                      for number, spike in enumerate(sorted(spikes, key=lambda s: s["start"]), 1)]
@@ -493,7 +568,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if clip["status"] == "ready":
                 clip["previous_render"] = {key: clip[key] for key in (
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
-                    "rendered_at", "attempt") if key in clip}
+                    "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url") if key in clip}
                 clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language")})
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
@@ -566,6 +641,14 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                             thumbnail_hook=hook, thumbnail_version=str(time.time_ns()))
                 store.save(job)
                 return {key: clip[key] for key in ("thumbnail_url", "thumbnail_text", "thumbnail_hook", "thumbnail_version")}
+
+    @app.get("/api/jobs/{jid}/clips/{cid}/source-still")
+    def source_still(jid: str, cid: str):
+        with store.lock:
+            clip = find_clip(store.get(jid), cid)
+            if not clip.get("source_still_url"):
+                raise HTTPException(404, "Source still not available")
+        return file(jid, cid, "source.jpg")
 
     @app.delete("/api/jobs/{jid}/clips/{cid}")
     def delete_clip(jid: str, cid: str):
