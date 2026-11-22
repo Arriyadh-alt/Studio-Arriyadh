@@ -38,9 +38,11 @@ authentication: do not expose it publicly without access controls and quotas.
 ## API
 
 - `POST /api/jobs` → 202 `{id}`. Body:
-  `{url, clips:8, lead:18, mode:"crop", captions:true}`. HTTPS YouTube VOD URLs
-  only; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
-- `GET /api/jobs` → array of jobs; `GET /api/jobs/{id}` → job.
+  `{url, clips:8, lead:18, mode:"crop", captions:true}`. Use an HTTPS YouTube
+  video link (`watch`, `live`, or `youtu.be`, including mobile) for a finished
+  livestream; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
+- `GET /api/jobs` → array of jobs; add `?summary=true` for recent-stream cards
+  without activity and clips. `GET /api/jobs/{id}` → job.
 - `POST /api/jobs/{id}/clips/{cid}/render` → 202 `{id:cid,status:"queued"}`.
   Body `{start,end,mode:"crop",captions:true}`. Seconds, within the original
   duration, end after start, maximum 60 seconds. Preserves detection metadata.
@@ -62,6 +64,12 @@ Activity points: `{time,count,baseline,intensity,score}` in 5-second bins.
 Clip shape: `{id,onset,peak,score,start,end,message_sample,mode,captions,status,
 error,file_url,download_url,thumbnail_url}`; status `queued`, `rendering`, `ready`,
 or `failed`. URLs are null until ready. Errors are explicit strings.
+New clips also have a stable `number`, assigned in start order and preserved on deletion.
+Older clips fall back to their list position. Single downloads use
+`<title-slug>-highlight-02.mp4`; kept ZIPs use `<title-slug>-kept-clips.zip`
+and contain `highlight-02.mp4` entries matching the review numbers. Slugs are
+ASCII lowercase hyphenated titles, at most 40 characters, with `clipper-studio`
+as the empty-title fallback.
 Each clip gets at most three full attempts (initial + two retries) across section
 download, transcription, video conversion and thumbnail creation, with 2s/4s
 backoff. `attempt` and stage expose retry progress. Final errors remain visible
@@ -69,9 +77,14 @@ on the clip with a Re-render action. `rendered_at` changes on successful renders
 to avoid stale video caching. Kept clips can be downloaded together as a ZIP.
 
 Validation errors: 422; missing job/clip: 404; unavailable file or attempting
-edits/deletion while a job is active: 409. A video without replay makes the
-background job fail with a clear `error`. Fewer than the requested N highlights
-(including zero) are valid when there are insufficient separated spikes.
+edits while that clip is queued/rendering or deletion while it is rendering: 409.
+Ready clips can be re-rendered while Autopilot runs; queued clips may be deleted
+and are skipped by the worker. Regular videos, unavailable videos and streams
+without chat replay fail with an explanation. Long replays are supported;
+replay downloads are checked against a five-minute time budget and a 128 MiB
+size budget. Jobs run in submission order, and refreshing the job page reconnects
+to the existing job. Fewer than the requested N highlights (including zero)
+are valid when there are insufficient separated spikes.
 
 ## Detection and checks
 

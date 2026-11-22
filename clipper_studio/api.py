@@ -1,8 +1,10 @@
 """Local, single-process API. Run with uvicorn clipper_studio.api:app."""
 
 import json
+import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -10,12 +12,13 @@ import tempfile
 import threading
 import time
 import uuid
+import unicodedata
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -27,8 +30,13 @@ from shorts_clipper.captions import to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.video import make_vertical_clip, video_duration
 
-from .chat import fetch_chat
+from .chat import ChatReplayError, fetch_chat
 from .spikes import detect_spikes
+
+
+logger = logging.getLogger(__name__)
+YOUTUBE_URL_ERROR = "Paste a YouTube video link for a finished livestream (watch, live, or youtu.be)."
+ACTIVE_STATUSES = ("queued", "running")
 
 
 class JobRequest(BaseModel):
@@ -41,11 +49,27 @@ class JobRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def youtube_url(cls, value):
-        parsed = urlparse(value)
-        if parsed.scheme != "https" or parsed.hostname not in (
-            "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be") or parsed.username or parsed.password:
-            raise ValueError("Paste an HTTPS YouTube livestream VOD URL")
-        return value
+        value = value.strip()
+        try:
+            parsed = urlsplit(value)
+            if (parsed.scheme != "https" or parsed.username is not None
+                    or parsed.port not in (None, 443) or any(char.isspace() for char in value)):
+                raise ValueError
+        except ValueError:
+            raise ValueError(YOUTUBE_URL_ERROR) from None
+
+        path = parsed.path.removesuffix("/")
+        ids = []
+        if parsed.hostname == "youtu.be":
+            ids = [path.removeprefix("/")]
+        elif parsed.hostname in ("youtube.com", "www.youtube.com", "m.youtube.com"):
+            if path == "/watch":
+                ids = parse_qs(parsed.query, keep_blank_values=True).get("v", [])
+            elif path.startswith("/live/"):
+                ids = [path.removeprefix("/live/")]
+        if len(ids) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{11}", ids[0]):
+            raise ValueError(YOUTUBE_URL_ERROR)
+        return f"https://www.youtube.com/watch?v={ids[0]}"
 
 
 class RenderRequest(BaseModel):
@@ -94,6 +118,15 @@ def find_clip(job, cid):
     raise HTTPException(404, "Clip not found")
 
 
+def title_slug(job):
+    title = unicodedata.normalize("NFKD", (job.get("metadata") or {}).get("title", ""))
+    return re.sub(r"[^a-z0-9]+", "-", title.encode("ascii", "ignore").decode().lower()).strip("-")[:40].rstrip("-") or "clipper-studio"
+
+
+def clip_number(job, clip):
+    return clip.get("number") or next(i for i, c in enumerate(job["clips"], 1) if c["id"] == clip["id"])
+
+
 def create_app(data_dir=None):
     runtime_dir = str(Path(sys.executable).parent)
     if (Path(runtime_dir) / "deno").is_file() and runtime_dir not in os.environ.get("PATH", "").split(os.pathsep):
@@ -113,7 +146,7 @@ def create_app(data_dir=None):
             clip = find_clip(job, cid)
             clip.update(status="rendering", error=None)
             spec = dict(clip)
-            clip_label = f"Clip {job['clips'].index(clip) + 1} of {len(job['clips'])}"
+            clip_label = f"Clip {clip_number(job, clip)} of {len(job['clips'])}"
             store.save(job)
         try:
             output_dir = store.root / jid / cid
@@ -150,7 +183,10 @@ def create_app(data_dir=None):
         for attempt in range(1, 4):
             with store.lock:
                 job = store.get(jid)
-                find_clip(job, cid).update(attempt=attempt, status="rendering", error=None)
+                clip = next((c for c in job["clips"] if c["id"] == cid), None)
+                if clip is None:
+                    return
+                clip.update(attempt=attempt, status="rendering", error=None)
                 store.save(job)
             try:
                 render_attempt(jid, cid)
@@ -158,7 +194,10 @@ def create_app(data_dir=None):
             except Exception as error:
                 with store.lock:
                     job = store.get(jid)
-                    find_clip(job, cid).update(status="failed" if attempt == 3 else "rendering",
+                    clip = next((c for c in job["clips"] if c["id"] == cid), None)
+                    if clip is None:
+                        return
+                    clip.update(status="failed" if attempt == 3 else "rendering",
                                               error=str(error))
                     job["stage"] = "Clip failed" if attempt == 3 else f"Retrying clip in {attempt * 2}s (attempt {attempt + 1}/3)"
                     store.save(job)
@@ -168,9 +207,20 @@ def create_app(data_dir=None):
     def finish(jid):
         with store.lock:
             job = store.get(jid)
+            if any(c["status"] in ("queued", "rendering") for c in job["clips"]):
+                return
             failed = any(c["status"] == "failed" for c in job["clips"])
             job.update(status="completed_with_errors" if failed else "completed", progress=1,
                        stage="Finished" if job["clips"] else "No significant chat spikes found")
+            store.save(job)
+
+    def fail_job(jid, message, stage="Failed"):
+        with store.lock:
+            job = store.get(jid)
+            job.update(status="failed", stage=stage, error=message)
+            for clip in job["clips"]:
+                if clip["status"] in ("queued", "rendering"):
+                    clip.update(status="failed", error=message)
             store.save(job)
 
     def worker():
@@ -190,9 +240,10 @@ def create_app(data_dir=None):
                            chat_seconds=round(time.monotonic() - started, 2), message_count=len(messages))
                     spikes, activity = detect_spikes(messages, metadata["duration"],
                                                      clips=job["request"]["clips"], lead=job["request"]["lead"])
-                    clips = [dict(spike, id=uuid.uuid4().hex, status="queued", error=None,
+                    clips = [dict(spike, number=number, id=uuid.uuid4().hex, status="queued", error=None,
                                   mode=job["request"]["mode"], captions=job["request"]["captions"],
-                                  file_url=None, download_url=None, thumbnail_url=None) for spike in spikes]
+                                  file_url=None, download_url=None, thumbnail_url=None)
+                             for number, spike in enumerate(sorted(spikes, key=lambda s: s["start"]), 1)]
                     update(jid, clips=clips, activity=activity)
                     for index, clip in enumerate(clips):
                         render(jid, clip["id"])
@@ -202,7 +253,15 @@ def create_app(data_dir=None):
                 finish(jid)
                 update(jid, elapsed_seconds=round(time.monotonic() - started, 2))
             except Exception as error:
-                update(jid, status="failed", stage="Failed", error=str(error))
+                if isinstance(error, ChatReplayError):
+                    message = str(error)
+                else:
+                    logger.exception("Job %s failed unexpectedly", jid)
+                    message = "Studio couldn’t process this replay. Try submitting it again."
+                try:
+                    fail_job(jid, message)
+                except Exception:
+                    logger.exception("Could not save failure for job %s", jid)
             finally:
                 pending.task_done()
 
@@ -211,12 +270,12 @@ def create_app(data_dir=None):
         # Interrupted work is explicit instead of silently stuck after a restart.
         with store.lock:
             for job in store.jobs():
-                if job["status"] in ("queued", "running"):
-                    job.update(status="failed", stage="Interrupted", error="Server restarted; submit a new job or re-render clips.")
-                    for clip in job["clips"]:
-                        if clip["status"] in ("queued", "rendering"):
-                            clip.update(status="failed", error="Server restarted")
+                if any("number" not in clip for clip in job["clips"]):
+                    for number, clip in enumerate(job["clips"], 1):
+                        clip.setdefault("number", number)
                     store.save(job)
+                if job["status"] in ACTIVE_STATUSES:
+                    fail_job(job["id"], "Server restarted; submit a new job or re-render clips.", "Interrupted")
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         yield
@@ -230,7 +289,8 @@ def create_app(data_dir=None):
     @app.post("/api/jobs", status_code=202)
     def create_job(request: JobRequest):
         jid = uuid.uuid4().hex
-        job = dict(id=jid, created_at=datetime.now(timezone.utc).isoformat(), url=request.url, request=request.model_dump(), status="queued", stage="Queued",
+        job = dict(id=jid, created_at=datetime.now(timezone.utc).isoformat(), url=request.url, request=request.model_dump(),
+                   status="queued", stage="Queued — jobs run one at a time",
                    progress=0, metadata=None, activity=[], clips=[], error=None)
         with store.lock:
             store.save(job)
@@ -238,9 +298,13 @@ def create_app(data_dir=None):
         return {"id": jid}
 
     @app.get("/api/jobs")
-    def list_jobs():
+    def list_jobs(summary: bool = False):
         with store.lock:
-            return store.jobs()
+            jobs = store.jobs()
+        if not summary:
+            return jobs
+        return [dict(id=job["id"], url=job.get("url"), created_at=job.get("created_at"), status=job["status"],
+                     metadata=job.get("metadata"), clip_count=len(job["clips"])) for job in jobs]
 
     @app.get("/api/jobs/{jid}")
     def get_job(jid: str):
@@ -267,12 +331,12 @@ def create_app(data_dir=None):
             archive = archive_dir / "kept-clips.zip"
             try:
                 with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
-                    for index, clip in enumerate(clips, 1):
-                        bundle.write(store.root / jid / clip["id"] / "clip.mp4", f"highlight-{index}.mp4")
+                    for clip in clips:
+                        bundle.write(store.root / jid / clip["id"] / "clip.mp4", f"highlight-{clip_number(job, clip):02d}.mp4")
             except Exception:
                 shutil.rmtree(archive_dir)
                 raise
-        return FileResponse(archive, media_type="application/zip", filename="kept-clips.zip",
+        return FileResponse(archive, media_type="application/zip", filename=f"{title_slug(job)}-kept-clips.zip",
                             background=BackgroundTask(shutil.rmtree, archive_dir))
 
     @app.post("/api/jobs/{jid}/clips/{cid}/render", status_code=202)
@@ -280,27 +344,29 @@ def create_app(data_dir=None):
         with store.lock:
             job = store.get(jid)
             clip = find_clip(job, cid)
-            if job["status"] in ("running", "queued"):
-                raise HTTPException(409, "Wait for the current job to finish")
+            if clip["status"] in ("rendering", "queued"):
+                raise HTTPException(409, "Wait for this highlight to finish rendering")
             if request.end <= request.start or request.end - request.start > 60 or request.end > job["metadata"]["duration"]:
                 raise HTTPException(422, "Clip must be within the video and between 0 and 60 seconds long")
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None)
-            job.update(status="queued", stage="Queued re-render", progress=0, error=None)
+            if job["status"] not in ACTIVE_STATUSES:
+                job.update(status="queued", stage="Queued re-render — jobs run one at a time", progress=0, error=None)
             store.save(job)
             pending.put((jid, cid))
         return {"id": cid, "status": "queued"}
 
     def file(jid, cid, filename, download=False):
         with store.lock:
-            clip = find_clip(store.get(jid), cid)
+            job = store.get(jid)
+            clip = find_clip(job, cid)
             if clip["status"] != "ready":
                 raise HTTPException(409, "Clip is not ready")
             path = store.root / jid / cid / filename
             if not path.is_file():
                 raise HTTPException(404, "File not found")
         return FileResponse(path, media_type="image/jpeg" if filename.endswith("jpg") else "video/mp4",
-                            filename=f"{cid}.mp4" if download else None,
+                            filename=f"{title_slug(job)}-highlight-{clip_number(job, clip):02d}.mp4" if download else None,
                             content_disposition_type="attachment" if download else "inline")
 
     @app.get("/api/jobs/{jid}/clips/{cid}/video")
@@ -319,9 +385,9 @@ def create_app(data_dir=None):
     def delete_clip(jid: str, cid: str):
         with store.lock:
             job = store.get(jid)
-            find_clip(job, cid)
-            if job["status"] in ("running", "queued"):
-                raise HTTPException(409, "Wait for the current job to finish")
+            clip = find_clip(job, cid)
+            if clip["status"] == "rendering":
+                raise HTTPException(409, "Wait for this highlight to finish rendering")
             job["clips"] = [clip for clip in job["clips"] if clip["id"] != cid]
             store.save(job)
             shutil.rmtree(store.root / jid / cid, ignore_errors=True)
