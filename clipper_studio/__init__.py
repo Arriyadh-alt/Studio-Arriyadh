@@ -1,0 +1,1 @@
+"""Chat-driven highlight generation."""
