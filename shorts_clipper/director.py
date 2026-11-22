@@ -378,7 +378,7 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     audible = levels[levels > -70]
     quiet_mix = (float(np.median(audible)) if len(audible) else -90) < -28
     plan.music = bool(options.music == "on" or (options.music == "auto" and speaking < 0.35 and quiet_mix))
-    plan.score, plan.suggestions = score_clip(levels, words, duration, peak, strength if hook else
+    plan.score, plan.suggestions = score_clip(levels, words, duration, peak, strength if hook or arc else
                                               min(1.0, max(0.0, float(np.mean(z[:30])) + 0.5) / 2),
                                               spike_score, plan.removed + main_start)
     return plan
