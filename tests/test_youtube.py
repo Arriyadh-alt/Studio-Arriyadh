@@ -2,6 +2,7 @@ from pathlib import Path
 from stat import S_IMODE
 
 import pytest
+from yt_dlp.cookies import YoutubeDLCookieJar
 from yt_dlp.utils import DownloadError
 
 from clipper_studio.chat import ChatReplayError, fetch_chat, fetch_metadata
@@ -84,13 +85,51 @@ def test_explicit_cookie_path_overrides_env_and_env_path_overrides_text(monkeypa
     explicit = tmp_path / "explicit.txt"
     explicit.write_text(COOKIE_TEXT)
     env = tmp_path / "env.txt"
-    env.write_text("environment file")
+    environment_cookies = COOKIE_TEXT.replace("\tfake\n", "\tenvironment-file\n")
+    env.write_text(environment_cookies)
     monkeypatch.setenv("CLIPPER_YTDLP_COOKIES", str(env))
     monkeypatch.setenv("YOUTUBE_COOKIES", "environment text")
     with cookie_options(explicit) as options:
         assert Path(options["cookiefile"]).read_text() == COOKIE_TEXT
     with cookie_options() as options:
-        assert Path(options["cookiefile"]).read_text() == "environment file"
+        assert Path(options["cookiefile"]).read_text() == environment_cookies
+
+
+@pytest.mark.parametrize("configuration", ["path", "text", "explicit"])
+def test_malformed_cookie_lines_are_dropped_without_logging_secrets(
+        monkeypatch, tmp_path, capfd, caplog, configuration):
+    valid = (COOKIE_TEXT + "\n# Export comment\n" +
+             "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\thttp_only\tvalid-value\n")
+    malformed = [
+        "malformed-cookie-secret\n",
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tmissing-field-secret\n",
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tname\textra-field-secret\textra\n",
+        ".youtube.com\tTRUE\t/\tTRUE\tinvalid\tname\tinvalid-expiry-secret\n",
+        ".youtube.com\tTRUE\t/\tTRUE\t\tname\tempty-expiry-secret\n",
+        ".youtube.com\tTRUE\t/\tTRUE\t1.5\tname\tfractional-expiry-secret\n",
+        ".youtube.com\tTRUE\t/\tTRUE\t-1\tname\tnegative-expiry-secret\n",
+        "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\tinvalid\tname\thttp-only-secret\n",
+    ]
+    contents = valid + "".join(malformed)
+    source = tmp_path / "cookies.txt"
+    source.write_text(contents)
+    source.chmod(0o400)
+    if configuration == "path":
+        monkeypatch.setenv("CLIPPER_YTDLP_COOKIES", str(source))
+    elif configuration == "text":
+        monkeypatch.setenv("YOUTUBE_COOKIES", contents)
+    with cookie_options(source if configuration == "explicit" else None) as options:
+        private = Path(options["cookiefile"])
+        assert private.read_text() == valid
+        assert S_IMODE(private.stat().st_mode) == 0o600
+        jar = YoutubeDLCookieJar(str(private))
+        jar.load()
+        assert {cookie.name for cookie in jar} == {"test", "http_only"}
+    captured = capfd.readouterr()
+    assert captured.out == captured.err == ""
+    assert all(line.strip() not in caplog.text for line in malformed)
+    assert source.read_text() == contents
+    assert not private.exists()
 
 
 def test_missing_cookie_source_fails_clearly_without_falling_back(monkeypatch, tmp_path):

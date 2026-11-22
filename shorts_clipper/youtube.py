@@ -2,7 +2,6 @@
 
 import os
 import re
-import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +9,18 @@ from pathlib import Path
 
 class YouTubeAccessError(RuntimeError):
     pass
+
+
+def _sanitize_cookies(contents):
+    kept = []
+    for line in contents.splitlines(keepends=True):
+        if not line.strip() or (line.startswith("#") and not line.startswith("#HttpOnly_")):
+            kept.append(line)
+            continue
+        fields = line.split("\t")
+        if len(fields) == 7 and re.fullmatch(r"[0-9]+", fields[4]):
+            kept.append(line)
+    return "".join(kept)
 
 
 def blocking_message(error, cookies=None):
@@ -39,9 +50,8 @@ def cookie_options(cookies=None):
         private.touch(mode=0o600)
         try:
             if source:
-                shutil.copyfile(Path(source).expanduser(), private)
-            else:
-                private.write_text(contents, encoding="utf-8")
+                contents = Path(source).expanduser().read_text(encoding="utf-8")
+            private.write_text(_sanitize_cookies(contents), encoding="utf-8")
         except OSError:
             raise YouTubeAccessError(
                 "Could not prepare YouTube cookies. Use a readable Netscape cookies.txt via "
