@@ -145,3 +145,30 @@ def test_sparse_reactions_can_clear_threshold_without_volume_flood():
     messages = [Message(t, str(i), 'LOL') for t in (200, 400) for i in range(5)]
     picks, _ = detect_spikes(messages, 600)
     assert [p['peak'] for p in picks] == [200, 400]
+
+
+@pytest.mark.parametrize('text', ['what', 'WHAT', 'WHAT is happening', 'what??', 'wait what!', 'wtf'])
+def test_emphatic_what_is_shock(text):
+    assert reaction_category(text) == 'shock'
+
+
+@pytest.mark.parametrize('text', ['what is your favorite holiday', 'what is your favorite holiday?',
+                                  'I wonder what happened', 'somewhat'])
+def test_ordinary_what_is_not_shock(text):
+    assert reaction_category(text) is None
+
+
+def test_sparse_stream_detects_several_independent_reaction_pairs():
+    messages = [Message(t, f'viewer{t}', 'ordinary message') for t in range(0, 1800, 10)]
+    for t in (200, 600, 1000, 1400):
+        messages += [Message(t, 'one', 'LOL'), Message(t + 5, 'two', 'OMG')]
+    picks, _ = detect_spikes(messages, 1800)
+    assert len(picks) == 4
+    assert all(any(t <= pick['peak'] <= t + 5 for t in (200, 600, 1000, 1400)) for pick in picks)
+
+
+def test_sparse_stream_rejects_single_reactor_and_nonreaction_spam():
+    messages = [Message(t, f'viewer{t}', 'ordinary message') for t in range(0, 1800, 10)]
+    messages += [Message(t, 'spammer', 'LOL') for t in range(200, 240)]
+    messages += [Message(600, str(i), text) for i in range(20) for text in ('P', 'E', 'D', 'copypasta')]
+    assert detect_spikes(messages, 1800)[0] == []

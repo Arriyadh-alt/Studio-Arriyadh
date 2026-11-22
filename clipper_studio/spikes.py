@@ -18,7 +18,9 @@ def reaction_category(text):
         return "laughter"
     if re.fullmatch(r"\s*[wl]+[!\s]*", text, re.I):
         return "weak_hype"
-    if re.search(r"\b(?:omg|wtf|what|wow|no{3,})\b|\?{2,}|!{2,}|[💀☠😱😮]|:(?:skull|skull_and_crossbones|face_screaming_in_fear|astonished_face|face_with_open_mouth):", text, re.I):
+    emphatic_what = (re.fullmatch(r"\s*what[?!\.\s]*", text, re.I) or
+                     re.search(r"\bWHAT\b", text) or re.search(r"\bwhat\s*[?!]", text, re.I))
+    if emphatic_what or re.search(r"\b(?:omg|wtf|wow|no{3,})\b|\?{2,}|!{2,}|[💀☠😱😮]|:(?:skull|skull_and_crossbones|face_screaming_in_fear|astonished_face|face_with_open_mouth):", text, re.I):
         return "shock"
     if re.search(r"\b(?:let[’']?s\s*go+|letsgo+|gg+|yay+|yes{2,})\b|clip (?:it|that)|[🔥🎉]|:(?:fire|party_popper):", text, re.I):
         return "hype"
@@ -95,7 +97,11 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         series.append({"time": i * bin_seconds, "count": len(bins[i]), "baseline": baseline,
                        "intensity": len(reactors[i]), "score": round(score, 3)})
     positive = sorted(point['score'] for point in series if point['score'] > 0)
-    threshold = max(2.5, positive[int((len(positive) - 1) * .9)] * .35) if positive else 2.5
+    typical_volume = median(volume)
+    threshold_floor = min(2.5, max(1.25, math.sqrt(typical_volume)))
+    threshold = max(threshold_floor, positive[int((len(positive) - 1) * .9)] * .35) if positive else threshold_floor
+    minimum_reactors = 2 if typical_volume < 3 else 3
+    minimum_peak_authors = 1 if minimum_reactors == 2 else 3
     candidates = []
     for i, point in enumerate(series):
         if point['score'] < threshold:
@@ -105,7 +111,7 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
             continue
         reacting = set().union(*(reactors[j] for j in nearby))
         peak_authors = {m.author.strip().casefold() for m in bins[i]}
-        if len(peak_authors) < 3 or len(reacting) < max(3, math.ceil(point['baseline'] * .05)):
+        if len(peak_authors) < minimum_peak_authors or len(reacting) < max(minimum_reactors, math.ceil(point['baseline'] * .05)):
             continue
         all_authors = {m.author.strip().casefold() for j in nearby for m in bins[j]}
         if (point['time'] < 60 or point['time'] >= duration - 60) and len(reacting) < .7 * max(1, len(all_authors)):
