@@ -168,3 +168,13 @@ def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_p
         assert clip["status"] == "ready" and clip["director_result"] == {"status": "disabled"}
         assert client.post(f"/api/jobs/{jid}/clips/{clip['id']}/render",
                            json={"start": 10, "end": 22, "director": {"music": "loud"}}).status_code == 422
+
+
+def test_hook_snaps_to_whole_words_in_continuous_speech():
+    from shorts_clipper.director import find_hook, transcript_words
+    words = transcript_words([Caption(0, 30, "", [SimpleNamespace(start=t * 0.45, end=t * 0.45 + 0.44, word=" yes",
+                                                                   probability=1) for t in range(66)])])
+    start, end, _ = find_hook(levels(30, loud=[(14, 16)]), words, 30, 15)
+    assert end - start <= 3.0
+    assert not any(w.start < edge < w.end for w in words for edge in (start, end))
+

@@ -185,14 +185,20 @@ def find_hook(levels, words, duration, peak):
     if best is None:
         return None
     start, end, score = best
-    # Snap to word boundaries so the teaser never starts or ends mid-word.
-    starting = [w.start for w in words if start - 0.5 <= w.start <= start + 0.2]
-    if starting:
-        start = max(0.0, min(starting) - 0.05)
-    ending = [w.end for w in words if end - 0.3 <= w.end <= end + 0.6]
-    if ending:
-        end = min(duration, max(ending) + 0.08)
-    end = min(end, start + 3.0)
+    # Snap outward to whole words, padding only into the gaps around them.
+    first = next((i for i, w in enumerate(words) if w.end > start), None)
+    if first is not None and words[first].start < end:
+        before = words[first - 1].end if first else 0.0
+        start = max(before, words[first].start - 0.05)
+        last = max(i for i, w in enumerate(words) if w.start < end)
+        while last > first and words[last].end - start > 3.0:
+            last -= 1
+        after = words[last + 1].start if last + 1 < len(words) else duration
+        end = min(after, words[last].end + 0.08, start + 3.0)
+        if end < words[last].end:
+            return None
+    else:
+        end = min(end, start + 3.0)
     strength = max(0.0, min(1.0, score / 4.0))
     return start, end, strength
 
