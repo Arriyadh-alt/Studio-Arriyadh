@@ -1,0 +1,4 @@
+{"replayChatItemAction":{"videoOffsetTimeMsec":"12500","actions":[{"addChatItemAction":{"item":{"liveChatTextMessageRenderer":{"authorName":{"simpleText":"Alice"},"message":{"runs":[{"text":"WOW "},{"emoji":{"emojiId":"🔥","shortcuts":[":fire:"]}}]}}}}}]}}
+{"replayChatItemAction":{"videoOffsetTimeMsec":"15000","actions":[{"addChatItemAction":{"item":{"liveChatPaidMessageRenderer":{"authorName":{"simpleText":"Bob"},"message":{"runs":[{"text":"Great stream!"}]}}}}}]}}
+{"addChatItemAction":{"item":{"liveChatTextMessageRenderer":{"authorName":{"simpleText":"Ignore"},"message":{"simpleText":"no offset"}}}}}
+{"replayChatItemAction":{"videoOffsetTimeMsec":"20000","actions":[{"addChatItemAction":{"item":{"liveChatPaidStickerRenderer":{"authorName":{"simpleText":"Carol"},"headerSubtext":{"simpleText":"Sticker"}}}}}]}}
