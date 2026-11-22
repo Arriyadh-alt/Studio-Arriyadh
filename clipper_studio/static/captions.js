@@ -21,7 +21,7 @@ const CaptionControls = (() => {
       ${select('position','Position',[['bottom','Bottom · safe area'],['middle','Middle'],['top','Top · safe area']],s.position)}
       ${color('text_color','Text color')}${color('highlight_color','Active word')}${color('emphasis_color','Important words')}
       ${check('uppercase','Uppercase')}${check('emphasis','Emphasize keywords')}
-      </div><div class="caption-sample" aria-label="Caption style preview"><p>That was <span>AMAZING!</span></p></div><p class="hint">Preview is approximate. Re-render applies changes to the video.</p></details>`;
+      </div><div class="caption-sample" aria-label="Caption style preview"><p>That <span class="caption-active">was</span> <span class="caption-emphasis">AMAZING!</span></p></div><p class="hint">Preview is approximate. Re-render applies changes to the video.</p></details>`;
   }
   function read(root) {
     const result = options();
@@ -36,12 +36,13 @@ const CaptionControls = (() => {
     const s = read(root).caption_style, sample = root.querySelector('.caption-sample');
     if(!sample)return;
     sample.style.fontFamily=s.font;
-    sample.style.fontSize=`${Math.round(s.size*.3)}px`;
+    sample.style.fontSize=`${Math.max(10,Math.round(s.size*.14))}px`;
     sample.style.color=s.text_color;
     sample.style.textTransform=s.uppercase?'uppercase':'none';
     sample.style.fontWeight=s.font==='Montserrat'?'900':s.preset==='minimal'?'400':'800';
     sample.style.alignItems={top:'start',middle:'center',bottom:'end'}[s.position] || 'end';
-    sample.querySelector('span').style.color=s.preset==='pop'?s.highlight_color:s.text_color;
+    sample.querySelector('.caption-active').style.color=s.preset==='pop'?s.highlight_color:s.text_color;
+    sample.querySelector('.caption-emphasis').style.color=s.emphasis?s.emphasis_color:s.text_color;
     root.querySelector('[data-caption-size]').textContent=`${s.size} px`;
   }
   document.addEventListener('input',event=>{
