@@ -186,6 +186,12 @@ def test_slug_and_completed_restart(tmp_path):
     assert title_slug({"metadata":{"title":"A" * 50}}) == "a" * 40
     assert title_slug({"metadata":None}) == "clipper-studio"
     app = create_app(tmp_path)
-    app.state.store.save({"id":"done", "status":"completed", "clips":[]})
+    app.state.store.save({"id":"done", "status":"completed", "clips":[
+        {"id":"first", "status":"ready"}, {"id":"second", "status":"ready"}]})
     with TestClient(app) as client:
         assert client.get("/api/jobs/done").json()["status"] == "completed"
+        assert [c["number"] for c in client.get("/api/jobs/done").json()["clips"]] == [1, 2]
+        assert client.delete("/api/jobs/done/clips/first").status_code == 200
+        assert client.get("/api/jobs/done").json()["clips"][0]["number"] == 2
+    with TestClient(create_app(tmp_path)) as client:
+        assert client.get("/api/jobs/done").json()["clips"][0]["number"] == 2

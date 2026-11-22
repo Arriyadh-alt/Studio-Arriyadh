@@ -231,6 +231,10 @@ def create_app(data_dir=None):
         # Interrupted work is explicit instead of silently stuck after a restart.
         with store.lock:
             for job in store.jobs():
+                if any("number" not in clip for clip in job["clips"]):
+                    for number, clip in enumerate(job["clips"], 1):
+                        clip.setdefault("number", number)
+                    store.save(job)
                 if job["status"] in ("queued", "running"):
                     job.update(status="failed", stage="Interrupted", error="Server restarted; submit a new job or re-render clips.")
                     for clip in job["clips"]:
