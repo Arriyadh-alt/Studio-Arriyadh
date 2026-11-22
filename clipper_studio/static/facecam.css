@@ -1,0 +1,5 @@
+.facecam-options{border:1px solid var(--line);border-radius:9px;margin:16px 0;padding:16px;display:grid;gap:14px;min-width:0}
+.facecam-options legend{font-weight:600}.camera-editor{position:relative;touch-action:none;user-select:none;margin:18px 0;overflow:hidden}
+.camera-editor img{display:block;width:100%;pointer-events:none}.camera-box{position:absolute;border:2px solid #b8f477;background:#b8f47722;cursor:move;box-sizing:border-box}
+.camera-box[hidden]{display:none}.camera-handle{position:absolute;width:32px;height:32px;border:2px solid white;background:#658a42;border-radius:50%;transform:translate(-50%,-50%)}
+.camera-handle.nw{left:0;top:0;cursor:nwse-resize}.camera-handle.ne{left:100%;top:0;cursor:nesw-resize}.camera-handle.sw{left:0;top:100%;cursor:nesw-resize}.camera-handle.se{left:100%;top:100%;cursor:nwse-resize}
