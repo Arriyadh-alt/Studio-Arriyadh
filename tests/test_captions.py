@@ -1,8 +1,11 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
-from shorts_clipper.captions import Caption, chunk_words, timestamp, to_ass, to_srt
+from shorts_clipper.captions import (
+    LINE_WIDTH, Caption, chunk_words, join_tokens, text_width, timestamp, to_ass, to_srt, wrap_caption,
+)
 
 
 def word(text, start, end):
@@ -11,7 +14,7 @@ def word(text, start, end):
 
 def test_chunks_follow_word_times_and_punctuation():
     words = [word(t, i / 2, (i + 1) / 2) for i, t in enumerate([" One", "two", "three", "four", "five.", "Six"])]
-    assert chunk_words(words) == [Caption(0, 2, "One two three four"), Caption(2, 2.5, "five."), Caption(2.5, 3, "Six")]
+    assert chunk_words(words) == [Caption(0, 2.5, "One two three four five."), Caption(2.5, 3.3, "Six")]
 
 
 def test_chunks_split_on_pause_and_duration():
@@ -39,3 +42,55 @@ def test_ass_style_and_literal_text():
     assert "DejaVu Sans,76,&H00FFFFFF" in result
     assert "Dialogue: 0,0:00:00.50,0:00:01.00,Default,,0,0,0,,｛hello｝＼N world" in result
     assert "Dialogue:" not in to_ass([])
+
+
+def test_minimum_duration_uses_silence_without_overlap():
+    captions = chunk_words([word('Hello.', 0, .2), word('Next.', .5, .6), word('Last.', 2, 2.2)])
+    assert captions == [Caption(0, .5, 'Hello.'), Caption(.5, 1.3, 'Next.'), Caption(2, 2.8, 'Last.')]
+    assert all(a.end <= b.start for a, b in zip(captions, captions[1:]))
+
+
+def test_orphan_question_and_college_merge():
+    words = [word(t, i * .2, (i + 1) * .2) for i, t in enumerate(["So", "why'd", "I", "drop", "out?"])]
+    assert chunk_words(words) == [Caption(0, 1, "So why'd I drop out?")]
+    words = [word(t, i * .3, (i + 1) * .3) for i, t in enumerate(['I', 'never', 'graduated', 'from', 'college.'])]
+    assert chunk_words(words) == [Caption(0, 1.5, 'I never graduated from college.')]
+
+
+def test_orphan_does_not_merge_across_pause_or_punctuation():
+    assert len(chunk_words([word('Hello.', 0, 1), word('Next', 1, 2)])) == 2
+    assert len(chunk_words([word('Hello', 0, 1), word('Next', 2, 3)])) == 2
+
+
+@pytest.mark.parametrize('tokens, expected', [
+    ([' as', ' a', ' drop', ' -in'], 'as a drop-in'),
+    (['drop', '-', 'in', ','], 'drop-in,'),
+    (['That', "'s", ' great', '!'], "That's great!"),
+])
+def test_token_joining(tokens, expected):
+    assert join_tokens(tokens) == expected
+
+
+@pytest.mark.parametrize('text', ['of the finest universities', 'unwed graduate student.', 'W' * 90, '界' * 40])
+def test_wrap_respects_safe_width(text):
+    lines = wrap_caption(text)
+    assert all(text_width(line) <= LINE_WIDTH for line in lines)
+    assert ''.join(''.join(lines).split()) == ''.join(text.split())
+
+
+def test_ass_asymmetric_safe_margins_and_explicit_wrap():
+    result = to_ass([Caption(0, 1, 'of the finest universities')])
+    assert ',90,190,420,1' in result
+    assert r'\N' in result
+    assert 'WrapStyle: 2' in result
+
+
+def test_font_fallback_and_empty_wrap():
+    with patch('shorts_clipper.captions.caption_font', return_value=None):
+        assert all(text_width(line) <= LINE_WIDTH for line in wrap_caption('W' * 90))
+    assert wrap_caption('') == []
+
+
+def test_oversized_orphan_is_not_merged():
+    captions = chunk_words([word('Hi', 0, .1), word('W' * 90, .1, .2)], max_words=1)
+    assert len(captions) == 2
