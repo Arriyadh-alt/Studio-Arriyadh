@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from clipper_studio.api import JobRequest, create_app, title_slug
+from clipper_studio.api import JobRequest, Store, create_app, title_slug
 from clipper_studio.chat import ChatReplayError, Message
 
 
@@ -15,6 +15,12 @@ REPLAY_URL = "https://www.youtube.com/watch?v=LIxBN4AHMEE"
 
 
 def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
+    stages = []
+    save = Store.save
+    def record_stage(store, job):
+        stages.append(job['stage'])
+        save(store, job)
+    monkeypatch.setattr(Store, "save", record_stage)
     monkeypatch.setattr("clipper_studio.api.time.sleep", lambda seconds: None)
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: (
         {"title": "🔴 Test!", "duration": 600, "thumbnail": None},
@@ -50,6 +56,9 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
         job = client.get(f"/api/jobs/{jid}").json()
         assert job["status"] == "completed"
         assert len(job["clips"]) == 3
+        for number in range(1, 4):
+            for stage in ("Downloading", "Transcribing", "Rendering"):
+                assert f"Clip {number} of 3 · {stage}" in stages
         assert [c["number"] for c in job["clips"]] == [1, 2, 3]
         assert all(c["status"] == "ready" for c in job["clips"])
         clip = job["clips"][0]
@@ -219,7 +228,7 @@ def test_delete_queued_during_autopilot(monkeypatch, tmp_path):
         try:
             assert entered.wait(5)
             job = client.get(f"/api/jobs/{jid}").json()
-            assert job["stage"] == "Downloading highlight 1 of 2"
+            assert job["stage"] == "Clip 1 of 2 · Downloading"
             first, second = job["clips"]
             base = f"/api/jobs/{jid}/clips/"
             assert client.post(base + first["id"] + "/render", json={"start":10,"end":40}).status_code == 409
