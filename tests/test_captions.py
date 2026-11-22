@@ -100,10 +100,16 @@ def test_continuations_stay_in_group_at_word_limit(stem, suffix, expected):
 
 
 @pytest.mark.parametrize('stem, suffix, expected', [('Wi', '-Fi', 'Wi-Fi'), ('don', "'t", "don't")])
-def test_orphan_merge_rejoins_original_continuation_tokens(stem, suffix, expected):
+def test_orphan_merge_preserves_rendered_continuation_tokens(stem, suffix, expected):
     words = [word(t, i * .2, (i + 1) * .2)
              for i, t in enumerate([' Use', ' the', ' new', ' word', ' ' + stem, suffix])]
     assert chunk_words(words) == [Caption(0, pytest.approx(1.2), 'Use the new word ' + expected)]
+
+
+def test_orphan_merge_does_not_change_signed_number_spacing():
+    words = [word(t, i * .2, (i + 1) * .2)
+             for i, t in enumerate(['The', 'reading', 'was', '-5', ' today'])]
+    assert chunk_words(words) == [Caption(0, 1, 'The reading was -5 today')]
 
 
 @pytest.mark.parametrize('tokens, expected', [

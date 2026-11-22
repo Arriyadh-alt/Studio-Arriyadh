@@ -100,20 +100,19 @@ def chunk_words(words, max_words: int = 4, clip_end: float | None = None) -> lis
         clip_end = groups[-1][-1].end
     balanced = []
     for group in groups:
-        previous = balanced[-1] if balanced else []
-        text = join_tokens(w.word for w in group)
-        previous_text = join_tokens(w.word for w in previous)
-        combined = join_tokens(w.word for w in previous + group)
-        if (previous and len(text.split()) == 1
-                and not previous_text.endswith(('.', '!', '?', ',', ';', ':'))
-                and group[0].start - previous[-1].end <= 0.5
-                and group[-1].end - previous[0].start <= 2.5
+        caption = Caption(group[0].start, group[-1].end, join_tokens(w.word for w in group))
+        previous = balanced[-1] if balanced else None
+        combined = f'{previous.text} {caption.text}' if previous else ''
+        if (previous and len(caption.text.split()) == 1
+                and not previous.text.endswith(('.', '!', '?', ',', ';', ':'))
+                and caption.start - previous.end <= 0.5
+                and caption.end - previous.start <= 2.5
                 and len(wrap_caption(combined)) <= 2):
-            previous.extend(group)
+            previous.text = combined
+            previous.end = caption.end
         else:
-            balanced.append(group)
-    balanced = [Caption(group[0].start, min(group[-1].end, clip_end), join_tokens(w.word for w in group))
-                for group in balanced if group[0].start < clip_end]
+            balanced.append(caption)
+    balanced = [Caption(c.start, min(c.end, clip_end), c.text) for c in balanced if c.start < clip_end]
     for i, caption in enumerate(balanced):
         next_start = balanced[i + 1].start if i + 1 < len(balanced) else clip_end
         caption.end = min(max(caption.end, caption.start + MIN_DURATION), next_start)
