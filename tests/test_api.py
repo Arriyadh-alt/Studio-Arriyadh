@@ -407,6 +407,68 @@ def test_cancel_render_and_rerender_ignores_stale_work(monkeypatch, tmp_path, me
         assert len(conversions) == 1
 
 
+@pytest.mark.parametrize("running", [False, True])
+def test_cancel_rerender_restores_previous_ready_render(monkeypatch, tmp_path, media, running):
+    entered, release = threading.Event(), threading.Event()
+    downloads = []
+
+    def section(url, directory, start, end):
+        downloads.append(start)
+        if not release.is_set():
+            entered.set()
+            assert release.wait(5)
+        return directory / "source.mp4"
+
+    monkeypatch.setattr("clipper_studio.api.download_section", section)
+    app = create_app(tmp_path, render_workers=1)
+    job = saved_job("restore")
+    base = "/api/jobs/restore/clips/first"
+    job["clips"][0].update(file_url=base + "/video", download_url=base + "/download",
+                           thumbnail_url=base + "/thumbnail", rendered_at=123)
+    original = dict(job["clips"][0])
+    app.state.store.save(job)
+    output = tmp_path / "restore" / "first"
+    output.mkdir()
+    (output / "clip.mp4").write_bytes(b"original video")
+    (output / "thumbnail.jpg").write_bytes(b"original thumbnail")
+    if not running:
+        blocker = saved_job("blocker", "running")
+        blocker["clips"][0].update(status="queued", start=100, end=130)
+        app.state.store.save(blocker)
+    with TestClient(app) as client:
+        try:
+            if not running:
+                assert entered.wait(5)
+            assert client.post(base + "/render", json={"start": 11, "end": 39,
+                               "mode": "blur", "captions": True}).status_code == 202
+            if running:
+                assert entered.wait(5)
+            queued = client.get("/api/jobs/restore").json()["clips"][0]
+            assert queued["status"] == ("rendering" if running else "queued")
+            assert client.patch(base, json={"kept": False}).status_code == 200
+            assert client.post("/api/jobs/restore/cancel").status_code == 200
+            restored = client.get("/api/jobs/restore").json()["clips"][0]
+            for key, value in original.items():
+                if key != "kept":
+                    assert restored[key] == value
+            assert not restored["kept"] and "previous_render" not in restored
+            assert client.get(base + "/video").content == b"original video"
+            assert client.get(base + "/download").content == b"original video"
+            assert client.get(base + "/thumbnail").content == b"original thumbnail"
+        finally:
+            release.set()
+        app.state.pending.join()
+        assert downloads == ([11] if running else [100])
+        assert client.get(base + "/video").content == b"original video"
+        assert client.post(base + "/render", json={"start": 12, "end": 38,
+                           "mode": "blur", "captions": False}).status_code == 202
+        app.state.pending.join()
+        replaced = client.get("/api/jobs/restore").json()["clips"][0]
+        assert replaced["status"] == "ready" and replaced["start"] == 12
+        assert "previous_render" not in replaced
+        assert client.get(base + "/video").content == b"video"
+
+
 def test_restart_analysis_empty_and_cancelled_jobs(monkeypatch, tmp_path):
     fetched = []
 

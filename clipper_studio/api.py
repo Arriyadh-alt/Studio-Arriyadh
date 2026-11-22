@@ -189,6 +189,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     base = f"/api/jobs/{jid}/clips/{cid}"
                     clip.update(status="ready", rendered_at=time.time_ns(), file_url=base + "/video", download_url=base + "/download",
                                 thumbnail_url=base + "/thumbnail")
+                    clip.pop("previous_render", None)
                     store.save(job)
         except Exception:
             raise
@@ -400,7 +401,11 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                        generation=job.get("generation", 0) + 1)
             for clip in job["clips"]:
                 if clip["status"] in ("queued", "rendering"):
-                    clip.update(status="cancelled", error=None)
+                    previous = clip.pop("previous_render", None)
+                    if previous is not None:
+                        clip.update(previous, status="ready", error=None)
+                    else:
+                        clip.update(status="cancelled", error=None)
             store.save(job)
             pending.cancel(jid)
             for key in list(metadata_cache):
@@ -445,6 +450,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 raise HTTPException(409, "Wait for this highlight to finish rendering")
             if request.end <= request.start or request.end - request.start > 60 or request.end > job["metadata"]["duration"]:
                 raise HTTPException(422, "Clip must be within the video and between 0 and 60 seconds long")
+            if clip["status"] == "ready":
+                clip["previous_render"] = {key: clip[key] for key in (
+                    "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
+                    "rendered_at", "attempt") if key in clip}
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
             if job["status"] not in ACTIVE_STATUSES:
