@@ -30,9 +30,25 @@ use its cache. Caption generation runs on CPU. `/docs` serves OpenAPI docs.
 `CLIPPER_DATA_DIR` defaults to `~/clipper-data` and must be outside this repo.
 Each job has an atomically replaced `job.json`, downloaded chat, and clip folders
 with `clip.mp4` and `thumbnail.jpg`. Intermediate section downloads are removed.
-Use **one uvicorn process, without reload**: a single background thread serializes
-all jobs and clip renders. Interrupted jobs are marked failed at startup; clips
-can be re-rendered or the URL resubmitted. This is a local backend, with no
+Use **one uvicorn process, without reload**. Independent bounded thread pools run
+metadata preflight (default 3), chat fetch/analysis (3), and rendering (2).
+Configure `CLIPPER_METADATA_WORKERS`, `CLIPPER_ANALYSIS_WORKERS`, and
+`CLIPPER_RENDER_WORKERS` with integer counts from 1 to 32. Reduce render workers
+to 1 on smaller laptops: transcription and ffmpeg are CPU/memory intensive.
+Metadata preflight checks for a finished VOD and live-chat replay before any
+replay download, independently of busy analysis/render pools. Preflight metadata
+is reused rather than fetched again. Actual network latency still varies.
+
+Re-renders have priority over waiting automatic clips; automatic renders are
+round-robin across jobs. In-flight renders are not preempted. JSON reads, writes
+and read/modify/write operations share a process-local reentrant lock; files are
+atomically replaced. Multiple server processes sharing one data directory are
+not supported.
+
+On restart, interrupted analysis jobs are re-queued for preflight/analysis;
+interrupted queued/rendering clips are re-queued without redoing ready or failed
+clips. A completed analysis is persisted even when it found no spikes.
+Cancelled jobs remain cancelled. This is a local backend, with no
 authentication: do not expose it publicly without access controls and quotas.
 
 ## Optional YouTube authentication
@@ -65,7 +81,14 @@ and use only media you are authorized to access.
   video link (`watch`, `live`, or `youtu.be`, including mobile) for a finished
   livestream; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
 - `GET /api/jobs` → array of jobs; add `?summary=true` for recent-stream cards
-  without activity and clips. `GET /api/jobs/{id}` → job.
+  without activity and clips, including `clip_count` and `queue_position`.
+  `GET /api/jobs/{id}` → job.
+- `POST /api/jobs/{id}/cancel` → `{id,status:"cancelled"}`. Cancels queued work
+  and stops running work at the next stage boundary; an active yt-dlp download,
+  Whisper transcription or ffmpeg process may finish first (not forcibly killed).
+  Ready clips and Keep flags remain available. Cancelled clips can be re-rendered.
+  A generation token prevents old work from publishing after cancel/re-render.
+  Cancelling a finished job returns 409; repeated cancellation is safe.
 - `POST /api/jobs/{id}/clips/{cid}/render` → 202 `{id:cid,status:"queued"}`.
   Body `{start,end,mode:"crop",captions:true}`. Seconds, within the original
   duration, end after start, maximum 60 seconds. Preserves detection metadata.
@@ -79,14 +102,18 @@ and use only media you are authorized to access.
   if none. The temporary archive is removed after streaming.
 
 Job shape: `{id,url,request,status,stage,progress,metadata,activity,clips,error}`.
-Status: `queued`, `running`, `completed`, `completed_with_errors`, `failed`.
+Status: `queued`, `running`, `completed`, `completed_with_errors`, `failed`, `cancelled`.
+Jobs and clips include `queue_position` (1-based when waiting, otherwise null).
+Positions are per pool, exclude active work, and reflect re-render priority and
+round-robin render order; they may change as new work arrives. The UI shows
+`Queued (position N)` and a Cancel job button for queued/running jobs.
 Progress is 0–1. New jobs include UTC `created_at`. Metadata: `{id,title,duration,thumbnail}`. Once chat is fetched,
 `chat_seconds` and `message_count` are added; on completion `elapsed_seconds`
 records pipeline time (or the latest re-render time).
 Activity points: `{time,count,baseline,intensity,score}` in 5-second bins.
 Clip shape: `{id,onset,peak,score,start,end,message_sample,mode,captions,status,
 error,file_url,download_url,thumbnail_url}`; status `queued`, `rendering`, `ready`,
-or `failed`. URLs are null until ready. Errors are explicit strings.
+`failed`, or `cancelled`. URLs are null until ready. Errors are explicit strings.
 New clips also have a stable `number`, assigned in start order and preserved on deletion.
 Older clips fall back to their list position. Single downloads use
 `<title-slug>-highlight-02.mp4`; kept ZIPs use `<title-slug>-kept-clips.zip`
@@ -105,7 +132,8 @@ Ready clips can be re-rendered while Autopilot runs; queued clips may be deleted
 and are skipped by the worker. Regular videos, unavailable videos and streams
 without chat replay fail with an explanation. Long replays are supported;
 replay downloads are checked against a five-minute time budget and a 128 MiB
-size budget. Jobs run in submission order, and refreshing the job page reconnects
+size budget. Each pool queues in submission order, with re-render priority and
+round-robin automatic clips as described above; refreshing the job page reconnects
 to the existing job. Fewer than the requested N highlights (including zero)
 are valid when there are insufficient separated spikes.
 
@@ -122,7 +150,8 @@ These are heuristic chat highlights, not semantic guarantees of interesting vide
 python -m pytest -q
 ```
 
-Tests cover replay text/emoji/paid messages and absent timestamps, no replay,
+Tests cover replay text/emoji/paid messages and absent timestamps, fast no replay,
 synthetic onset/peak/ranking/NMS/window boundaries/intensity, API job lifecycle,
-re-render validation, range streaming, downloads, thumbnail and deletion. API
+independent pools, priority/round-robin ordering, queue positions, cancellation,
+restart recovery, re-render validation, range streaming, downloads, thumbnail and deletion. API
 unit tests mock media/network work; a real YouTube check is separate.

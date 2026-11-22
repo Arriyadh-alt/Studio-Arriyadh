@@ -22,6 +22,13 @@ do not expose it to the public internet. No frontend build or service worker.
 The first caption render downloads the Whisper `base` model. Output, replay chat
 and job state are saved outside this repository in `~/clipper-data`. Keep a single
 server process; do not use `--workers` or `--reload` during processing.
+Separate pools handle metadata checks (3 workers), chat analysis (3) and rendering
+(2); set `CLIPPER_METADATA_WORKERS`, `CLIPPER_ANALYSIS_WORKERS` or
+`CLIPPER_RENDER_WORKERS` to tune them (1–32). Use one render worker on smaller
+laptops. Re-renders take priority and automatic clips rotate across jobs. The UI
+shows queue positions and lets you cancel pending work; active work stops at its
+next stage boundary. Interrupted work is re-queued on restart, preserving ready
+clips and cancelled jobs.
 See [STUDIO.md](STUDIO.md) for the API and [E2E.md](E2E.md) for backend evidence.
 The original CLI remains available below.
 

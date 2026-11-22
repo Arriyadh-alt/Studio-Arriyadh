@@ -4,7 +4,7 @@ from stat import S_IMODE
 import pytest
 from yt_dlp.utils import DownloadError
 
-from clipper_studio.chat import ChatReplayError, fetch_chat
+from clipper_studio.chat import ChatReplayError, fetch_chat, fetch_metadata
 from shorts_clipper.downloader import download_section
 from shorts_clipper.youtube import YouTubeAccessError, blocking_message, cookie_options
 
@@ -19,7 +19,7 @@ def cookie_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CLIPPER_DATA_DIR", str(tmp_path / "data"))
 
 
-@pytest.mark.parametrize("operation", ["chat", "section"])
+@pytest.mark.parametrize("operation", ["metadata", "chat", "section"])
 @pytest.mark.parametrize("configuration", ["none", "path", "text"])
 def test_cookie_options_reach_all_download_stages(monkeypatch, tmp_path, operation, configuration):
     source = tmp_path / "source.txt"
@@ -35,12 +35,6 @@ def test_cookie_options_reach_all_download_stages(monkeypatch, tmp_path, operati
         def __init__(self, options):
             self.options = options
         def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            if configuration != "none":
-                Path(self.options["cookiefile"]).write_text("rewritten cookie jar")
-        def extract_info(self, url, download):
-            assert not download
             if configuration == "none":
                 assert "cookiefile" not in self.options
             else:
@@ -51,12 +45,21 @@ def test_cookie_options_reach_all_download_stages(monkeypatch, tmp_path, operati
                 assert S_IMODE(private.parent.stat().st_mode) == 0o700
                 if configuration == "text":
                     assert tmp_path / "data" in private.parents
+            return self
+        def __exit__(self, *args):
+            if configuration != "none":
+                Path(self.options["cookiefile"]).write_text("rewritten cookie jar")
+        def extract_info(self, url, download):
+            assert not download
+            if operation != "section":
+                assert not self.options["writesubtitles"]
             return {"duration": 100, "live_status": "was_live", "subtitles": {"live_chat": [{}]}}
         def process_ie_result(self, info, download):
             assert download
             if configuration != "none":
                 assert Path(self.options["cookiefile"]).read_text() == COOKIE_TEXT
             if operation == "chat":
+                assert self.options["writesubtitles"]
                 output = Path(self.options["outtmpl"]).parent / "replay.live_chat.json"
                 output.write_bytes((Path(__file__).parent / "fixtures/chat.jsonl").read_bytes())
                 return info
@@ -65,12 +68,15 @@ def test_cookie_options_reach_all_download_stages(monkeypatch, tmp_path, operati
             return {"requested_downloads": [{"filepath": str(output)}]}
 
     monkeypatch.setattr("yt_dlp.YoutubeDL", Downloader)
-    if operation == "chat":
+    if operation == "metadata":
+        assert fetch_metadata("https://youtu.be/test")["duration"] == 100
+    elif operation == "chat":
         assert len(fetch_chat("https://youtu.be/test", tmp_path / "output")[1]) == 3
     else:
         assert download_section("https://youtu.be/test", tmp_path / "output", 0, 10).read_bytes() == b"video"
     assert source.read_text() == COOKIE_TEXT
     assert S_IMODE(source.stat().st_mode) == 0o400
+    assert len(seen) == (0 if configuration == "none" else 2 if operation == "chat" else 1)
     assert all(not path.exists() for path in seen)
 
 
@@ -144,6 +150,8 @@ def test_blocked_downloads_surface_actionable_errors_and_clean_up(monkeypatch, t
     with pytest.raises(error_type, match="YouTube is blocking this server") as raised:
         if stage.startswith("section"):
             download_section("https://youtu.be/test", tmp_path / "output", 0, 10)
+        elif stage == "metadata":
+            fetch_metadata("https://youtu.be/test")
         else:
             fetch_chat("https://youtu.be/test", tmp_path / "output")
     assert ("configured but may be rejected or expired" in str(raised.value)) if configured else "No cookies configured" in str(raised.value)

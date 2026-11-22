@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from yt_dlp.utils import DownloadError
 
-from clipper_studio.chat import ChatReplayError, Message, fetch_chat, parse_chat
+from clipper_studio.chat import ChatReplayError, Message, fetch_chat, fetch_metadata, parse_chat
 
 
 FIXTURE = Path(__file__).parent / "fixtures/chat.jsonl"
@@ -33,6 +33,8 @@ def stub_yt_dlp(monkeypatch):
         info = REPLAY_INFO
         extraction_error = None
         download = None
+        extractions = 0
+        downloads = 0
 
         def __init__(self, options):
             assert options["skip_download"]
@@ -45,11 +47,16 @@ def stub_yt_dlp(monkeypatch):
             pass
 
         def extract_info(self, *args, **kwargs):
+            type(self).extractions += 1
+            assert kwargs == {"download": False}
+            assert not self.options["writesubtitles"]
             if self.extraction_error:
                 raise DownloadError(self.extraction_error)
             return self.info
 
         def process_ie_result(self, info, download):
+            type(self).downloads += 1
+            assert self.options["writesubtitles"]
             assert download and info == REPLAY_INFO
             output = Path(self.options["outtmpl"]).parent / "replay.live_chat.json"
             if self.download:
@@ -68,11 +75,16 @@ def stub_yt_dlp(monkeypatch):
     ({"live_status": "is_upcoming"}, "replay isn’t ready yet"),
     ({"live_status": "post_live"}, "replay isn’t ready yet"),
     (dict(REPLAY_INFO, duration=None), "hasn’t published the replay duration"),
+    (dict(REPLAY_INFO, duration=0), "hasn’t published the replay duration"),
+    (dict(REPLAY_INFO, duration=float("inf")), "hasn’t published the replay duration"),
+    (dict(REPLAY_INFO, duration=float("nan")), "hasn’t published the replay duration"),
 ])
 def test_missing_replay_status(stub_yt_dlp, tmp_path, info, message):
     stub_yt_dlp.info = info
     with pytest.raises(ChatReplayError, match=message):
         fetch_chat(REPLAY_URL, tmp_path)
+    assert stub_yt_dlp.downloads == 0
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("error,message", [
@@ -107,5 +119,25 @@ def test_replay_limit_cleans_up_incomplete_download(stub_yt_dlp, tmp_path, monke
 
     stub_yt_dlp.download = download
     with pytest.raises(ChatReplayError, match="exceeded Studio’s processing limit"):
+        fetch_chat(REPLAY_URL, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preflight_metadata_reused_for_bounded_chat_download(stub_yt_dlp, tmp_path):
+    info = fetch_metadata(REPLAY_URL)
+    assert stub_yt_dlp.extractions == 1 and stub_yt_dlp.downloads == 0
+    result, messages = fetch_chat(REPLAY_URL, tmp_path, info)
+    assert stub_yt_dlp.extractions == 1 and stub_yt_dlp.downloads == 1
+    assert result["duration"] == 42403 and len(messages) == 3
+
+
+@pytest.mark.parametrize("contents,message", [(None, "couldn’t download"), ("", "no timestamped messages"),
+                                             ("broken", "couldn’t read")])
+def test_chat_download_empty_and_malformed(stub_yt_dlp, tmp_path, contents, message):
+    def download(self, output, progress):
+        if contents is not None:
+            output.write_text(contents)
+    stub_yt_dlp.download = download
+    with pytest.raises(ChatReplayError, match=message):
         fetch_chat(REPLAY_URL, tmp_path)
     assert list(tmp_path.iterdir()) == []
