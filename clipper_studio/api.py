@@ -149,6 +149,17 @@ def thumbnail_peak(clip, duration):
     return None
 
 
+def rendered_offset(clip, offset):
+    """Map a source-relative offset onto an AI Director edit's timeline."""
+    timeline = ((clip.get("director_result") or {}).get("edits") or {}).get("timeline")
+    if offset is None or not timeline:
+        return offset
+    for start, end, at in timeline:
+        if start <= offset < end:
+            return at + offset - start
+    return None
+
+
 def thumbnail_hook(job, clip, peak, captions=()):
     return choose_hook(captions, peak, clip.get("message_sample", ()), (job.get("metadata") or {}).get("title"))
 
@@ -693,8 +704,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 os.link(directory / "clip.mp4", video)
                 rendered_at = clip.get("rendered_at")
                 version = clip.get("thumbnail_version")
-                peak = thumbnail_peak(clip, clip["end"] - clip["start"])
-                hook = clip.get("thumbnail_hook") or thumbnail_hook(job, clip, peak)
+                source_peak = thumbnail_peak(clip, clip["end"] - clip["start"])
+                hook = clip.get("thumbnail_hook") or thumbnail_hook(job, clip, source_peak)
+                peak = rendered_offset(clip, source_peak)
             try:
                 generate_thumbnail(video, thumbnail, custom or hook, peak)
             except (ImageProcessingError, OSError, ValueError) as error:

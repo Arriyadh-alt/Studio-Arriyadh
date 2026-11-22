@@ -178,3 +178,9 @@ def test_hook_snaps_to_whole_words_in_continuous_speech():
     assert end - start <= 3.0
     assert not any(w.start < edge < w.end for w in words for edge in (start, end))
 
+
+def test_rendered_offset_maps_peaks_onto_the_edit():
+    from clipper_studio.api import rendered_offset
+    clip = {"director_result": {"edits": {"timeline": [[0, 5, 2.5], [8, 14, 7.5]]}}}
+    assert rendered_offset(clip, 10) == 9.5 and rendered_offset(clip, 6) is None
+    assert rendered_offset({"director_result": {"status": "disabled"}}, 10) == 10

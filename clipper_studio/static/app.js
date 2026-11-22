@@ -11,6 +11,12 @@ const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
 const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.director,clip.director_result])}`;
 const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:null,...value});
+const renderedOffset = (clip, offset) => {
+  const timeline=clip.director_result?.edits?.timeline;
+  if(!timeline?.length) return offset;
+  const shot=timeline.find(([start,end])=>offset<end) || timeline[timeline.length-1];
+  return shot[2] + Math.min(shot[1]-shot[0], Math.max(0, offset-shot[0]));
+};
 const directorDefaults = value => ({enabled:true,hook:true,edits:true,sfx:true,music:'auto',...value});
 const directorLabels = {hook:'Hook',pacing:'Pacing',emotion:'Emotion',dialogue:'Dialogue',chat:'Chat'};
 function directorHtml(clip, draft) {
@@ -291,7 +297,7 @@ $('#clips').addEventListener('click',async event=>{
       input.value=timestamp(Math.min(current.metadata.duration,Math.max(0,parseTime(input.value)+Number(button.dataset.nudge)))); saveDraft(node);
       const video = $('video',node), clip = current.clips.find(clip=>clip.id===cid);
       if (video && clip && Number.isFinite(video.duration)) {
-        const offset = parseTime(input.value) - clip.start - (button.dataset.field==='end' ? 2 : 0);
+        const offset = renderedOffset(clip, parseTime(input.value) - clip.start - (button.dataset.field==='end' ? 2 : 0));
         video.pause();
         video.currentTime = Math.min(video.duration,Math.max(0,offset));
       }

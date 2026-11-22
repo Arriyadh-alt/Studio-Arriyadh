@@ -101,7 +101,9 @@ class Plan:
                 "zooms": len(self.zooms), "transitions": len(self.flashes),
                 "sound_effects": len(self.sfx), "music": self.music,
                 "reframes": len({round(f, 2) for f in self.focal}) if self.focal else 0,
-                "duration": round(self.duration, 2)}
+                "duration": round(self.duration, 2),
+                "timeline": [[round(s.start, 3), round(s.end, 3), round(o, 3)]
+                             for o, s in zip(self.offsets(), self.segments) if s.role == "main"]}
 
 
 # ---------------------------------------------------------------- analysis
