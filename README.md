@@ -80,9 +80,24 @@ Licensed under the [MIT License](LICENSE).
 Cut a time range out of a YouTube video and turn it into a 1080x1920 (9:16) vertical MP4 for YouTube Shorts / TikTok.
 
 Only the requested section is downloaded (via yt-dlp), then ffmpeg converts it to vertical.
-Speech is transcribed locally with faster-whisper and burned in as bold white,
-black-outlined captions in the lower-middle of the frame. Captions use up to four
-words per chunk, following word timestamps and splitting at pauses/punctuation.
+Speech is transcribed locally with faster-whisper and burned in as synchronized
+captions. The default **pop** preset highlights each spoken word with a quick scale
+animation, while **classic** preserves the original static look and **minimal** uses
+smaller fading text. Short chunks follow word timestamps and split at pauses/punctuation.
+
+Studio's collapsible **Caption style** controls are available on both the create
+form and every clip: choose Auto/English/Indonesian, preset, font, size, position,
+colors, uppercase and keyword emphasis, then Re-render to apply changes. English
+and Indonesian keyword heuristics emphasize at most two words per chunk. The clip
+shows the transcription language. Other Whisper language codes are available via
+API/CLI; transcription is not translation. Accuracy depends on audio/model quality.
+Top/bottom positions reserve platform UI space and all positions keep the right rail clear.
+Bundled OFL display fonts: **Montserrat Black** (pop's default), **Anton**, and
+**Bebas Neue**. Both libass and line measurement use the bundled TTFs; no system
+font installation is needed for these faces. DejaVu Sans (classic/minimal default),
+Liberation Sans and JetBrains Mono remain available for existing styles; install
+these system fonts on other hosts or libass will substitute. Font licenses and
+source links are in `shorts_clipper/fonts/`.
 
 ## Requirements
 
@@ -102,6 +117,7 @@ pip install -r requirements.txt
 ```
 
 The default `base` model runs on CPU with int8 computation; no API key is needed.
+Set `CLIPPER_WHISPER_MODEL` to change the default; CLI `--model` overrides it.
 The first captioned run downloads model weights from Hugging Face (internet and
 disk space required); later runs use the cache. Larger models improve accuracy
 but need more RAM/time. Review automatic transcripts before publishing. Silence
@@ -131,8 +147,12 @@ python -m shorts_clipper "https://www.youtube.com/watch?v=aqz-KE-bpKQ" 1:05 1:17
 | `--keep-download DIR` | temp folder | Keep the downloaded horizontal section in `DIR` |
 | `--cookies FILE` | environment fallback | Netscape cookies.txt; overrides `CLIPPER_YTDLP_COOKIES` and `YOUTUBE_COOKIES` |
 | `--no-captions` | off | Disable captions |
-| `--model MODEL` | `base` | faster-whisper model name or local model directory |
+| `--model MODEL` | environment or `base` | faster-whisper model name or local model directory |
 | `--language CODE` | auto-detect | Speech language code, e.g. `en` (not translation) |
+| `--caption-preset` | `pop` | `pop`, `classic`, or `minimal` |
+| `--caption-position` | `bottom` | `bottom`, `middle`, or `top` |
+| `--caption-size` | `80` | Font pixels at 1080x1920, clamped 40–130 (classic default uses original 76px; minimal scales to 80%) |
+| `--caption-font` | preset default | Montserrat (Black), Anton, Bebas Neue, DejaVu Sans, Liberation Sans, JetBrains Mono; classic/minimal default to DejaVu Sans |
 | `--srt` | off | Save UTF-8 subtitles next to the MP4; requires captions |
 | `--local` | off | Read a local video path instead of downloading a URL |
 

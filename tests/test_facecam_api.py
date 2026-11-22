@@ -28,8 +28,10 @@ def test_legacy_defaults(tmp_path):
     assert job['clips'][0]['facecam'] == FacecamSpec().model_dump()
 
 
-@pytest.mark.parametrize('scenario', ['detected','manual','none','failure','render_failure','disabled','still_failure'])
+@pytest.mark.parametrize('scenario', ['detected','manual','none','failure','render_failure','disabled','still_failure','captioned'])
 def test_worker(tmp_path, monkeypatch, scenario):
+    from shorts_clipper.captions import Caption, Transcript
+    monkeypatch.setattr('clipper_studio.api.transcribe', lambda source, **kwargs: Transcript([Caption(0, 1, 'Halo dunia!')], 'id'))
     monkeypatch.setattr('clipper_studio.api.fetch_metadata', lambda *a: {'duration':60})
     monkeypatch.setattr('clipper_studio.api.fetch_chat', lambda *a: ({'duration':60}, []))
     monkeypatch.setattr('clipper_studio.api.detect_spikes', lambda *a,**k: ([{'start':0,'end':10}], []))
@@ -51,6 +53,8 @@ def test_worker(tmp_path, monkeypatch, scenario):
     calls=[]
     def render(source, output, *a, **kwargs):
         calls.append(kwargs.get('facecam'))
+        if scenario=='captioned' and kwargs.get('facecam') is not None:
+            assert 'Montserrat' in a[3].read_text()
         if scenario=='render_failure' and kwargs:
             raise RuntimeError('overlay filter')
         output.write_bytes(b'video')
@@ -61,13 +65,16 @@ def test_worker(tmp_path, monkeypatch, scenario):
         spec['box']=vars(box)
     app=create_app(tmp_path)
     with TestClient(app) as client:
-        jid=client.post('/api/jobs',json={'url':'https://youtu.be/abcdefghijk','captions':False,'facecam':spec}).json()['id']
+        jid=client.post('/api/jobs',json={'url':'https://youtu.be/abcdefghijk','captions':scenario=='captioned','facecam':spec,
+                                        'language':'id','caption_style':{'preset':'pop'}}).json()['id']
         app.state.pending.join()
         job=client.get(f'/api/jobs/{jid}').json()
         clip=job['clips'][0]
         assert clip['status']=='ready'
         assert clip['facecam']==job['request']['facecam']
-        if scenario in ('detected','manual','still_failure'):
+        if scenario=='captioned':
+            assert clip['caption_language']=='id' and clip['caption_style']['preset']=='pop'
+        if scenario in ('detected','manual','still_failure','captioned'):
             assert calls==[overlay]
             assert clip['facecam_result']['position']=='top-right'
             assert clip['facecam_result']['origin']==('manual' if scenario=='manual' else 'detected')
@@ -85,4 +92,6 @@ def test_worker(tmp_path, monkeypatch, scenario):
         base=f'/api/jobs/{jid}/clips/{clip["id"]}'
         assert client.post(base+'/render',json={'start':0,'end':5,'captions':False,'facecam':{'enabled':False}}).status_code==202
         app.state.pending.join()
-        assert client.get(f'/api/jobs/{jid}').json()['clips'][0]['facecam']['enabled'] is False
+        rerendered=client.get(f'/api/jobs/{jid}').json()['clips'][0]
+        assert rerendered['status']=='ready'
+        assert rerendered['facecam']['enabled'] is False

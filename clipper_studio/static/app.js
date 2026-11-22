@@ -9,7 +9,7 @@ const keeping = new Map();
 let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
-const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at])}`;
+const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language])}`;
 const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:null,...value});
 function facecamHtml(clip, draft) {
   const f=facecamDefaults(draft.facecam), result=clip.facecam_result, box=f.box || result?.box;
@@ -22,6 +22,8 @@ function facecamHtml(clip, draft) {
     ${clip.source_still_url?`<p class="hint">Draw an area, drag to move, or use a corner to resize. Re-render applies your changes.</p><div class="camera-editor"><img draggable="false" alt="Original source frame for camera area" src=".${escapeHtml(clip.source_still_url)}?v=${clip.rendered_at||0}"><div class="camera-box" ${box?'':'hidden'} style="left:${(box?.x||0)*100}%;top:${(box?.y||0)*100}%;width:${(box?.w||0)*100}%;height:${(box?.h||0)*100}%">${['nw','ne','sw','se'].map(c=>`<span class="camera-handle ${c}" data-corner="${c}"></span>`).join('')}</div></div>`:'<p class="hint">Source preview available after rendering.</p>'}
     <button type="button" data-action="facecam-reset">Reset to auto-detect</button></details></fieldset>`;
 }
+$('#create-caption-style').innerHTML = CaptionControls.html();
+CaptionControls.preview($('#create-caption-style'));
 const thumbnailUrl = clip => clip.thumbnail_url ? `.${clip.thumbnail_url}?v=${clip.thumbnail_version || clip.rendered_at || 0}` : '';
 
 function timestamp(value) {
@@ -91,7 +93,7 @@ function chart(job) {
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index,job) {
-  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam)};
+  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),...CaptionControls.options(clip)};
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
@@ -105,6 +107,8 @@ function clipHtml(clip,index,job) {
     <form class="review"><div class="time-grid"><div>${timeField('start')}</div><div>${timeField('end')}</div></div>
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
       ${facecamHtml(clip,draft)}
+      ${CaptionControls.html(draft)}
+      ${clip.caption_language?`<p class="hint">Transcription language: ${escapeHtml(clip.caption_language)}</p>`:''}
       <p class="draft-note hint" hidden><span>Changes not applied — Re-render to update</span> <button type="button" class="quiet" data-action="reset">Reset</button></p><p class="draft-error error" role="status" hidden></p>
       ${locked(clip)?'<p class="hint">This highlight is queued or rendering. Review actions unlock when it finishes.</p>':''}
       <div class="actions"><button type="submit" class="primary" ${disabled}>Re-render ↻</button>${clip.status==='ready'?`<a class="button" href=".${clip.download_url}">Download ↓</a>`:''}<button class="delete" type="button" data-action="delete" aria-label="Delete highlight ${number}" ${disabled}>Delete</button></div>
@@ -144,6 +148,7 @@ function drawJob(job) {
     if (!existing) container.insertAdjacentHTML('beforeend',html);
     else if (existing.dataset.version !== version) existing.outerHTML = html;
     const node = document.getElementById(`clip-${clip.id}`);
+    CaptionControls.preview(node);
     const keep = $('[data-action=keep]',node);
     keep.setAttribute('aria-pressed',String(!!clip.kept));
     keep.textContent = clip.kept ? '★ Kept' : '☆ Keep';
@@ -206,7 +211,7 @@ $('#refresh-jobs').addEventListener('click',()=>refresh());
 $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
-    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked}});
+    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
@@ -216,7 +221,7 @@ function saveDraft(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id);
   const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
   const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
-  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam});
+  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,...CaptionControls.read(node)});
   draftFeedback(node);
 }
 function draftFeedback(node) {
@@ -224,6 +229,7 @@ function draftFeedback(node) {
   let error='',changed=false,length=clip.end-clip.start;
   if(draft) {
     changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam));
+    changed=changed||JSON.stringify({language:draft.language,caption_style:draft.caption_style})!==JSON.stringify(CaptionControls.options(clip));
     try {
       const start=parseTime(draft.start),end=parseTime(draft.end); length=end-start;
       const f=draft.facecam,b=f?.box;
@@ -313,7 +319,7 @@ $('#clips').addEventListener('submit',async event=>{
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
 let cameraDrag=null;

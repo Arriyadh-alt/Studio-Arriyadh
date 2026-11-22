@@ -28,7 +28,7 @@ from cv2 import error as ImageProcessingError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
-from shorts_clipper.captions import to_ass, transcribe
+from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.video import make_vertical_clip, video_duration
@@ -79,6 +79,8 @@ class JobRequest(BaseModel):
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
     facecam: FacecamSpec = Field(default_factory=FacecamSpec)
+    language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
+    caption_style: dict | None = None
 
     @field_validator("url")
     @classmethod
@@ -112,6 +114,8 @@ class RenderRequest(BaseModel):
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
     facecam: FacecamSpec = Field(default_factory=FacecamSpec)
+    language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
+    caption_style: dict | None = None
 
 
 class KeepRequest(BaseModel):
@@ -220,11 +224,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 source = download_section(job["url"], work, spec["start"], spec["end"])
                 duration = min(video_duration(source), spec["end"] - spec["start"])
                 subtitles, captions = None, []
+                caption_language = None
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     subtitles = work / "captions.ass"
-                    captions = transcribe(source, clip_end=duration)
-                    subtitles.write_text(to_ass(captions), encoding="utf-8")
+                    captions = transcribe(source, language=spec.get("language"), clip_end=duration)
+                    caption_language = getattr(captions, "language", None)
+                    subtitles.write_text(to_ass(captions, CaptionStyle.from_dict(spec.get("caption_style"))), encoding="utf-8")
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
                 overlay = None
@@ -290,7 +296,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     revision = str(time.time_ns())
                     clip.update(status="ready", rendered_at=int(revision), file_url=base + "/video",
                                 download_url=base + "/download", thumbnail_url=base + "/thumbnail",
-                                thumbnail_version=revision, thumbnail_hook=hook)
+                                thumbnail_version=revision, thumbnail_hook=hook, caption_language=caption_language)
                     clip.pop("previous_render", None)
                     store.save(job)
         except Exception:
@@ -397,6 +403,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             clips = [dict(spike, number=number, id=uuid.uuid4().hex, status="queued", error=None,
                           mode=job["request"]["mode"], captions=job["request"]["captions"],
                           facecam=job["request"].get("facecam", FacecamSpec().model_dump()),
+                          language=job["request"].get("language", "auto"), caption_style=job["request"].get("caption_style"),
                           file_url=None, download_url=None, thumbnail_url=None)
                      for number, spike in enumerate(sorted(spikes, key=lambda s: s["start"]), 1)]
             with store.lock:
@@ -562,6 +569,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 clip["previous_render"] = {key: clip[key] for key in (
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
                     "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url") if key in clip}
+                clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language")})
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
             if job["status"] not in ACTIVE_STATUSES:
@@ -657,6 +665,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 finish(jid, job.get("generation", 0))
         return {"id": cid, "status": "deleted"}
 
+    app.mount("/caption-fonts", StaticFiles(directory=FONT_DIR), name="caption-fonts")
     app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="studio")
     return app
 

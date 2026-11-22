@@ -143,6 +143,7 @@ def test_auto_layout():
 
 @pytest.mark.parametrize('mode', ['crop', 'blur'])
 def test_filters(mode):
+    from shorts_clipper.captions import FONT_DIR
     spec = layout_facecam(SourceBox(.7, .1, .2, .3), (640, 360))
     with patch('shorts_clipper.video.detect_focal_x', side_effect=AssertionError('must use center')):
         command = build_ffmpeg_command(Path('source'), Path('out'), 0, 1, mode, Path('subs.ass'), spec)
@@ -150,12 +151,14 @@ def test_filters(mode):
     assert '[0:v]split[mainin][camin]' in graph
     assert '[camin]crop=' in graph and 'drawbox=' in graph
     assert graph.index('[main][cam]overlay=') < graph.index(',ass=')
+    assert f':fontsdir={FONT_DIR}' in graph
     if mode == 'crop':
         assert 'iw*0.500000' in graph
 
 
 @pytest.mark.parametrize('mode', ['crop', 'blur'])
-def test_real_overlay(tmp_path, mode):
+@pytest.mark.parametrize('captioned', [False, True])
+def test_real_overlay(tmp_path, mode, captioned):
     if shutil.which('ffmpeg') is None:
         pytest.skip('ffmpeg required')
     source, output = tmp_path/'source.mp4', tmp_path/'out.mp4'
@@ -163,7 +166,12 @@ def test_real_overlay(tmp_path, mode):
                     'color=blue:s=640x360:r=4:d=0.5,drawbox=x=0:y=0:w=128:h=128:color=red:t=fill',
                     '-c:v', 'libx264', str(source)], check=True)
     spec = layout_facecam(SourceBox(0, 0, .2, 128/360), (640, 360))
-    make_vertical_clip(source, output, 0, .5, mode, facecam=spec)
+    subtitles = None
+    if captioned:
+        from shorts_clipper.captions import Caption, CaptionStyle, to_ass
+        subtitles = tmp_path/'captions.ass'
+        subtitles.write_text(to_ass([Caption(0, 1, 'Visible animated caption')], CaptionStyle()), encoding='utf-8')
+    make_vertical_clip(source, output, 0, .5, mode, captions=subtitles, facecam=spec)
     capture = cv2.VideoCapture(str(output))
     ok, frame = capture.read()
     capture.release()

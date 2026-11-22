@@ -1,12 +1,13 @@
 """Command-line entry point."""
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from .captions import to_ass, to_srt, transcribe
+from .captions import CaptionStyle, FONTS, to_ass, to_srt, transcribe
 from .downloader import download_section
 from .timeutils import format_timestamp, parse_timestamp
 from .video import FILTERS, make_vertical_clip, video_duration
@@ -28,8 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cookies", type=Path, metavar="FILE",
                         help="Netscape cookies.txt (overrides CLIPPER_YTDLP_COOKIES; source is never rewritten)")
     parser.add_argument("--no-captions", action="store_true", help="disable local transcription and captions")
-    parser.add_argument("--model", default="base", help="faster-whisper model name or local model directory (default: base)")
+    parser.add_argument("--model", default=os.environ.get("CLIPPER_WHISPER_MODEL", "base"), help="faster-whisper model name or local model directory (default: CLIPPER_WHISPER_MODEL or base)")
     parser.add_argument("--language", default=None, help="speech language code, e.g. en (default: auto-detect)")
+    parser.add_argument("--caption-preset", choices=("pop", "classic", "minimal"), default="pop")
+    parser.add_argument("--caption-position", choices=("bottom", "middle", "top"), default="bottom")
+    parser.add_argument("--caption-size", type=int, default=80, help="font size at 1080x1920 (clamped to 40–130)")
+    parser.add_argument("--caption-font", choices=FONTS, default=None, help="font family (default: Montserrat for pop, DejaVu Sans otherwise)")
     parser.add_argument("--srt", action="store_true", help="also save subtitles next to the output (requires captions)")
     parser.add_argument("--local", action="store_true", help="treat URL as a local video path instead")
     return parser
@@ -61,7 +66,9 @@ def main(argv=None) -> int:
                 if not captions:
                     print("No speech detected; saving video without captions.", flush=True)
                 subtitles = Path(tmp) / "captions.ass"
-                subtitles.write_text(to_ass(captions), encoding="utf-8")
+                style = CaptionStyle.from_dict({"preset": args.caption_preset, "position": args.caption_position,
+                                                "size": args.caption_size, "font": args.caption_font})
+                subtitles.write_text(to_ass(captions, style), encoding="utf-8")
                 if args.srt:
                     args.output.parent.mkdir(parents=True, exist_ok=True)
                     args.output.with_suffix(".srt").write_text(to_srt(captions), encoding="utf-8")

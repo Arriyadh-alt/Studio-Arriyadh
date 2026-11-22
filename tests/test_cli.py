@@ -4,6 +4,23 @@ from shorts_clipper import cli
 from shorts_clipper.captions import Caption
 
 
+def test_caption_style_cli_options(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLIPPER_WHISPER_MODEL", "small")
+    args = cli.build_parser().parse_args(["video.mp4","0","10","--caption-preset","minimal",
+        "--caption-position","top","--caption-size","110","--caption-font","Liberation Sans"])
+    assert args.model == "small" and args.caption_preset == "minimal"
+    with patch.object(cli, "download_section", return_value=tmp_path / "source.mp4"), \
+         patch.object(cli, "video_duration", return_value=10), \
+         patch.object(cli, "transcribe", return_value=[Caption(0,1,"Hello")]) as speech, \
+         patch.object(cli, "to_ass", return_value="ASS") as serialize, \
+         patch.object(cli, "make_vertical_clip"):
+        assert cli.main(["URL","0","10","--model","tiny","--language","id","--caption-preset","minimal",
+            "--caption-position","top","--caption-size","110","--caption-font","Liberation Sans"]) == 0
+        assert speech.call_args.args[1:3] == ("tiny", "id")
+        style = serialize.call_args.args[1]
+        assert (style.preset,style.position,style.size,style.font) == ("minimal","top",110,"Liberation Sans")
+
+
 def test_default_captions_and_srt(tmp_path):
     output = tmp_path / "out.mp4"
     with patch.object(cli, "download_section", return_value=tmp_path / "source.mp4"), \
