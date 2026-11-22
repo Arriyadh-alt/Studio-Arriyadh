@@ -7,6 +7,8 @@ from statistics import median
 
 import cv2
 
+from .captions import FONT_DIR
+
 WIDTH, HEIGHT = 1080, 1920
 
 FILTERS = {
@@ -83,10 +85,13 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
         )
     if captions is not None:
         path = str(captions.resolve())
+        fonts = str(FONT_DIR.resolve())
         # Escape the option value, then the enclosing filtergraph.
         path = "".join("\\" + char if char in "\\': " else char for char in path)
         path = "".join("\\" + char if char in "\\'[],; " else char for char in path)
-        filters += f",ass=filename={path}"
+        fonts = "".join("\\" + char if char in "\\': " else char for char in fonts)
+        fonts = "".join("\\" + char if char in "\\'[],; " else char for char in fonts)
+        filters += f",ass=filename={path}:fontsdir={fonts}"
     return [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{end - start:.3f}",

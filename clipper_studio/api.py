@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.background import BackgroundTask
 
-from shorts_clipper.captions import CaptionStyle, to_ass, transcribe
+from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.video import make_vertical_clip, video_duration
 from shorts_clipper.youtube import YouTubeAccessError
@@ -515,6 +515,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 finish(jid, job.get("generation", 0))
         return {"id": cid, "status": "deleted"}
 
+    app.mount("/caption-fonts", StaticFiles(directory=FONT_DIR), name="caption-fonts")
     app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="studio")
     return app
 

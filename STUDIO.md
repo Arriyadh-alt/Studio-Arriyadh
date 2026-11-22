@@ -127,16 +127,20 @@ again; cancellation restores the previous render's caption settings and language
 
 `caption_style` is an optional object; null uses defaults:
 ```json
-{"preset":"pop","font":"DejaVu Sans","size":80,"position":"bottom",
+{"preset":"pop","font":"Montserrat","size":80,"position":"bottom",
  "text_color":"#FFFFFF","highlight_color":"#FFE34D","emphasis_color":"#67F5B5",
  "uppercase":false,"emphasis":true}
 ```
 Unknown keys/invalid values fall back to defaults; numeric size clamps to 40–130.
 Presets: `pop` (word-active color/scale animation, stable chunk wrapping), `classic`
 (original static 76px look at default settings), `minimal` (80% size, no emphasis,
-fade in/out). Fonts: `DejaVu Sans`, `Liberation Sans`, `JetBrains Mono`; these are
-installed on the development host and used by libass. Other hosts should install
-them or libass will substitute. Position: `bottom`, `middle`, `top`; top/bottom
+fade in/out). Fonts: bundled OFL `Montserrat` (Black, pop default), `Anton`,
+`Bebas Neue`, plus system `DejaVu Sans`, `Liberation Sans`, `JetBrains Mono`.
+Classic/minimal default to DejaVu Sans; an explicitly stored font remains respected.
+Bundled TTFs are loaded directly for wrapping and supplied to libass via `fontsdir`,
+and served at `/caption-fonts/` for CSS previews. Licenses/source attribution are in
+`shorts_clipper/fonts/`. System faces require installation on other hosts or libass
+will substitute. Position: `bottom`, `middle`, `top`; top/bottom
 reserve platform UI space and all positions retain the wider right-rail margin.
 Colors are `#RRGGBB`. Keyword emphasis picks up to two words using numbers,
 punctuation, uppercase and English/Indonesian content-word heuristics, not an LLM.

@@ -16,13 +16,16 @@ FONT_SIZE = 76
 MARGIN_LEFT, MARGIN_RIGHT, MARGIN_BOTTOM = 90, 190, 420
 LINE_WIDTH = 1080 - MARGIN_LEFT - MARGIN_RIGHT - 16
 MIN_DURATION = 0.8
-FONTS = ("DejaVu Sans", "Liberation Sans", "JetBrains Mono")
+FONT_DIR = Path(__file__).resolve().parent / "fonts"
+VENDORED_FONTS = {"Montserrat": "Montserrat-Black.ttf", "Anton": "Anton-Regular.ttf",
+                  "Bebas Neue": "BebasNeue-Regular.ttf"}
+FONTS = (*VENDORED_FONTS, "DejaVu Sans", "Liberation Sans", "JetBrains Mono")
 
 
 @dataclass
 class CaptionStyle:
     preset: str = "pop"
-    font: str = "DejaVu Sans"
+    font: str | None = None
     size: int = 80
     position: str = "bottom"
     text_color: str = "#FFFFFF"
@@ -31,11 +34,16 @@ class CaptionStyle:
     uppercase: bool = False
     emphasis: bool = True
 
+    def __post_init__(self):
+        if self.font is None:
+            self.font = "Montserrat" if self.preset == "pop" else "DejaVu Sans"
+
     @classmethod
     def from_dict(cls, value=None):
-        result = cls()
         if not isinstance(value, dict):
-            return result
+            return cls()
+        preset = value.get("preset")
+        result = cls(preset=preset if preset in ("pop", "classic", "minimal") else "pop")
         choices = {"preset": ("pop", "classic", "minimal"), "font": FONTS,
                    "position": ("bottom", "middle", "top")}
         for key, options in choices.items():
@@ -244,6 +252,8 @@ def literal_text(text):
 @lru_cache(maxsize=24)
 def style_font(font, size):
     try:
+        if font in VENDORED_FONTS:
+            return ImageFont.truetype(str(FONT_DIR / VENDORED_FONTS[font]), size)
         path = subprocess.run(["fc-match", "-f", "%{file}", font + ":style=Bold"],
                               check=True, capture_output=True, text=True).stdout
         return ImageFont.truetype(path, size)
@@ -288,7 +298,8 @@ def to_ass(captions: list[Caption], style: CaptionStyle | dict | None = None) ->
     effective = CaptionStyle(**{**style.__dict__, "size": size})
     alignment = {"bottom": 2, "middle": 5, "top": 8}[style.position]
     margin = {"bottom": MARGIN_BOTTOM, "middle": 0, "top": 260}[style.position]
-    header = _classic_ass([]).replace("DejaVu Sans,76,", f"{style.font},{size},")
+    family = "Montserrat Black" if style.font == "Montserrat" else style.font
+    header = _classic_ass([]).replace("DejaVu Sans,76,", f"{family},{size},")
     header = header.replace("&H00FFFFFF,&H00FFFFFF", f"&H00{ass_color(style.text_color)[2:-1]},&H00{ass_color(style.text_color)[2:-1]}")
     header = header.replace(",2,90,190,420,1", f",{alignment},90,190,{margin},1")
     if style.preset == "minimal":

@@ -25,6 +25,14 @@ def test_caption_request_defaults():
         RenderRequest(start=0, end=10, language="not-a-code")
 
 
+def test_caption_fonts_served_for_preview(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        for font in ('Montserrat-Black.ttf','Anton-Regular.ttf','BebasNeue-Regular.ttf'):
+            response = client.get('/caption-fonts/' + font)
+            assert response.status_code == 200 and response.content[:4] == b'\x00\x01\x00\x00'
+        assert client.get('/caption-fonts/missing.ttf').status_code == 404
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_caption_options_worker_and_rerender(monkeypatch, tmp_path, media, legacy):
     from shorts_clipper.captions import Caption, Transcript

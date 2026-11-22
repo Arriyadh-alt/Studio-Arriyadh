@@ -2,13 +2,14 @@ import re
 import sys
 import wave
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from pathlib import Path
 
 import pytest
 
 from shorts_clipper.captions import (
-    Caption, CaptionStyle, FONTS, Transcript, _classic_ass, ass_color,
-    chunk_words, emphasized_words, to_ass, transcribe,
+    Caption, CaptionStyle, FONT_DIR, FONTS, VENDORED_FONTS, Transcript, _classic_ass, ass_color,
+    chunk_words, emphasized_words, style_font, styled_lines, to_ass, transcribe,
 )
 
 
@@ -32,6 +33,30 @@ def test_style_validation_and_clamping():
     for font in FONTS:
         assert CaptionStyle.from_dict({'font':font}).font == font
     assert CaptionStyle.from_dict({'uppercase':True}).uppercase
+
+
+def test_preset_fonts_and_explicit_old_fonts():
+    assert CaptionStyle().font == 'Montserrat'
+    assert CaptionStyle.from_dict({'preset':'classic'}).font == 'DejaVu Sans'
+    assert CaptionStyle(preset='classic').font == 'DejaVu Sans'
+    assert CaptionStyle.from_dict({'preset':'pop','font':'unknown'}).font == 'Montserrat'
+    old_style = {'preset':'pop','font':'DejaVu Sans'}
+    assert CaptionStyle.from_dict(old_style).font == 'DejaVu Sans'
+    assert 'DejaVu Sans,80,' in to_ass([Caption(0,1,'Old stored style')],old_style)
+    assert 'Montserrat Black,80,' in to_ass([Caption(0,1,'Default pop')],{})
+    assert 'Montserrat Black,76,' in to_ass([Caption(0,1,'Custom classic')],{'preset':'classic','font':'Montserrat'})
+
+
+@pytest.mark.parametrize('font', VENDORED_FONTS)
+def test_vendored_font_measurement(font):
+    style_font.cache_clear()
+    with patch('shorts_clipper.captions.subprocess.run', side_effect=AssertionError('must not use system fonts')):
+        measured = style_font(font, 80)
+    assert measured is not None and Path(measured.path) == FONT_DIR / VENDORED_FONTS[font]
+    text = 'An INCREDIBLE moment with 100 percent amazing highlights!'
+    lines = styled_lines(text, CaptionStyle(font=font))
+    assert all(measured.getlength(line) <= 784 / 1.15 for line in lines)
+    assert ''.join(''.join(lines).split()) == ''.join(text.split())
 
 
 def test_ass_color():

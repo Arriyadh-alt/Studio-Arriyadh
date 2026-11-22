@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--caption-preset", choices=("pop", "classic", "minimal"), default="pop")
     parser.add_argument("--caption-position", choices=("bottom", "middle", "top"), default="bottom")
     parser.add_argument("--caption-size", type=int, default=80, help="font size at 1080x1920 (clamped to 40–130)")
-    parser.add_argument("--caption-font", choices=FONTS, default="DejaVu Sans")
+    parser.add_argument("--caption-font", choices=FONTS, default=None, help="font family (default: Montserrat for pop, DejaVu Sans otherwise)")
     parser.add_argument("--srt", action="store_true", help="also save subtitles next to the output (requires captions)")
     parser.add_argument("--local", action="store_true", help="treat URL as a local video path instead")
     return parser

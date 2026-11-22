@@ -8,7 +8,7 @@ import numpy as np
 
 import pytest
 
-from shorts_clipper.captions import Caption, to_ass
+from shorts_clipper.captions import FONT_DIR, Caption, to_ass
 from shorts_clipper.video import build_ffmpeg_command, crop_left, detect_focal_x, make_vertical_clip
 
 
@@ -31,6 +31,25 @@ def test_command_rejects_bad_range_and_mode():
 def test_captions_follow_vertical_filter(mode):
     cmd = build_ffmpeg_command(Path("a"), Path("b"), 0, 5, mode, Path("captions.ass"))
     assert ",ass=filename=" in cmd[cmd.index("-filter_complex") + 1]
+    assert f":fontsdir={FONT_DIR}" in cmd[cmd.index("-filter_complex") + 1]
+
+
+def test_no_captions_does_not_add_fonts_filter():
+    cmd = build_ffmpeg_command(Path('a'),Path('b'),0,1,'blur')
+    assert 'fontsdir' not in cmd[cmd.index('-filter_complex') + 1]
+
+
+def test_vendored_pop_font_selected_by_libass(tmp_path):
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('ffmpeg is required for font rendering')
+    source, subtitles, output = (tmp_path / name for name in ('source.mp4','pop.ass','pop.mp4'))
+    subtitles.write_text(to_ass([Caption(0,1,'Heavy default pop')],{}),encoding='utf-8')
+    subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i',
+                    'color=black:s=160x90:r=4:d=0.5','-c:v','libx264',str(source)],check=True)
+    cmd = build_ffmpeg_command(source,output,0,.5,'blur',subtitles)
+    cmd[cmd.index('-loglevel') + 1] = 'verbose'
+    result = subprocess.run(cmd,check=True,capture_output=True,text=True)
+    assert any('fontselect:' in line and 'Montserrat-Black' in line for line in result.stderr.splitlines())
 
 
 def test_render_captions_with_filtergraph_characters_in_path(tmp_path):

@@ -92,8 +92,12 @@ and Indonesian keyword heuristics emphasize at most two words per chunk. The cli
 shows the transcription language. Other Whisper language codes are available via
 API/CLI; transcription is not translation. Accuracy depends on audio/model quality.
 Top/bottom positions reserve platform UI space and all positions keep the right rail clear.
-Fonts: DejaVu Sans, Liberation Sans, JetBrains Mono (install these on other hosts;
-libass substitutes a system font if unavailable). No bundled font download is needed.
+Bundled OFL display fonts: **Montserrat Black** (pop's default), **Anton**, and
+**Bebas Neue**. Both libass and line measurement use the bundled TTFs; no system
+font installation is needed for these faces. DejaVu Sans (classic/minimal default),
+Liberation Sans and JetBrains Mono remain available for existing styles; install
+these system fonts on other hosts or libass will substitute. Font licenses and
+source links are in `shorts_clipper/fonts/`.
 
 ## Requirements
 
@@ -148,7 +152,7 @@ python -m shorts_clipper "https://www.youtube.com/watch?v=aqz-KE-bpKQ" 1:05 1:17
 | `--caption-preset` | `pop` | `pop`, `classic`, or `minimal` |
 | `--caption-position` | `bottom` | `bottom`, `middle`, or `top` |
 | `--caption-size` | `80` | Font pixels at 1080x1920, clamped 40–130 (classic default uses original 76px; minimal scales to 80%) |
-| `--caption-font` | `DejaVu Sans` | DejaVu Sans, Liberation Sans, JetBrains Mono |
+| `--caption-font` | preset default | Montserrat (Black), Anton, Bebas Neue, DejaVu Sans, Liberation Sans, JetBrains Mono; classic/minimal default to DejaVu Sans |
 | `--srt` | off | Save UTF-8 subtitles next to the MP4; requires captions |
 | `--local` | off | Read a local video path instead of downloading a URL |
 
