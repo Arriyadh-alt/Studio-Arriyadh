@@ -174,7 +174,7 @@ function draftFeedback(node) {
 }
 $('#delete-unkept').addEventListener('click',async event=>{
   const clips=current.clips.filter(c=>!c.kept && c.status!=='rendering');
-  if(!confirm(`Delete ${clips.length} unkept highlights and their files?`))return;
+  if(!confirm(`Delete ${clips.length} unkept ${clips.length===1?'highlight and its files':'highlights and their files'}?`))return;
   event.target.disabled=true;
   try {for(const clip of clips){await api(`./api/jobs/${current.id}/clips/${clip.id}`,'DELETE');drafts.delete(clip.id);}}
   catch(error){notice(error.message);}finally{event.target.disabled=false;await refresh();}
