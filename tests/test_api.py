@@ -45,12 +45,13 @@ def test_caption_options_worker_and_rerender(monkeypatch, tmp_path, media, legac
         return "ASS"
     monkeypatch.setattr("clipper_studio.api.transcribe", speech)
     monkeypatch.setattr("clipper_studio.api.to_ass", serialize)
+    monkeypatch.setattr("clipper_studio.api.generate_thumbnail", lambda video, output, text, peak: output.write_bytes(text.encode()))
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration":600}, []))
-    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([{"start":10,"end":40}], []))
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([{"start":10,"end":40,"peak":10.5}], []))
     app = create_app(tmp_path, render_workers=1)
     if legacy:
         job = saved_job("old", "running")
-        job["clips"][0].update(status="queued", captions=True)
+        job["clips"][0].update(status="queued", captions=True, peak=10.5)
         app.state.store.save(job)
     with TestClient(app) as client:
         jid = "old" if legacy else client.post("/api/jobs", json={"url":REPLAY_URL,
@@ -58,6 +59,8 @@ def test_caption_options_worker_and_rerender(monkeypatch, tmp_path, media, legac
         app.state.pending.join()
         clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
         assert clip["status"] == "ready" and clip["caption_language"] == "id"
+        assert clip["thumbnail_hook"] == "HALO DUNIA" and clip["thumbnail_version"]
+        assert client.get(clip["thumbnail_url"]).content == b"HALO DUNIA"
         assert calls[-1]["language"] == (None if legacy else "id")
         assert styles[-1].preset == ("pop" if legacy else "minimal")
         if not legacy:
@@ -160,7 +163,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr("clipper_studio.api.time.sleep", lambda seconds: None)
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: (
         {"title": "🔴 Test!", "duration": 600, "thumbnail": None},
-        [Message(t, "user", "W") for t in (100, 300, 500) for _ in range(20)]))
+        [Message(t, str(i), "W") for t in (100, 300, 500) for i in range(20)]))
     download_attempts = []
     def section(url, directory, start, end):
         download_attempts.append(start)
@@ -208,6 +211,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
         assert 'filename="test-kept-clips.zip"' in archive.headers["content-disposition"]
         with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
             assert bundle.read("highlight-01.mp4") == b"0123456789"
+            assert bundle.read("highlight-01.jpg") == b"jpg"
         assert client.get(f"/api/jobs/{jid}").json()["clips"][0]["kept"]
         response = client.get(clip["file_url"], headers={"Range":"bytes=2-5"})
         assert response.status_code == 206
@@ -235,9 +239,54 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
         second = job["clips"][1]
         client.patch(f"/api/jobs/{jid}/clips/{second['id']}", json={"kept":True})
         with zipfile.ZipFile(io.BytesIO(client.get(f"/api/jobs/{jid}/download-kept").content)) as bundle:
-            assert bundle.namelist() == ["highlight-02.mp4"]
+            assert bundle.namelist() == ["highlight-02.mp4", "highlight-02.jpg"]
         assert client.get(clip["file_url"]).status_code == 404
         assert len(client.get("/api/jobs").json()) == 1
+
+
+def test_thumbnail_regeneration_preserves_video_and_auto_hook(tmp_path, monkeypatch, media):
+    store = Store(tmp_path)
+    job = saved_job("thumbjob")
+    job["metadata"]["title"] = "Final round showdown"
+    store.save(job)
+    directory = tmp_path / job["id"] / "first"
+    directory.mkdir()
+    (directory / "clip.mp4").write_bytes(b"video")
+
+    def make_thumbnail(video, output, text, peak):
+        assert video.read_bytes() == b"video"
+        output.write_bytes(text.encode())
+
+    monkeypatch.setattr("clipper_studio.api.generate_thumbnail", make_thumbnail)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        clip_url = "/api/jobs/thumbjob/clips/first"
+        thumbnail_url = clip_url + "/thumbnail"
+        edited = client.post(thumbnail_url, json={"text": "  tidak   mungkin!  "})
+        assert edited.status_code == 200
+        assert edited.json()["thumbnail_text"] == "TIDAK MUNGKIN!"
+        jpg = client.get(thumbnail_url + "?download=true")
+        assert jpg.headers["content-type"] == "image/jpeg"
+        assert jpg.headers["content-disposition"] == 'attachment; filename="final-round-showdown-highlight-01.jpg"'
+        assert jpg.content == b"TIDAK MUNGKIN!"
+        assert client.get(clip_url + "/video").content == b"video"
+        assert client.post(thumbnail_url, json={"text": "x" * 65}).status_code == 422
+
+        assert client.post(clip_url + "/render", json={"start": 10, "end": 40, "captions": False}).status_code == 202
+        app.state.pending.join()
+        assert client.get(thumbnail_url).content == b"TIDAK MUNGKIN!"
+        reset = client.post(thumbnail_url)
+        assert reset.status_code == 200
+        assert reset.json()["thumbnail_text"] is None
+        assert reset.json()["thumbnail_version"] != edited.json()["thumbnail_version"]
+        assert client.get(thumbnail_url).content == b"FINAL ROUND SHOWDOWN"
+
+        def unavailable(*args):
+            raise ValueError("No frames")
+
+        monkeypatch.setattr("clipper_studio.api.generate_thumbnail", unavailable)
+        assert client.post(thumbnail_url).status_code == 500
+        assert client.get(thumbnail_url).content == b"FINAL ROUND SHOWDOWN"
 
 
 def test_errors_and_empty(monkeypatch, tmp_path, metadata):

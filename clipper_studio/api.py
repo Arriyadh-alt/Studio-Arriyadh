@@ -22,11 +22,13 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from cv2 import error as ImageProcessingError
 from pydantic import BaseModel, Field, field_validator
 from starlette.background import BackgroundTask
 
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
+from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.video import make_vertical_clip, video_duration
 from shorts_clipper.youtube import YouTubeAccessError
 
@@ -90,6 +92,21 @@ class RenderRequest(BaseModel):
 
 class KeepRequest(BaseModel):
     kept: bool
+
+
+class ThumbnailRequest(BaseModel):
+    text: str | None = Field(default=None, max_length=TEXT_LIMIT)
+
+
+def thumbnail_peak(clip, duration):
+    peak = clip.get("peak")
+    if peak is not None and 0 <= peak - clip["start"] < duration:
+        return peak - clip["start"]
+    return None
+
+
+def thumbnail_hook(job, clip, peak, captions=()):
+    return choose_hook(captions, peak, clip.get("message_sample", ()), (job.get("metadata") or {}).get("title"))
 
 
 class Store:
@@ -174,30 +191,38 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 update(jid, generation, stage=f"{clip_label} · Downloading")
                 source = download_section(job["url"], work, spec["start"], spec["end"])
                 duration = min(video_duration(source), spec["end"] - spec["start"])
-                subtitles = None
+                subtitles, captions = None, []
                 caption_language = None
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     subtitles = work / "captions.ass"
-                    transcript = transcribe(source, language=spec.get("language"), clip_end=duration)
-                    caption_language = getattr(transcript, "language", None)
-                    subtitles.write_text(to_ass(transcript, CaptionStyle.from_dict(spec.get("caption_style"))), encoding="utf-8")
+                    captions = transcribe(source, language=spec.get("language"), clip_end=duration)
+                    caption_language = getattr(captions, "language", None)
+                    subtitles.write_text(to_ass(captions, CaptionStyle.from_dict(spec.get("caption_style"))), encoding="utf-8")
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
                 make_vertical_clip(source, video, 0, duration,
                                    spec["mode"], subtitles)
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
                 thumbnail = work / "thumbnail.jpg"
-                subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(video), "-frames:v", "1",
-                                "-vf", "scale=270:480", str(thumbnail)], check=True)
+                peak = thumbnail_peak(spec, duration)
+                hook = thumbnail_hook(job, spec, peak, captions)
+                try:
+                    generate_thumbnail(video, thumbnail, spec.get("thumbnail_text") or hook, peak)
+                except (ImageProcessingError, OSError, ValueError):
+                    logger.warning("Could not style thumbnail for %s/%s; using the first frame", jid, cid)
+                    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(video), "-frames:v", "1",
+                                    "-vf", "scale=270:480", str(thumbnail)], check=True)
                 with store.lock:
                     job = active_job(jid, generation)
                     clip = find_clip(job, cid)
                     video.replace(output_dir / "clip.mp4")
                     thumbnail.replace(output_dir / "thumbnail.jpg")
                     base = f"/api/jobs/{jid}/clips/{cid}"
-                    clip.update(status="ready", rendered_at=time.time_ns(), file_url=base + "/video", download_url=base + "/download",
-                                thumbnail_url=base + "/thumbnail", caption_language=caption_language)
+                    revision = str(time.time_ns())
+                    clip.update(status="ready", rendered_at=int(revision), file_url=base + "/video",
+                                download_url=base + "/download", thumbnail_url=base + "/thumbnail",
+                                thumbnail_version=revision, thumbnail_hook=hook, caption_language=caption_language)
                     clip.pop("previous_render", None)
                     store.save(job)
         except Exception:
@@ -444,7 +469,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             try:
                 with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
                     for clip in clips:
-                        bundle.write(store.root / jid / clip["id"] / "clip.mp4", f"highlight-{clip_number(job, clip):02d}.mp4")
+                        directory = store.root / jid / clip["id"]
+                        stem = f"highlight-{clip_number(job, clip):02d}"
+                        bundle.write(directory / "clip.mp4", stem + ".mp4")
+                        thumbnail = directory / "thumbnail.jpg"
+                        if thumbnail.is_file():
+                            bundle.write(thumbnail, stem + ".jpg")
             except Exception:
                 shutil.rmtree(archive_dir)
                 raise
@@ -484,8 +514,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             path = store.root / jid / cid / filename
             if not path.is_file():
                 raise HTTPException(404, "File not found")
-        return FileResponse(path, media_type="image/jpeg" if filename.endswith("jpg") else "video/mp4",
-                            filename=f"{title_slug(job)}-highlight-{clip_number(job, clip):02d}.mp4" if download else None,
+        extension = path.suffix
+        return FileResponse(path, media_type="image/jpeg" if extension == ".jpg" else "video/mp4",
+                            filename=f"{title_slug(job)}-highlight-{clip_number(job, clip):02d}{extension}" if download else None,
                             content_disposition_type="attachment" if download else "inline")
 
     @app.get("/api/jobs/{jid}/clips/{cid}/video")
@@ -497,8 +528,44 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         return file(jid, cid, "clip.mp4", True)
 
     @app.get("/api/jobs/{jid}/clips/{cid}/thumbnail")
-    def thumbnail(jid: str, cid: str):
-        return file(jid, cid, "thumbnail.jpg")
+    def thumbnail(jid: str, cid: str, download: bool = False):
+        return file(jid, cid, "thumbnail.jpg", download)
+
+    @app.post("/api/jobs/{jid}/clips/{cid}/thumbnail")
+    def regenerate_thumbnail(jid: str, cid: str, request: ThumbnailRequest | None = None):
+        custom = ' '.join(((request and request.text) or "").upper().split())[:TEXT_LIMIT] or None
+        with tempfile.TemporaryDirectory(dir=store.root, prefix="thumbnail-") as temporary:
+            work = Path(temporary)
+            video = work / "clip.mp4"
+            thumbnail = work / "thumbnail.jpg"
+            with store.lock:
+                job = store.get(jid)
+                clip = find_clip(job, cid)
+                if clip["status"] != "ready":
+                    raise HTTPException(409, "Clip is not ready")
+                directory = store.root / jid / cid
+                if not (directory / "clip.mp4").is_file():
+                    raise HTTPException(404, "File not found")
+                os.link(directory / "clip.mp4", video)
+                rendered_at = clip.get("rendered_at")
+                version = clip.get("thumbnail_version")
+                peak = thumbnail_peak(clip, clip["end"] - clip["start"])
+                hook = clip.get("thumbnail_hook") or thumbnail_hook(job, clip, peak)
+            try:
+                generate_thumbnail(video, thumbnail, custom or hook, peak)
+            except (ImageProcessingError, OSError, ValueError) as error:
+                logger.warning("Could not regenerate thumbnail for %s/%s: %s", jid, cid, error)
+                raise HTTPException(500, "Could not generate a thumbnail for this clip") from None
+            with store.lock:
+                job = store.get(jid)
+                clip = find_clip(job, cid)
+                if (clip["status"], clip.get("rendered_at"), clip.get("thumbnail_version")) != ("ready", rendered_at, version):
+                    raise HTTPException(409, "This highlight changed. Try again.")
+                thumbnail.replace(directory / "thumbnail.jpg")
+                clip.update(thumbnail_url=f"/api/jobs/{jid}/clips/{cid}/thumbnail", thumbnail_text=custom,
+                            thumbnail_hook=hook, thumbnail_version=str(time.time_ns()))
+                store.save(job)
+                return {key: clip[key] for key in ("thumbnail_url", "thumbnail_text", "thumbnail_hook", "thumbnail_version")}
 
     @app.delete("/api/jobs/{jid}/clips/{cid}")
     def delete_clip(jid: str, cid: str):

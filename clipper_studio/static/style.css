@@ -7,12 +7,21 @@
 @font-face{font-family:'Bebas Neue';src:url('./caption-fonts/BebasNeue-Regular.ttf') format('truetype');font-weight:400 900;font-display:swap}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji"}
 .caption-settings{border-top:1px solid var(--line);margin:8px 0 16px;min-width:0}.caption-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;padding:10px 0}.caption-grid label{min-width:0}.caption-grid input[type=color]{padding:5px}.caption-grid input[type=range]{min-height:44px}.caption-sample{background:#101419;border-radius:8px;padding:18px;text-align:center;color:white;font-size:24px;font-weight:800;overflow-wrap:anywhere;text-shadow:1px 2px 2px black}.caption-sample span{color:#ffe34d}.caption-grid .check{font-size:12px}.caption-grid select{max-width:100%}
+.preview.with-thumbnail{align-items:center;gap:12px;padding:12px}
+.preview.with-thumbnail video,.thumbnail-preview{width:calc(50% - 6px);min-width:0}
+.thumbnail-preview{margin:0;position:relative;display:grid;place-items:center}
+.thumbnail-preview[hidden],.thumbnail-download[hidden]{display:none}
+.thumbnail-preview img{display:block;width:100%;aspect-ratio:9/16;max-height:420px;object-fit:contain}
+.thumbnail-preview figcaption{position:absolute;top:6px;left:6px;font-size:11px;background:#161b22;color:var(--text);border-radius:5px;padding:3px 7px}
+.thumbnail-editor{border-top:1px solid var(--line);padding:16px 0}
+.thumbnail-editor .actions>*{flex:1}
 @media(max-width:640px){
   input,select,textarea{font-size:16px}
   .nudges{display:grid;grid-template-columns:repeat(2,minmax(44px,1fr));gap:8px}
   .nudges button{min-width:44px;min-height:44px;font-size:14px}
   .preview{min-height:0;align-items:center}
   .preview video{max-height:35vh;max-height:35svh}
+  .thumbnail-preview img{max-height:35vh;max-height:35svh}
   .samples{margin:8px 0;padding:8px;min-height:0;max-height:60px;overflow:auto}
   .check{min-height:44px;min-width:44px}
   .back{display:inline-flex;align-items:center;min-height:44px;min-width:44px;margin:18px 0}
