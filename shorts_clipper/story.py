@@ -73,6 +73,10 @@ TEMPLATES = {
                       "Momen Paling Hangat Di Live {who}"],
     },
 }
+QUOTE_TEMPLATES = {
+    "en": ['Why Did {who} Say "{quote}"?', 'It All Started With "{quote}"{in_game}...'],
+    "id": ['Kenapa {who} Bilang "{quote}"?', 'Semua Berawal Dari "{quote}"{in_game}...'],
+}
 FALLBACK_WHO = {"en": "This Streamer", "id": "Streamer Ini"}
 IN_GAME = {"en": " in {game}", "id": " di {game}"}
 
@@ -154,22 +158,43 @@ def _fit(text: str) -> str | None:
     return text if 8 <= len(text) <= TEXT_LIMIT else None
 
 
-def template_hooks(category, language, name=None, game=None, seed="", used=()) -> list:
-    """Up to three hooks for the event, rotated by seed so clips of one stream differ."""
+def key_phrase(words, category, event) -> str | None:
+    """The streamer's own words that mark the moment ("thank you", "no way"), to anchor the hook in this clip."""
+    pattern = PATTERNS.get(category)
+    near = [w for w in words if event - 3 <= w.start <= event + 4]
+    for i, w in enumerate(near):
+        if pattern and pattern.search(w.word):
+            picked = [w.word]
+            if i + 1 < len(near) and near[i + 1].start - w.end < 0.4 and not re.search(r"[.!?,]$", w.word):
+                picked.append(near[i + 1].word)
+            phrase = re.sub(r"[^\w' ]", "", " ".join(picked)).strip()
+            if 2 <= len(phrase) <= 16:
+                return phrase.title().replace("'S", "'s").replace("'T", "'t")
+    return None
+
+
+def template_hooks(category, language, name=None, game=None, seed="", used=(), quote=None) -> list:
+    """Up to three hooks for the event, rotated by seed so clips of one stream differ. A hook built on the
+    streamer's own words at the moment comes first, since it is specific to this clip."""
     language = language if language in TEMPLATES else "en"
     templates = TEMPLATES[language].get(category) or TEMPLATES[language]["shock"]
     who = name or FALLBACK_WHO[language]
-    options = []
-    for template in templates:
+
+    def fill(template):
         for in_game in ((IN_GAME[language].format(game=game), "") if game else ("",)):
-            text = _fit(template.format(who=who, in_game=in_game))
+            text = _fit(template.format(who=who, in_game=in_game, quote=quote))
             if text:
-                options.append(text)
-                break
+                return text
+        return None
+
+    options = [text for text in map(fill, templates) if text]
     shift = int(hashlib.sha1(str(seed).encode()).hexdigest(), 16) % len(options) if options else 0
     options = options[shift:] + options[:shift]
+    if quote and category != "karma":  # an explicit karma template already names the event
+        quoted = [text for text in map(fill, QUOTE_TEMPLATES[language]) if text]
+        options = (quoted[:1] if name else quoted[1:2] or quoted[:1]) + options
     used = {u.casefold() for u in used if u}
-    return sorted(options, key=lambda o: o.casefold() in used)
+    return sorted(options, key=lambda o: o.casefold() in used)[:3]
 
 
 def llm_hooks(context: dict, category: str, language: str) -> list:
@@ -216,7 +241,7 @@ def write_hooks(context: dict, words, event: float, seed="") -> dict:
     writer = "llm" if options else "local"
     if not options:
         options = template_hooks(category, language, context.get("name"), context.get("game"), seed,
-                                 context.get("used", ()))
+                                 context.get("used", ()), key_phrase(words, category, event))
     return {"options": options, "category": category, "language": language, "writer": writer,
             "streamer": context.get("name"), "game": context.get("game")}
 

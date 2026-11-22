@@ -232,3 +232,50 @@ def test_loudness_correction_keeps_audio_in_sync(tmp_path):
                          capture_output=True, check=True).stdout
     audio = np.abs(np.frombuffer(raw, dtype=np.int16))
     assert abs(int(np.argmax(audio)) - 24000) < 48 and len(audio) >= 47000
+
+
+def test_api_story_voiceover_and_channel_for_older_jobs(monkeypatch, tmp_path, source):
+    import shutil
+    import wave
+    from fastapi.testclient import TestClient
+    from clipper_studio.api import create_app
+    from shorts_clipper.captions import Transcript
+    captions = captions_for([t / 2 for t in range(24) if not 8 <= t < 12], loud_at=8.5)
+    lookups = []
+
+    def metadata(url):
+        lookups.append(url)
+        return {"id": "x", "duration": 600, "title": "Stream", "channel": "Valkyrae", "uploader": "Valkyrae"}
+
+    def voice(text, language, output, cache):
+        assert cache == tmp_path.resolve() / "voices"
+        with wave.open(str(output), "wb") as file:
+            file.setnchannels(1), file.setsampwidth(2), file.setframerate(22050)
+            file.writeframes(b"\0\0" * 22050 * 2)
+        return 2.0
+
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", metadata)
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 600, "title": "Stream"}, []))
+    monkeypatch.setattr("clipper_studio.api.detect_spikes",
+                        lambda *a, **k: ([{"start": 10, "end": 22, "peak": 18.5, "score": 3.0}], []))
+    monkeypatch.setattr("clipper_studio.api.download_section",
+                        lambda url, directory, *a: Path(shutil.copy(source, directory / "source.mp4")))
+    monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **k: Transcript(list(captions), "en"))
+    monkeypatch.setattr("clipper_studio.api.generate_thumbnail", lambda video, output, text, peak: output.write_bytes(b"jpg"))
+    monkeypatch.setattr("clipper_studio.api.detect_facecam", lambda *a: None)
+    monkeypatch.setattr("clipper_studio.api.synthesize_voice", voice)
+    app = create_app(tmp_path, render_workers=1)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=LIxBN4AHMEE", "clips": 1,
+                                             "director": {"voiceover": True}}).json()["id"]
+        app.state.pending.join()
+        job = client.get(f"/api/jobs/{jid}").json()
+        clip = job["clips"][0]
+        assert clip["status"] == "ready", clip.get("error")
+        hook = clip["director_result"]["edits"]["hook"]
+        assert hook["voiceover"] and hook["streamer"] == "Valkyrae" and "Valkyrae" in hook["text"]
+        assert job["metadata"]["channel"] == "Valkyrae" and len(lookups) == 2
+        assert client.post(f"/api/jobs/{jid}/clips/{clip['id']}/render",
+                           json={"start": 10, "end": 22, "director": {"voiceover": True}}).status_code == 202
+        app.state.pending.join()
+        assert len(lookups) == 2

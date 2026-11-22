@@ -188,3 +188,15 @@ def test_full_story_render_with_voiceover(source, tmp_path):
     checks = {c["check"]: c for c in quality_check(mixed, plan, shown)}
     assert checks["Format"]["status"] == "pass" and checks["Subtitle timing"]["status"] == "pass"
     assert checks["Visual consistency"]["status"] == "pass"
+
+
+def test_hooks_quote_the_streamers_own_words_at_the_moment():
+    from shorts_clipper.story import key_phrase
+    words = [word(16.0, "okay"), word(17.6, "Thank", 0.3), word(17.95, "you!", 0.3), word(18.4, "so", 0.3)]
+    assert key_phrase(words, "wholesome", 18.0) == "Thank You"
+    named = write_hooks({"language": "en", "name": "Valkyrae"}, words, 18.0, "a")
+    assert named["options"][0] == 'Why Did Valkyrae Say "Thank You"?' and len(named["options"]) == 3
+    anonymous = write_hooks({"language": "en"}, words, 18.0, "a")["options"]
+    assert anonymous[0] == 'It All Started With "Thank You"...'
+    karma = template_hooks("karma", "id", "Windah Basudara", "GTA VI", quote="Karma")
+    assert "Momen Ketika Windah Basudara Terkena Karma di GTA VI!" in karma and not any('"' in k for k in karma)
