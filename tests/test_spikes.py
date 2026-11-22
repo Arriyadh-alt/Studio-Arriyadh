@@ -14,9 +14,9 @@ def test_spikes_onset_peak_and_non_overlap():
         for delta, count in ((0, 8), (5, 20), (10, 8)):
             messages.extend(Message(onset + delta, str(i), "KEKW!!!") for i in range(count))
     spikes, activity = detect_spikes(messages, 600, clips=3)
-    assert [s["onset"] for s in spikes] == [100, 300, 500]
+    assert [s["onset"] for s in spikes] == [82, 282, 482]
     assert [s["peak"] for s in spikes] == [105, 305, 505]
-    assert [s["start"] for s in spikes] == [82, 282, 482]
+    assert [s["start"] for s in spikes] == [64, 264, 464]
     assert len(activity) == 120
     assert all(30 <= s["end"] - s["start"] <= 60 for s in spikes)
     assert all(a["end"] <= b["start"] for a, b in zip(spikes, spikes[1:]))
@@ -25,11 +25,10 @@ def test_spikes_onset_peak_and_non_overlap():
 def test_empty_flat_and_boundaries():
     assert detect_spikes([], 100)[0] == []
     assert detect_spikes(stream(), 600)[0] == []
-    for time in (0, 79):
+    for time in (0, 79, 99):
         spikes, _ = detect_spikes([Message(time, str(i), "W") for i in range(20)], 100)
         assert len(spikes) == 1
         assert 0 <= spikes[0]["start"] < spikes[0]["end"] <= 100
-    assert detect_spikes([Message(99, str(i), "W") for i in range(20)], 100)[0] == []
 
 
 def test_nms_top_n_and_lead():
@@ -92,8 +91,8 @@ def test_big_volume_spike_detected():
     picks, _ = detect_spikes(messages, 600)
     assert len(picks) == 1
     assert 295 <= picks[0]['peak'] <= 305
-    assert picks[0]['onset'] == 295
-    assert picks[0]['start'] == 277
+    assert picks[0]['onset'] == 277
+    assert picks[0]['start'] == 259
 
 
 def test_samples_are_reaction_first_and_deduplicated():
@@ -124,7 +123,7 @@ def test_reaction_spike_with_capped_total_volume():
     picks, series = detect_spikes(messages, 600)
     assert len(picks) == 1
     assert 295 <= picks[0]['peak'] <= 305
-    assert picks[0]['onset'] == 295
+    assert picks[0]['onset'] == 277
     assert all(point['count'] == 100 for point in series)
 
 
@@ -197,7 +196,7 @@ def test_distinct_chatter_surge_without_reaction_words_is_picked():
     picks, series = detect_spikes(messages, 600)
     assert len(picks) == 1
     assert 295 <= picks[0]['peak'] <= 305
-    assert picks[0]['onset'] == 295
+    assert picks[0]['onset'] == 277
     assert series[60]['intensity'] == 0
     assert set(series[60]) == {'time', 'count', 'baseline', 'intensity', 'score'}
 
@@ -221,3 +220,194 @@ def test_wave_requires_three_distinct_authors():
     picks, series = detect_spikes(messages, 600)
     assert picks == []
     assert series[60]['intensity'] == 0
+
+
+@pytest.mark.parametrize('delay', [0, .5, 12, 25])
+def test_chat_delay_estimates_moment_without_changing_scores(delay):
+    messages = [Message(300, str(i), 'LOL') for i in range(20)]
+    picks, series = detect_spikes(messages, 600, chat_delay=delay)
+    reference, reference_series = detect_spikes(messages, 600, chat_delay=0)
+    assert series == reference_series
+    assert picks[0]['onset'] == 300 - delay
+    assert picks[0]['start'] == 300 - delay - 18
+    assert picks[0]['peak'] == reference[0]['peak'] == 300
+    assert set(picks[0]) == {'onset', 'peak', 'score', 'start', 'end', 'message_sample'}
+
+
+@pytest.mark.parametrize('delay', [-1, float('nan'), float('inf'), -float('inf')])
+def test_invalid_chat_delay(delay):
+    with pytest.raises(ValueError, match='Chat delay'):
+        detect_spikes([], 600, chat_delay=delay)
+
+
+@pytest.mark.parametrize('peak,moment', [(285, 270), (290, 278), (295, 283)])
+def test_sparse_rise_crosses_only_one_empty_bin(peak, moment):
+    messages = [Message(270, 'one', 'LOL'), Message(275, 'two', 'OMG')]
+    messages += [Message(peak, str(i), 'LOL') for i in range(10)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=12)
+    assert picks[0]['peak'] == peak
+    assert picks[0]['onset'] == moment
+    assert picks[0]['start'] == moment - 18
+    assert picks[0]['onset'] - picks[0]['start'] == 18
+
+
+def test_sparse_onset_does_not_cross_long_empty_gap():
+    messages = [Message(250, 'one', 'LOL'), Message(255, 'two', 'OMG')]
+    messages += [Message(290, str(i), 'LOL') for i in range(10)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=0)
+    assert picks[0]['onset'] == 290
+
+
+def test_sparse_onset_links_independent_authors_across_short_gap():
+    messages = [Message(270, 'one', 'LOL')]
+    messages += [Message(280, str(i), 'LOL') for i in range(10)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=0)
+    assert picks[0]['peak'] == 280
+    assert picks[0]['onset'] == 270
+
+
+def test_contiguous_rise_is_capped_at_thirty_seconds():
+    messages = [Message(t, 'one', 'LOL') for t in range(250, 290, 5)]
+    messages += [Message(290, str(i), 'LOL') for i in range(10)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=0)
+    assert picks[0]['onset'] == 260
+
+
+@pytest.mark.parametrize('delay,moment', [(0, 280), (12, 280), (23, 277), (100, 270)])
+def test_moment_uses_earlier_of_peak_delay_and_rise_without_double_subtraction(delay, moment):
+    messages = [Message(t, str(i), 'LOL') for t in range(280, 300, 5) for i in range(2)]
+    messages += [Message(300, str(i), 'LOL') for i in range(20)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=delay)
+    assert picks[0]['peak'] == 300
+    assert picks[0]['onset'] == moment
+    assert picks[0]['start'] == moment - 18
+    assert picks[0]['end'] == min(picks[0]['start'] + 60, max(picks[0]['start'] + 30, 320))
+
+
+def test_sparse_rise_does_not_cross_two_separate_empty_bins():
+    messages = [Message(270, 'one', 'LOL'), Message(280, 'two', 'OMG')]
+    messages += [Message(290, str(i), 'LOL') for i in range(20)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=0)
+    assert picks[0]['onset'] == 280
+
+
+def test_sparse_rise_does_not_treat_nonreacting_chat_as_an_empty_bin():
+    messages = [Message(t, str(i), 'LOL' if t == 285 or (t == 275 and i == 0)
+                        else f'ordinary message {i}') for t in range(0, 600, 5) for i in range(2)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=0)
+    assert picks[0]['peak'] == picks[0]['onset'] == 285
+
+
+def test_busy_rise_does_not_cross_an_empty_bin():
+    messages = [Message(t, str(i), 'LOL' if t == 275 and i < 3 else f'ordinary message {i}')
+                for t in range(0, 600, 5) if t not in (280, 285) for i in range(10)]
+    messages += [Message(285, str(i), 'LOL') for i in range(20)]
+    picks, _ = detect_spikes(messages, 600, clips=1, chat_delay=0)
+    assert picks[0]['peak'] == picks[0]['onset'] == 285
+
+
+@pytest.mark.parametrize('lead', [15, 18, 20])
+@pytest.mark.parametrize('tail', [1, 20])
+def test_long_delay_is_bounded_to_keep_peak_inside_nonoverlapping_clips(lead, tail):
+    messages = [Message(t, str(i), 'LOL') for t in (200, 400) for i in range(20)]
+    picks, _ = detect_spikes(messages, 600, lead=lead, tail=tail, chat_delay=100)
+    assert len(picks) == 2
+    for p in picks:
+        assert p['onset'] == p['peak'] - 30
+        assert p['start'] == max(0, p['onset'] - lead)
+        assert p['start'] <= p['onset'] <= p['peak'] < p['end'] <= 600
+        assert 30 <= p['end'] - p['start'] <= 60
+    assert picks[0]['end'] <= picks[1]['start']
+
+
+@pytest.mark.parametrize('delay,count', [(0, 2), (100, 0)])
+def test_zero_tail_rejects_windows_ending_exactly_at_the_peak(delay, count):
+    messages = [Message(t, str(i), 'LOL') for t in (200, 400) for i in range(20)]
+    picks, _ = detect_spikes(messages, 600, tail=0, chat_delay=delay)
+    assert len(picks) == count
+    for p in picks:
+        assert p['peak'] < p['end']
+        assert p['end'] == min(600, p['start'] + 60, max(p['start'] + 30, p['peak']))
+
+
+def test_moment_delay_clamps_at_start_and_empty_chat_stays_empty():
+    assert detect_spikes([], 600, chat_delay=20)[0] == []
+    picks, _ = detect_spikes([Message(5, str(i), 'LOL') for i in range(20)], 100)
+    assert picks[0]['onset'] == picks[0]['start'] == 0
+
+
+@pytest.mark.parametrize('bin_seconds', [2, 7, 10, 40])
+def test_moment_invariants_with_nondefault_bins(bin_seconds):
+    messages = [Message(t, str(i), 'LOL') for t in (200, 400) for i in range(20)]
+    picks, _ = detect_spikes(messages, 600, bin_seconds=bin_seconds)
+    assert len(picks) == 2
+    for p in picks:
+        assert p['start'] == max(0, p['onset'] - 18)
+        assert p['start'] <= p['onset'] <= p['peak'] < p['end'] <= 600
+        assert 30 <= p['end'] - p['start'] <= 60
+
+
+@pytest.mark.parametrize('text', ['gg everyone', 'ggs all', 'see ya', 'thanks for the stream',
+                                  'thank you for another great livestream', 'byyeeee',
+                                  'thank you so much for the dual stream'])
+def test_sparse_late_outro_context_suppresses_copypasta_wave(text):
+    messages = [Message(550, str(i), 'bop') for i in range(6)]
+    messages += [Message(555, f'outro{i}', text) for i in range(4)]
+    assert detect_spikes(messages, 600)[0] == []
+
+
+@pytest.mark.parametrize('peak,farewell_delay', [(3300, 25), (3500, 25), (3500, 5)])
+def test_late_sparse_gameplay_survives_two_unrelated_farewells(peak, farewell_delay):
+    messages = [Message(peak, str(i), 'LOL') for i in range(6)]
+    messages += [Message(peak + farewell_delay, f'outro{i}', 'thanks for the stream') for i in range(2)]
+    picks, _ = detect_spikes(messages, 3600)
+    assert len(picks) == 1
+    assert picks[0]['peak'] == peak
+
+
+def test_outro_filter_does_not_cover_entire_last_fifteen_percent():
+    messages = [Message(3200, str(i), 'bop') for i in range(6)]
+    messages += [Message(3205, f'outro{i}', 'thanks for the stream') for i in range(4)]
+    picks, _ = detect_spikes(messages, 3600)
+    assert picks[0]['peak'] == 3200
+
+
+def test_outro_filter_ignores_majority_farewells_beyond_clip_end():
+    messages = [Message(550, str(i), 'LOL') for i in range(2)]
+    messages += [Message(575, f'outro{i}', 'thanks for the stream') for i in range(2)]
+    picks, _ = detect_spikes(messages, 600)
+    assert picks[0]['peak'] == 550
+    assert picks[0]['end'] < 575
+
+
+def test_outro_filter_does_not_use_earlier_context_before_clip():
+    messages = [Message(508, f'outro{i}', 'thanks for the stream') for i in range(4)]
+    messages += [Message(550, str(i), 'LOL') for i in range(6)]
+    picks, _ = detect_spikes(messages, 600)
+    assert picks[0]['peak'] == 550
+    assert picks[0]['start'] > 508
+
+
+@pytest.mark.parametrize('text', ['gg everyone', 'thanks for the stream'])
+@pytest.mark.parametrize('outro_authors', [1, 2, 3])
+def test_building_outro_wave_uses_independent_leading_span(text, outro_authors):
+    messages = [Message(3470 + i * 5, f'outro{i}', text) for i in range(outro_authors)]
+    messages += [Message(3500.5, str(i), 'LOL') for i in range(6)]
+    picks, _ = detect_spikes(messages, 3600)
+    if outro_authors == 3:
+        assert picks == []
+    else:
+        assert len(picks) == 1
+        assert picks[0]['peak'] == 3500
+
+
+def test_outro_context_requires_independent_authors():
+    messages = [Message(550, str(i), 'bop') for i in range(6)]
+    messages += [Message(555, 'one', 'thanks for the stream') for _ in range(100)]
+    assert detect_spikes(messages, 600)[0]
+
+
+@pytest.mark.parametrize('time,text', [(300, 'gg everyone'), (550, 'GG'), (550, 'WOOO LETSGOO')])
+def test_midstream_group_gg_and_late_gameplay_hype_remain_pickable(time, text):
+    messages = [Message(time, str(i), text) for i in range(20)]
+    assert detect_spikes(messages, 600)[0]

@@ -38,11 +38,14 @@ def normalized_message(text):
 
 
 def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_seconds=180,
-                  min_gap=60, tail=20):
+                  min_gap=60, tail=20, *, chat_delay=23):
+    """Estimate moments from peak lag or rise onset, reaching back at most 30 seconds."""
     if not math.isfinite(duration) or duration <= 0 or not 15 <= lead <= 20 or not 1 <= clips <= 50:
         raise ValueError("Positive duration, 1-50 clips and lead within 15-20 seconds are required")
     if bin_seconds <= 0 or baseline_seconds < bin_seconds or min_gap < 0 or tail < 0:
         raise ValueError("Invalid detector configuration")
+    if not math.isfinite(chat_delay) or chat_delay < 0:
+        raise ValueError("Chat delay must be finite and nonnegative")
     bins = [[] for _ in range(math.ceil(duration / bin_seconds))]
     for message in messages:
         if 0 <= message.offset_seconds < duration:
@@ -156,24 +159,43 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         if len(farewells) >= max(3, .1 * len(context_authors)) or len(giveaways) >= max(3, .2 * len(context_authors)):
             continue
         onset = i
-        while onset > 0 and (i - onset + 1) * bin_seconds <= 30:
-            previous = onset - 1
+        empty_bins = 0
+        for previous in range(i - 1, max(-1, i - math.floor(30 / bin_seconds) - 1), -1):
             above_reaction_baseline = signal[previous] > series[previous]['baseline']
             above_volume_baseline = volume_led and totals[previous] > volume_stats[previous][0]
-            if not (above_reaction_baseline or above_volume_baseline):
+            if above_reaction_baseline or above_volume_baseline:
+                onset = previous
+            elif minimum_reactors == 2 and not bins[previous] and empty_bins == 0:
+                empty_bins += 1
+            else:
                 break
-            onset = previous
-        start = max(0, series[onset]['time'] - lead)
+        moment = max(0, point['time'] - 30, min(point['time'] - chat_delay, series[onset]['time']))
+        start = max(0, moment - lead)
         end = min(duration, start + 60, max(start + 30, point['time'] + tail))
         if end - start < min(30, duration) or point['time'] >= end:
             continue
+        if point['time'] >= duration - min(300, .15 * duration):
+            reaction_context = [m for j in range(max(0, i - radius), min(len(bins), math.ceil(end / bin_seconds)))
+                                for m in bins[j] if start <= m.offset_seconds < end]
+            leading_context = [m for j in range(int(start // bin_seconds), i + 1)
+                               for m in bins[j] if start <= m.offset_seconds < end]
+            outro_dominated = False
+            for neighborhood in (reaction_context, leading_context):
+                neighborhood_authors = {m.author.strip().casefold() for m in neighborhood}
+                outros = {m.author.strip().casefold() for m in neighborhood if re.search(
+                    r"\b(?:by+e+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
+                    r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
+                    r"(?:(?:great|awesome|fun|dual) )?(?:stream|live(?:stream)?))\b", m.text, re.I)}
+                outro_dominated |= len(outros) >= 2 and len(outros) > .25 * len(neighborhood_authors)
+            if outro_dominated:
+                continue
         samples = []
         for message, _ in sorted(zip(bins[i], message_weights[i]), key=lambda item: -item[1]):
             if message.text.strip().casefold() not in {s.strip().casefold() for s in samples}:
                 samples.append(message.text)
             if len(samples) == 5:
                 break
-        candidates.append({"onset": series[onset]['time'], "peak": point['time'],
+        candidates.append({"onset": moment, "peak": point['time'],
                            "score": point['score'], "start": start, "end": end,
                            "message_sample": samples})
     chosen = []
