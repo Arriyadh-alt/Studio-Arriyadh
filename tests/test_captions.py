@@ -14,7 +14,7 @@ def word(text, start, end):
 
 def test_chunks_follow_word_times_and_punctuation():
     words = [word(t, i / 2, (i + 1) / 2) for i, t in enumerate([" One", "two", "three", "four", "five.", "Six"])]
-    assert chunk_words(words) == [Caption(0, 2.5, "One two three four five."), Caption(2.5, 3.3, "Six")]
+    assert chunk_words(words) == [Caption(0, 2.5, "One two three four five."), Caption(2.5, 3, "Six")]
 
 
 def test_chunks_split_on_pause_and_duration():
@@ -45,9 +45,21 @@ def test_ass_style_and_literal_text():
 
 
 def test_minimum_duration_uses_silence_without_overlap():
-    captions = chunk_words([word('Hello.', 0, .2), word('Next.', .5, .6), word('Last.', 2, 2.2)])
+    captions = chunk_words([word('Hello.', 0, .2), word('Next.', .5, .6), word('Last.', 2, 2.2)], clip_end=3)
     assert captions == [Caption(0, .5, 'Hello.'), Caption(.5, 1.3, 'Next.'), Caption(2, 2.8, 'Last.')]
     assert all(a.end <= b.start for a, b in zip(captions, captions[1:]))
+
+
+@pytest.mark.parametrize('clip_end, expected', [(None, 10), (10, 10), (10.3, 10.3), (11, 10.6)])
+def test_final_caption_never_extends_past_clip(clip_end, expected):
+    captions = chunk_words([word('Last.', 9.8, 10)], clip_end=clip_end)
+    assert captions[0].end == pytest.approx(expected)
+    assert '00:00:10,600' not in to_srt(chunk_words([word('Last.', 9.8, 10)]))
+
+
+def test_clip_cap_trims_or_omits_words_beyond_end():
+    assert chunk_words([word('Last.', 9.8, 10.2), word('Extra.', 11, 12)], clip_end=10) == [Caption(9.8, 10, 'Last.')]
+    assert chunk_words([], clip_end=10) == []
 
 
 def test_orphan_question_and_college_merge():

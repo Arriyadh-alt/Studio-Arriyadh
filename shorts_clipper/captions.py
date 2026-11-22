@@ -64,7 +64,7 @@ class Caption:
     text: str
 
 
-def chunk_words(words, max_words: int = 4) -> list[Caption]:
+def chunk_words(words, max_words: int = 4, clip_end: float | None = None) -> list[Caption]:
     if max_words < 1:
         raise ValueError("max_words must be positive")
     captions, group = [], []
@@ -80,6 +80,10 @@ def chunk_words(words, max_words: int = 4) -> list[Caption]:
             group = []
     if group:
         captions.append(Caption(group[0].start, group[-1].end, join_tokens(w.word for w in group)))
+    if clip_end is None and captions:
+        clip_end = captions[-1].end
+    if clip_end is not None:
+        captions = [Caption(c.start, min(c.end, clip_end), c.text) for c in captions if c.start < clip_end]
     balanced = []
     for caption in captions:
         previous = balanced[-1] if balanced else None
@@ -94,17 +98,17 @@ def chunk_words(words, max_words: int = 4) -> list[Caption]:
         else:
             balanced.append(caption)
     for i, caption in enumerate(balanced):
-        next_start = balanced[i + 1].start if i + 1 < len(balanced) else float('inf')
+        next_start = balanced[i + 1].start if i + 1 < len(balanced) else clip_end
         caption.end = min(max(caption.end, caption.start + MIN_DURATION), next_start)
     return balanced
 
 
-def transcribe(source: Path, model: str = "base", language: str | None = None) -> list[Caption]:
+def transcribe(source: Path, model: str = "base", language: str | None = None, clip_end: float | None = None) -> list[Caption]:
     from faster_whisper import WhisperModel
 
     recognizer = WhisperModel(model, device="cpu", compute_type="int8")
     segments, _ = recognizer.transcribe(str(source), language=language, word_timestamps=True)
-    return chunk_words(word for segment in segments for word in (segment.words or []))
+    return chunk_words((word for segment in segments for word in (segment.words or [])), clip_end=clip_end)
 
 
 def timestamp(seconds: float, ass: bool = False) -> str:

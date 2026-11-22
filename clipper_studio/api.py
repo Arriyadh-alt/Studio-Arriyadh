@@ -168,14 +168,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 work = Path(temporary)
                 update(jid, generation, stage=f"{clip_label} · Downloading")
                 source = download_section(job["url"], work, spec["start"], spec["end"])
+                duration = min(video_duration(source), spec["end"] - spec["start"])
                 subtitles = None
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     subtitles = work / "captions.ass"
-                    subtitles.write_text(to_ass(transcribe(source)), encoding="utf-8")
+                    subtitles.write_text(to_ass(transcribe(source, clip_end=duration)), encoding="utf-8")
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
-                make_vertical_clip(source, video, 0, min(video_duration(source), spec["end"] - spec["start"]),
+                make_vertical_clip(source, video, 0, duration,
                                    spec["mode"], subtitles)
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
                 thumbnail = work / "thumbnail.jpg"

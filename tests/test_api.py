@@ -71,7 +71,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
         return path
     monkeypatch.setattr("clipper_studio.api.download_section", section)
     monkeypatch.setattr("clipper_studio.api.video_duration", lambda p: 40)
-    monkeypatch.setattr("clipper_studio.api.transcribe", lambda p: [])
+    monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **kwargs: [])
     render_attempts = []
     def convert(source, output, *args):
         render_attempts.append(output)
