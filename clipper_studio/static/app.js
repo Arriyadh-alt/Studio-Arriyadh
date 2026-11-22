@@ -56,7 +56,7 @@ function chart(job) {
     const h = Math.max(1, count / max * 100);
     bars += `<rect x="${data[i].time / duration * width}" y="${height-h}" width="${Math.max(1,stride*5/duration*width-1)}" height="${h}" rx="1" fill="#64774e"/>`;
   }
-  const marks = job.clips.map((clip,index) => `<g class="chart-mark" tabindex="0" role="button" aria-label="Review highlight ${index+1} at ${timestamp(clip.peak)}" data-clip="${clip.id}"><title>Highlight ${index+1} · ${timestamp(clip.peak)}</title><rect x="${clip.peak/duration*width-20}" y="0" width="40" height="138" fill="transparent"/><line x1="${clip.peak/duration*width}" x2="${clip.peak/duration*width}" y1="17" y2="125" stroke="#b8f477" stroke-dasharray="3 4"/><circle cx="${clip.peak/duration*width}" cy="13" r="11" fill="#b8f477"/><text x="${clip.peak/duration*width}" y="17" text-anchor="middle" fill="#172210" font-size="11" font-weight="bold">${index+1}</text></g>`).join('');
+  const marks = job.clips.map((clip,index) => `<g class="chart-mark" tabindex="0" role="button" aria-label="Review highlight ${index+1} at ${timestamp(clip.peak)}" data-clip="${clip.id}"><title>Highlight ${index+1} · ${timestamp(clip.peak)}</title><rect x="${clip.peak/duration*width-26}" y="0" width="52" height="138" fill="transparent"/><line x1="${clip.peak/duration*width}" x2="${clip.peak/duration*width}" y1="17" y2="125" stroke="#b8f477" stroke-dasharray="3 4"/><circle cx="${clip.peak/duration*width}" cy="13" r="11" fill="#b8f477"/><text x="${clip.peak/duration*width}" y="17" text-anchor="middle" fill="#172210" font-size="11" font-weight="bold">${index+1}</text></g>`).join('');
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index,job) {
@@ -151,6 +151,12 @@ $('#clips').addEventListener('click',async event=>{
     if(button.dataset.nudge) {
       const input=$(`input[data-field=${button.dataset.field}]`,node);
       input.value=timestamp(Math.min(current.metadata.duration,Math.max(0,parseTime(input.value)+Number(button.dataset.nudge)))); saveDraft(node);
+      const video = $('video',node), clip = current.clips.find(clip=>clip.id===cid);
+      if (video && clip && Number.isFinite(video.duration)) {
+        const offset = parseTime(input.value) - clip.start - (button.dataset.field==='end' ? 2 : 0);
+        video.pause();
+        video.currentTime = Math.min(video.duration,Math.max(0,offset));
+      }
     } else if(button.dataset.action==='keep') {
       button.disabled=true; await api(base,'PATCH',{kept:button.getAttribute('aria-pressed')!=='true'}); await refresh();
     } else if(button.dataset.action==='delete' && confirm('Delete this clip and its files?')) {

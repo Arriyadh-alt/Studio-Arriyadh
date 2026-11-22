@@ -113,20 +113,21 @@ def create_app(data_dir=None):
             clip = find_clip(job, cid)
             clip.update(status="rendering", error=None)
             spec = dict(clip)
+            clip_label = f"Clip {job['clips'].index(clip) + 1} of {len(job['clips'])}"
             store.save(job)
         try:
             output_dir = store.root / jid / cid
             output_dir.mkdir(exist_ok=True)
             with tempfile.TemporaryDirectory(dir=output_dir) as temporary:
                 work = Path(temporary)
-                update(jid, stage=f"Downloading clip {cid}")
+                update(jid, stage=f"{clip_label} · Downloading")
                 source = download_section(job["url"], work, spec["start"], spec["end"])
                 subtitles = None
                 if spec["captions"]:
-                    update(jid, stage=f"Transcribing clip {cid}")
+                    update(jid, stage=f"{clip_label} · Transcribing")
                     subtitles = work / "captions.ass"
                     subtitles.write_text(to_ass(transcribe(source)), encoding="utf-8")
-                update(jid, stage=f"Rendering clip {cid}")
+                update(jid, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
                 make_vertical_clip(source, video, 0, min(video_duration(source), spec["end"] - spec["start"]),
                                    spec["mode"], subtitles)

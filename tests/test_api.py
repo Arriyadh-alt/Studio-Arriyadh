@@ -3,11 +3,17 @@ import zipfile
 
 from fastapi.testclient import TestClient
 
-from clipper_studio.api import create_app
+from clipper_studio.api import Store, create_app
 from clipper_studio.chat import Message
 
 
 def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
+    stages = []
+    save = Store.save
+    def record_stage(store, job):
+        stages.append(job['stage'])
+        save(store, job)
+    monkeypatch.setattr(Store, "save", record_stage)
     monkeypatch.setattr("clipper_studio.api.time.sleep", lambda seconds: None)
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: (
         {"title": "Test", "duration": 600, "thumbnail": None},
@@ -43,6 +49,9 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
         job = client.get(f"/api/jobs/{jid}").json()
         assert job["status"] == "completed"
         assert len(job["clips"]) == 3
+        for number in range(1, 4):
+            for stage in ("Downloading", "Transcribing", "Rendering"):
+                assert f"Clip {number} of 3 · {stage}" in stages
         assert all(c["status"] == "ready" for c in job["clips"])
         clip = job["clips"][0]
         assert clip["attempt"] == 3
