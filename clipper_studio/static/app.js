@@ -3,7 +3,7 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'
 const busy = job => ['queued', 'running'].includes(job.status);
 let current = null;
 let timer;
-let loading = false;
+let poll = null;
 const drafts = new Map();
 
 function timestamp(value) {
@@ -16,16 +16,16 @@ function parseTime(value) {
   if (!/^\d+(?::[0-5]\d){1,2}(?:\.\d+)?$/.test(text)) throw Error('Use MM:SS or HH:MM:SS for clip times.');
   return text.split(':').reduce((sum, part) => sum * 60 + Number(part), 0);
 }
-function notice(message) {
-  $('#notice').textContent = message;
-  $('#notice').hidden = !message;
+function notice(message, selector = '#notice') {
+  $(selector).textContent = message;
+  $(selector).hidden = !message;
 }
-async function api(url, method = 'GET', data) {
-  const response = await fetch(url, {method, headers: data ? {'Content-Type':'application/json'} : {}, body: data ? JSON.stringify(data) : undefined});
-  const body = await response.json();
-  if (!response.ok) {
-    const detail = body.detail;
-    throw Error(Array.isArray(detail) ? detail.map(item => item.msg).join('. ') : detail || 'Something went wrong. Please try again.');
+async function api(url, method = 'GET', data, signal) {
+  const response = await fetch(url, {method, cache:'no-store', signal, headers: data ? {'Content-Type':'application/json'} : {}, body: data ? JSON.stringify(data) : undefined});
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body === null) {
+    const detail = body?.detail;
+    throw Error(Array.isArray(detail) ? detail.map(item => item.msg.replace(/^Value error, /,'')).join(' ') : typeof detail === 'string' ? detail : 'Studio didn’t respond. Please try again.');
   }
   return body;
 }
@@ -36,12 +36,20 @@ function safeImage(url) {
 function date(job) {
   return job.created_at ? new Date(job.created_at).toLocaleDateString(undefined, {month:'short',day:'numeric',year:'numeric'}) : 'Imported stream';
 }
-async function loadHome() {
-  const jobs = await api('./api/jobs');
+function jobTitle(job) {
+  if (job.metadata?.title) return job.metadata.title;
+  try {
+    const url = new URL(job.url);
+    const id = url.searchParams.get('v') || url.pathname.split('/').filter(Boolean).pop();
+    if (/^[a-zA-Z0-9_-]{11}$/.test(id)) return `YouTube video ${id}`;
+  } catch {}
+  return 'Untitled stream';
+}
+function drawHome(jobs) {
   jobs.sort((a,b) => (b.created_at || '').localeCompare(a.created_at || ''));
   $('#jobs').innerHTML = jobs.length ? jobs.map(job => `<a href="#jobs/${job.id}" class="job-card">
     ${safeImage(job.metadata?.thumbnail) ? `<img src="${safeImage(job.metadata.thumbnail)}" alt="" loading="lazy">` : ''}
-    <div class="body">${badge(job.status)}<h3>${escapeHtml(job.metadata?.title || 'Preparing your stream…')}</h3><div class="card-meta"><span>${date(job)}</span><span>${job.clips.length} clips ↗</span></div></div></a>`).join('') : '<p class="empty">Your next great moment starts here. Paste a stream above.</p>';
+    <div class="body">${badge(job.status)}<h3>${escapeHtml(jobTitle(job))}</h3><div class="card-meta"><span>${date(job)}</span><span>${job.clip_count} clips ↗</span></div></div></a>`).join('') : '<p class="empty">Your next great moment starts here. Paste a stream above.</p>';
 }
 function chart(job) {
   const data = job.activity;
@@ -77,7 +85,7 @@ function clipHtml(clip,index,job) {
 function drawJob(job) {
   current = job;
   const image = safeImage(job.metadata?.thumbnail);
-  $('#job-heading').innerHTML = `<div class="job-header">${image?`<img src="${image}" alt="Stream thumbnail">`:''}<div>${badge(job.status)}<h1>${escapeHtml(job.metadata?.title || 'Finding your next highlight…')}</h1><p>${date(job)} ${job.metadata?`· ${timestamp(job.metadata.duration)} stream`:''} · ${escapeHtml(job.request.mode)} layout</p></div></div>`;
+  $('#job-heading').innerHTML = `<div class="job-header">${image?`<img src="${image}" alt="Stream thumbnail">`:''}<div>${badge(job.status)}<h1>${escapeHtml(jobTitle(job))}</h1><p>${date(job)} ${job.metadata?`· ${timestamp(job.metadata.duration)} stream`:''} · ${escapeHtml(job.request.mode)} layout</p></div></div>`;
   $('#stage').textContent = job.stage;
   $('#progress').value = job.progress;
   $('#progress-label').textContent = `${Math.round(job.progress*100)}%`;
@@ -108,23 +116,36 @@ function drawJob(job) {
   if (!job.clips.length) container.innerHTML = `<p class="empty">${busy(job)?'Your clips will appear here as they finish.':job.error?'The stream could not be processed. Return to All streams to try another URL.':'No significant chat spikes found. Try a livelier replay.'}</p>`;
 }
 async function refresh() {
-  if (loading) return;
-  loading = true;
+  if (poll) return;
+  const request = new AbortController();
+  poll = request;
+  const timeout = setTimeout(() => request.abort(), 10000);
   const hash = location.hash;
+  const match = hash.match(/^#jobs\/([a-zA-Z0-9]+)$/);
   try {
-    const match = hash.match(/^#jobs\/([a-zA-Z0-9]+)$/);
-    if (match) {
-      const job = await api(`./api/jobs/${match[1]}`);
-      if (location.hash===hash) drawJob(job);
-    } else await loadHome();
-  } catch(error) { notice(error.message); }
-  finally { loading=false; }
+    const result = await api(match ? `./api/jobs/${match[1]}` : './api/jobs?summary=true', 'GET', undefined, request.signal);
+    if (poll !== request || location.hash !== hash) return;
+    if (match) drawJob(result); else drawHome(result);
+    notice('', '#poll-notice');
+  } catch (error) {
+    if (poll === request && location.hash === hash) {
+      const message = error.message === 'Job not found' ? error.message : 'Couldn’t refresh status. Retrying…';
+      notice(message, '#poll-notice');
+    }
+  } finally {
+    clearTimeout(timeout);
+    if (poll === request) poll = null;
+  }
 }
 function route() {
-  notice(''); current=null; drafts.clear();
+  poll?.abort(); poll=null;
+  notice(''); notice('', '#poll-notice'); current=null; drafts.clear();
   const jobPage = /^#jobs\//.test(location.hash);
   $('#home').hidden=jobPage; $('#job-view').hidden=!jobPage;
   $('#clips').innerHTML=''; $('#job-heading').innerHTML='';
+  $('#stage').textContent='Loading job…'; $('#progress-label').textContent='';
+  $('#progress').removeAttribute('value'); $('#job-error').hidden=true;
+  $('#chart').innerHTML=''; $('#download-kept').hidden=true;
   window.scrollTo(0,0);
   clearInterval(timer); refresh(); timer=setInterval(refresh,2000);
 }
@@ -135,7 +156,9 @@ $('#start-form').addEventListener('submit',async event=>{
   try {
     const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked});
     location.hash=`jobs/${job.id}`;
-  } catch(error) { notice(error.message); } finally { button.disabled=false; }
+  } catch(error) {
+    notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
+  } finally { button.disabled=false; }
 });
 function saveDraft(node) {
   drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('select',node).value,captions:$('[data-field=captions]',node).checked});

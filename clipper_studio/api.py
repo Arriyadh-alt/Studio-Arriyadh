@@ -1,8 +1,10 @@
 """Local, single-process API. Run with uvicorn clipper_studio.api:app."""
 
 import json
+import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -15,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -27,8 +29,13 @@ from shorts_clipper.captions import to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.video import make_vertical_clip, video_duration
 
-from .chat import fetch_chat
+from .chat import ChatReplayError, fetch_chat
 from .spikes import detect_spikes
+
+
+logger = logging.getLogger(__name__)
+YOUTUBE_URL_ERROR = "Paste a YouTube video link for a finished livestream (watch, live, or youtu.be)."
+ACTIVE_STATUSES = ("queued", "running")
 
 
 class JobRequest(BaseModel):
@@ -41,11 +48,27 @@ class JobRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def youtube_url(cls, value):
-        parsed = urlparse(value)
-        if parsed.scheme != "https" or parsed.hostname not in (
-            "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be") or parsed.username or parsed.password:
-            raise ValueError("Paste an HTTPS YouTube livestream VOD URL")
-        return value
+        value = value.strip()
+        try:
+            parsed = urlsplit(value)
+            if (parsed.scheme != "https" or parsed.username is not None
+                    or parsed.port not in (None, 443) or any(char.isspace() for char in value)):
+                raise ValueError
+        except ValueError:
+            raise ValueError(YOUTUBE_URL_ERROR) from None
+
+        path = parsed.path.removesuffix("/")
+        ids = []
+        if parsed.hostname == "youtu.be":
+            ids = [path.removeprefix("/")]
+        elif parsed.hostname in ("youtube.com", "www.youtube.com", "m.youtube.com"):
+            if path == "/watch":
+                ids = parse_qs(parsed.query, keep_blank_values=True).get("v", [])
+            elif path.startswith("/live/"):
+                ids = [path.removeprefix("/live/")]
+        if len(ids) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]{11}", ids[0]):
+            raise ValueError(YOUTUBE_URL_ERROR)
+        return f"https://www.youtube.com/watch?v={ids[0]}"
 
 
 class RenderRequest(BaseModel):
@@ -172,6 +195,15 @@ def create_app(data_dir=None):
                        stage="Finished" if job["clips"] else "No significant chat spikes found")
             store.save(job)
 
+    def fail_job(jid, message, stage="Failed"):
+        with store.lock:
+            job = store.get(jid)
+            job.update(status="failed", stage=stage, error=message)
+            for clip in job["clips"]:
+                if clip["status"] in ("queued", "rendering"):
+                    clip.update(status="failed", error=message)
+            store.save(job)
+
     def worker():
         while True:
             item = pending.get()
@@ -201,7 +233,15 @@ def create_app(data_dir=None):
                 finish(jid)
                 update(jid, elapsed_seconds=round(time.monotonic() - started, 2))
             except Exception as error:
-                update(jid, status="failed", stage="Failed", error=str(error))
+                if isinstance(error, ChatReplayError):
+                    message = str(error)
+                else:
+                    logger.exception("Job %s failed unexpectedly", jid)
+                    message = "Studio couldn’t process this replay. Try submitting it again."
+                try:
+                    fail_job(jid, message)
+                except Exception:
+                    logger.exception("Could not save failure for job %s", jid)
             finally:
                 pending.task_done()
 
@@ -210,12 +250,8 @@ def create_app(data_dir=None):
         # Interrupted work is explicit instead of silently stuck after a restart.
         with store.lock:
             for job in store.jobs():
-                if job["status"] in ("queued", "running"):
-                    job.update(status="failed", stage="Interrupted", error="Server restarted; submit a new job or re-render clips.")
-                    for clip in job["clips"]:
-                        if clip["status"] in ("queued", "rendering"):
-                            clip.update(status="failed", error="Server restarted")
-                    store.save(job)
+                if job["status"] in ACTIVE_STATUSES:
+                    fail_job(job["id"], "Server restarted; submit a new job or re-render clips.", "Interrupted")
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         yield
@@ -229,7 +265,8 @@ def create_app(data_dir=None):
     @app.post("/api/jobs", status_code=202)
     def create_job(request: JobRequest):
         jid = uuid.uuid4().hex
-        job = dict(id=jid, created_at=datetime.now(timezone.utc).isoformat(), url=request.url, request=request.model_dump(), status="queued", stage="Queued",
+        job = dict(id=jid, created_at=datetime.now(timezone.utc).isoformat(), url=request.url, request=request.model_dump(),
+                   status="queued", stage="Queued — jobs run one at a time",
                    progress=0, metadata=None, activity=[], clips=[], error=None)
         with store.lock:
             store.save(job)
@@ -237,9 +274,13 @@ def create_app(data_dir=None):
         return {"id": jid}
 
     @app.get("/api/jobs")
-    def list_jobs():
+    def list_jobs(summary: bool = False):
         with store.lock:
-            return store.jobs()
+            jobs = store.jobs()
+        if not summary:
+            return jobs
+        return [dict(id=job["id"], url=job["url"], created_at=job.get("created_at"), status=job["status"],
+                     metadata=job["metadata"], clip_count=len(job["clips"])) for job in jobs]
 
     @app.get("/api/jobs/{jid}")
     def get_job(jid: str):
@@ -279,13 +320,13 @@ def create_app(data_dir=None):
         with store.lock:
             job = store.get(jid)
             clip = find_clip(job, cid)
-            if job["status"] in ("running", "queued"):
+            if job["status"] in ACTIVE_STATUSES:
                 raise HTTPException(409, "Wait for the current job to finish")
             if request.end <= request.start or request.end - request.start > 60 or request.end > job["metadata"]["duration"]:
                 raise HTTPException(422, "Clip must be within the video and between 0 and 60 seconds long")
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None)
-            job.update(status="queued", stage="Queued re-render", progress=0, error=None)
+            job.update(status="queued", stage="Queued re-render — jobs run one at a time", progress=0, error=None)
             store.save(job)
             pending.put((jid, cid))
         return {"id": cid, "status": "queued"}
@@ -319,7 +360,7 @@ def create_app(data_dir=None):
         with store.lock:
             job = store.get(jid)
             find_clip(job, cid)
-            if job["status"] in ("running", "queued"):
+            if job["status"] in ACTIVE_STATUSES:
                 raise HTTPException(409, "Wait for the current job to finish")
             job["clips"] = [clip for clip in job["clips"] if clip["id"] != cid]
             store.save(job)
