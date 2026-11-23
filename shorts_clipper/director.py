@@ -485,7 +485,7 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
         plan.voiceover = intro["voice"]
         plan.commentary = {"text": options.commentary, "label": COMMENTARY_LABEL, "voiced": bool(intro["voice"]),
                            "duration": intro["duration"]}
-        plan.hook = {"style": "commentary", "text": f"{COMMENTARY_LABEL}: {options.commentary}"[:64],
+        plan.hook = {"style": "commentary", "text": f"{COMMENTARY_LABEL}: {options.commentary}",
                      "duration": intro["duration"], "source_start": round(main_start, 2),
                      "source_end": round(main_start, 2)}
         offset = intro["duration"]
