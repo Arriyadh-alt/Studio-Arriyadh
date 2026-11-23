@@ -840,9 +840,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 raise HTTPException(409, "Delete the rendered clip before changing this moment's status")
             start = request.start if request.start is not None else moment["start"]
             end = request.end if request.end is not None else moment["end"]
-            if not 0 <= start < end <= job["metadata"]["duration"] or end - start > 60:
-                raise HTTPException(422, "Moment must be within the video and at most 60 seconds long")
-            moment.update(start=start, end=end, duration=end - start)
+            if request.start is not None or request.end is not None:
+                if not 0 <= start < end <= job["metadata"]["duration"] or end - start > 60 + 1e-6:
+                    raise HTTPException(422, "Moment must be within the video and at most 60 seconds long")
+                moment.update(start=start, end=end, duration=end - start)
             if request.status is not None:
                 moment["status"] = request.status
             store.save(job)

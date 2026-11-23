@@ -161,3 +161,18 @@ def test_story_context_includes_moment(monkeypatch, tmp_path):
     assert llm_hooks(context, "shock", "en") == []
     assert "Detected moment:" in requests[0]["messages"][0]["content"]
     assert "A surprised reaction." in requests[0]["messages"][0]["content"]
+
+
+def test_status_patch_preserves_fractional_boundaries(tmp_path):
+    app = create_app(tmp_path)
+    job = saved_job("fractional")
+    job["moments"] = [{**proposal(), "id": "moment", "status": "suggested",
+                       "start": 100.1, "end": 160.10000000000002, "duration": 60.00000000000002}]
+    app.state.store.save(job)
+    with TestClient(app) as client:
+        url = "/api/jobs/fractional/moments/moment"
+        response = client.patch(url, json={"status": "selected"})
+        assert response.status_code == 200
+        assert response.json()["start"] == 100.1 and response.json()["end"] == 160.10000000000002
+        assert client.patch(url, json={"end": 160.10000000000002}).status_code == 200
+        assert client.patch(url, json={"end": 160.101}).status_code == 422
