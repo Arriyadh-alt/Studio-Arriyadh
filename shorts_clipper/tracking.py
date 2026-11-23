@@ -259,14 +259,9 @@ def _camera_at(path, t):
 
 
 def choose_layout(track: Track, trigger: dict | None, has_facecam: bool, aspect: float) -> str:
+    """Gameplay with a corner facecam by default; split is only a fallback when that framing fails validation."""
     if not has_facecam:
         return "gameplay"
-    lo, hi = (trigger["trigger"], trigger["reaction"]) if trigger else (track.times[0], track.times[-1])
-    inside = (track.times >= lo) & (track.times <= hi)
-    spread = float(np.median(track.spread[inside])) if inside.any() else 0.0
-    width = window_width(OUTPUT_HEIGHT, aspect)
-    if spread > width * 0.45:
-        return "split"  # several things matter at once: zoom out to a wider gameplay view
     if trigger is None or trigger["confidence"] < 0.2:
         return "reaction"  # nothing clear on screen: the streamer's face carries the moment
     return "gameplay"

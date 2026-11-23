@@ -1,5 +1,6 @@
 """Cut a time range and convert it to 9:16 vertical video with ffmpeg."""
 
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -71,6 +72,27 @@ def detect_focal_x(source: Path, start: float, end: float) -> float:
         capture.release()
 
 
+def _source_size(source: Path) -> tuple[int, int] | None:
+    capture = cv2.VideoCapture(str(source))
+    try:
+        size = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return size if min(size) > 0 else None
+    finally:
+        capture.release()
+
+
+def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
+    """Paint the streamer's own cam out of the gameplay picture so split screen doesn't show it twice."""
+    size = _source_size(source)
+    if size is None:
+        return ""
+    w, h = size
+    x0, y0 = max(1, int((box.x - margin) * w)), max(1, int((box.y - margin) * h))
+    x1 = min(w - 1, math.ceil((box.x + box.w + margin) * w))
+    y1 = min(h - 1, math.ceil((box.y + box.h + margin) * h))
+    return f"delogo=x={x0}:y={y0}:w={x1 - x0}:h={y1 - y0}," if x1 - x0 >= 4 and y1 - y0 >= 4 else ""
+
+
 def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None) -> list:
     if mode not in FILTERS:
         raise ValueError(f"Unknown mode {mode!r}; choose from {', '.join(FILTERS)}")
@@ -107,7 +129,7 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
                f"pad={rect.w}:{rect.h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3")
         filters = (
-            f"[0:v]split[mainin][camin];[mainin]{filters}[main];"
+            f"[0:v]split[mainin][camin];[mainin]{_hide_facecam(source, box) if split else ''}{filters}[main];"
             f"[camin]crop=w='max(2,trunc(iw*{box.w:.8f}/2)*2)':"
             f"h='max(2,trunc(ih*{box.h:.8f}/2)*2)':"
             f"x='iw*{box.x:.8f}':y='ih*{box.y:.8f}',"
