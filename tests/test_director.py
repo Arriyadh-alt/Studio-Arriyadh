@@ -125,6 +125,27 @@ def test_manual_bottom_caption_band_moves_above_camera(height, size):
     assert not framing_conflicts(rect,style)
 
 
+def test_story_title_avoids_tall_manual_bottom_camera():
+    from shorts_clipper.director import STORY_SIZE, reserve_facecam_space
+    from shorts_clipper.facecam import SourceBox, layout_facecam
+    overlay = layout_facecam(SourceBox(.1,.1,.1,.8),(1920,1080),'bottom-right')
+    text = 'Windah takes one wrong turn and instantly regrets it'
+    overlay = reserve_facecam_space(overlay,{'style':'story','text':text})
+    style, _ = framing_fix(CaptionStyle(size=130),overlay.rect)
+    band = hook_band(text,overlay.rect,None,preferred=760,size=STORY_SIZE)
+    assert not framing_conflicts(overlay.rect,style,band,hook_captions_overlap=False)
+    assert overlay.rect.y+overlay.rect.h == 1600
+
+
+def test_story_reserve_leaves_other_layouts_unchanged():
+    from shorts_clipper.director import reserve_facecam_space
+    from shorts_clipper.facecam import SourceBox, layout_facecam
+    overlay = layout_facecam(SourceBox(0,0,.2,.2),(1920,1080))
+    assert reserve_facecam_space(None,{'style':'story','text':'Hello'}) is None
+    assert reserve_facecam_space(overlay,{'style':'story','text':'Hello'}) is overlay
+    assert reserve_facecam_space(overlay,None) is overlay
+
+
 def test_framing_check_flags_overlaps():
     facecam = OutputRect(414, 24, 450, 520)
     assert framing_conflicts(facecam, CaptionStyle(), (380, 530)) == ["Hook title covers the facecam"]

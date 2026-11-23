@@ -33,7 +33,7 @@ from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.director import (STORY_SIZE, DirectorOptions, cut_source, effects_for, framing_fix, hook_band,
                                      hook_title_ass, loudness, mix_audio, normalize_loudness, plan_edit, plan_record,
-                                     quality_check, remap_captions)
+                                     quality_check, remap_captions, reserve_facecam_space)
 from shorts_clipper.story import game_name, hook_language, streamer_name, synthesize_voice
 from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
@@ -346,6 +346,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                 finally:
                                     capture.release()
                                 overlay = layout_facecam(box, size, options.position, options.size)
+                            overlay = reserve_facecam_space(overlay, plan.hook if plan else None)
                             rect = overlay.rect
                             corner = ("top" if rect.y == 24 else "bottom") + ("-left" if rect.x == 24 else "-right")
                             result = {"status": "used", "box": vars(box), "position": corner,
@@ -368,7 +369,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 layout = {"rect": overlay.rect if overlay else None, "style": style if spec["captions"] else None}
                 if plan and plan.hook and plan.hook.get("text"):
                     if plan.hook.get("style") == "story":
-                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"],
+                        layout["hook_captions_overlap"] = any(c.start < plan.hook["duration"] and c.end > 0 for c in shown)
+                        hook_style = layout["style"] if layout["hook_captions_overlap"] else None
+                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], hook_style,
                                                    preferred=760, size=STORY_SIZE)
                         ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"], top=layout["hook"][0],
                                              story=True, highlight=plan.hook.get("streamer"))

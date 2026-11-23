@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .captions import STOPWORDS, Caption, chunk_words, literal_text, _classic_ass
+from .facecam import BOTTOM_SAFE_EDGE, FacecamOverlay, OutputRect
 
 STEP = 0.1
 FPS = 30
@@ -433,6 +434,19 @@ def _bands_overlap(a, b, gap=0):
     return a[0] < b[1] + gap and a[1] + gap > b[0]
 
 
+def reserve_facecam_space(overlay, hook=None):
+    """Leave a story-title band above an explicitly bottom-anchored camera."""
+    if overlay is None or overlay.rect.y == 24 or not hook or hook.get("style") != "story":
+        return overlay
+    r = overlay.rect
+    limit = max(2, int(BOTTOM_SAFE_EDGE-100-hook_height(hook["text"], STORY_SIZE))//2*2)
+    if r.h <= limit:
+        return overlay
+    w = max(2, round(r.w*limit/r.h/2)*2)
+    x = 24 if r.x == 24 else r.x+r.w-w
+    return FacecamOverlay(overlay.box, OutputRect(x, BOTTOM_SAFE_EDGE-limit, w, limit))
+
+
 def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE):
     """Vertical band for the hook banner clear of the facecam and the captions."""
     height = hook_height(text, size)
@@ -659,13 +673,14 @@ def framing_fix(style, rect):
     return style, None
 
 
-def framing_conflicts(rect=None, style=None, hook=None) -> list:
+def framing_conflicts(rect=None, style=None, hook=None, hook_captions_overlap=True) -> list:
     """Overlaps between the facecam, the caption band and the hook banner in the rendered layout."""
     facecam = (rect.y, rect.y + rect.h) if rect is not None else None
     captions = caption_band(style, getattr(style, "size", 80)) if style is not None else None
     pairs = (("Hook title covers the facecam", hook, facecam), ("Captions cover the facecam", captions, facecam),
              ("Hook title covers the captions", hook, captions))
-    return [label for label, a, b in pairs if a and b and _bands_overlap(a, b)]
+    return [label for label, a, b in pairs if a and b and _bands_overlap(a, b)
+            and (label != "Hook title covers the captions" or hook_captions_overlap)]
 
 
 def probe(video: Path) -> dict:
