@@ -34,7 +34,7 @@ class Footage:
         return self.frames.shape[2] / self.frames.shape[1]
 
     def index(self, t: float) -> int:
-        return int(np.clip(np.searchsorted(self.times, t), 0, len(self.times) - 1))
+        return int(np.argmin(np.abs(self.times - t)))
 
 
 @dataclass
