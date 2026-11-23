@@ -155,6 +155,18 @@ class Caption:
     words: list = field(default_factory=list, compare=False, repr=False)
 
 
+def apply_caption_edits(captions, edits):
+    """Reviewer subtitle fixes: whole-word, case-insensitive find/replace on caption text and timed words."""
+    rules = [(re.compile(r"(?<!\w)" + re.escape(e["find"].strip()) + r"(?!\w)", re.I), e.get("replace", "").strip())
+             for e in edits or () if e.get("find", "").strip()]
+    for caption in captions:
+        for pattern, replacement in rules:
+            caption.text = " ".join(pattern.sub(replacement, caption.text).split())
+            for word in caption.words:
+                word.word = pattern.sub(replacement, word.word)
+    return captions
+
+
 def chunk_words(words, max_words: int = 4, clip_end: float | None = None) -> list[Caption]:
     if max_words < 1:
         raise ValueError("max_words must be positive")

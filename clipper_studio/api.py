@@ -22,18 +22,22 @@ from urllib.parse import parse_qs, urlsplit
 
 import cv2
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from cv2 import error as ImageProcessingError
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
-from shorts_clipper.captions import FONT_DIR, CaptionStyle, caption_height, to_ass, transcribe
+from shorts_clipper.captions import FONT_DIR, CaptionStyle, apply_caption_edits, caption_height, to_ass, transcribe
 from shorts_clipper.downloader import download_analysis_media, download_section
 from shorts_clipper.moments import analyze_media
+from shorts_clipper.podcast import analyze_podcast
+from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source
+from shorts_clipper.speakers import frame_conversation
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.director import (STEP, DirectorOptions, Effects, cut_source, effects_for, framing_fix, hook_layout,
+from shorts_clipper.director import (STEP, DirectorOptions, plan_podcast_edit, Effects, cut_source, effects_for, framing_fix, hook_layout,
                                      hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
                                      plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.story import game_name, hook_language, streamer_name
@@ -138,8 +142,48 @@ PREVIEW_CACHE = 64
 LEGACY_DIRECTOR = {**DirectorSpec().model_dump(), "enabled": False}
 
 
+class CaptionEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    find: str = Field(min_length=1, max_length=40)
+    replace: str = Field(default="", max_length=40)
+
+
+class PodcastSpec(BaseModel):
+    """Podcast / interview choices: framing layout, Version A (original) or B (AI commentary), and review edits."""
+    model_config = ConfigDict(extra="forbid")
+    layout: Literal["auto", "speaker", "split", "switch", "wide"] = "auto"
+    version: Literal["original", "commentary"] = "original"
+    speakers: int | None = Field(default=None, ge=1, le=3)
+    hook_text: str | None = Field(default=None, max_length=64)
+    commentary: str | None = Field(default=None, max_length=160)
+    caption_edits: list[CaptionEdit] = Field(default_factory=list, max_length=50)
+
+
+class RightsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    basis: Literal["owned", "licensed", "permission", "remix"]
+    confirmed: bool
+    attribution: bool = True
+    include_link: bool = True
+    note: str | None = Field(default=None, max_length=200)
+
+    @field_validator("confirmed")
+    @classmethod
+    def must_confirm(cls, value):
+        if not value:
+            raise ValueError("Confirm that you are allowed to republish this source")
+        return value
+
+
+RIGHTS_BASIS = {"owned": "I own this content", "licensed": "Licensed for reuse",
+                "permission": "Used with the creator's permission", "remix": "Permitted remix / commentary use"}
+
+
 class JobRequest(BaseModel):
-    url: str
+    url: str | None = None
+    upload: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    content_type: Literal["gaming", "podcast"] = "gaming"
+    podcast: PodcastSpec = Field(default_factory=PodcastSpec)
     ai_analysis: bool = True
     review: bool = True
     clips: int = Field(default=8, ge=1, le=50)
@@ -155,6 +199,8 @@ class JobRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def youtube_url(cls, value):
+        if value is None:
+            return None
         value = value.strip()
         try:
             parsed = urlsplit(value)
@@ -177,6 +223,14 @@ class JobRequest(BaseModel):
             raise ValueError(YOUTUBE_URL_ERROR)
         return f"https://www.youtube.com/watch?v={ids[0]}"
 
+    @model_validator(mode="after")
+    def one_source(self):
+        if (self.url is None) == (self.upload is None):
+            raise ValueError("Paste a YouTube link or upload an authorized video file.")
+        if self.upload or self.content_type == "podcast":
+            self.ai_analysis = True  # no live chat to rank: conversation and media analysis do the work
+        return self
+
 
 class RenderRequest(BaseModel):
     start: float = Field(ge=0, allow_inf_nan=False)
@@ -188,6 +242,7 @@ class RenderRequest(BaseModel):
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
     director: DirectorSpec = Field(default_factory=DirectorSpec)
+    podcast: PodcastSpec | None = None
 
 
 class KeepRequest(BaseModel):
@@ -198,6 +253,7 @@ class MomentPatch(BaseModel):
     status: Literal["suggested", "selected", "rejected"] | None = None
     start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     end: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    podcast: PodcastSpec | None = None
 
 
 class MomentRender(BaseModel):
@@ -265,6 +321,7 @@ class Store:
                 job.setdefault("moments", [])
                 job.setdefault("request", {}).setdefault("facecam", FacecamSpec().model_dump())
                 job["request"].setdefault("director", dict(LEGACY_DIRECTOR))
+                job["request"].setdefault("content_type", "gaming")
                 for clip in job.get("clips", []):
                     clip.setdefault("facecam", FacecamSpec().model_dump())
                     clip.setdefault("tracking", TrackingSpec().model_dump())
@@ -284,6 +341,32 @@ class Store:
     def jobs(self):
         with self.lock:
             return [self.get(path.parent.name) for path in sorted(self.root.glob("*/job.json"), reverse=True)]
+
+
+def is_podcast(job):
+    return (job.get("request") or {}).get("content_type") == "podcast"
+
+
+def require_rights(job):
+    if is_podcast(job) and not (job.get("rights") or {}).get("confirmed"):
+        raise HTTPException(403, "Confirm you have the rights to republish this source before exporting.")
+
+
+def export_description(job, clip):
+    """Upload description with source attribution and, when chosen, the original link."""
+    metadata, rights = job.get("metadata") or {}, job.get("rights") or {}
+    lines = [clip.get("title") or "Highlight"]
+    if (clip.get("podcast") or {}).get("version") == "commentary":
+        lines.append("Includes AI-generated commentary, labelled in the video; the speakers' words are unedited.")
+    if rights.get("attribution", True):
+        who = metadata.get("channel") or metadata.get("uploader")
+        lines.append("Source: " + (metadata.get("title") or job.get("filename") or "original recording")
+                     + (f" by {who}" if who else ""))
+    if rights.get("include_link", True) and job.get("url"):
+        lines.append(f"Original: {job['url']}")
+    if rights.get("basis"):
+        lines.append(f"Rights: {RIGHTS_BASIS[rights['basis']]}")
+    return "\n".join(lines)
 
 
 def find_clip(job, cid):
@@ -314,6 +397,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         if pending.stopping or job["status"] == "cancelled" or job.get("generation", 0) != generation:
             raise WorkCancelled
         return job
+
+    def upload_path(job):
+        if not job.get("upload"):
+            return None
+        folder = store.root / "uploads" / job["upload"]
+        found = [p for p in folder.glob("source*") if p.suffix in UPLOAD_SUFFIXES] if folder.is_dir() else []
+        if not found:
+            raise FileNotFoundError("The uploaded source file is no longer available")
+        return found[0]
 
     def stream_metadata(jid, generation, job):
         """Jobs made before channel names were kept get them fetched once, for the storytelling hook."""
@@ -351,16 +443,29 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             with tempfile.TemporaryDirectory(dir=output_dir) as temporary:
                 work = Path(temporary)
                 update(jid, generation, stage=f"{clip_label} · Downloading")
-                source = download_section(job["url"], work, spec["start"], spec["end"])
+                upload = upload_path(job)
+                source = (local_section(upload, work, spec["start"], spec["end"]) if upload else
+                          download_section(job["url"], work, spec["start"], spec["end"]))
                 duration = min(video_duration(source), spec["end"] - spec["start"])
                 subtitles, captions = None, []
                 caption_language = None
                 director = DirectorOptions.from_dict(spec.get("director") or LEGACY_DIRECTOR)
+                podcast = is_podcast(job)
+                choice = PodcastSpec.model_validate(spec.get("podcast") or {}) if podcast else None
+                analysis = spec.get("podcast_analysis") or {}
+                if podcast:
+                    director.preset, director.sfx, director.story = "podcast", False, False
+                    director.music = "on" if director.music == "on" else "off"
+                    director.hook_text = choice.hook_text or director.hook_text
+                    director.commentary = ((choice.commentary or analysis.get("commentary") or "").strip() or None
+                                           if choice.version == "commentary" else None)
                 style = CaptionStyle.from_dict(spec.get("caption_style"))
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     captions = transcribe(source, language=spec.get("language"), clip_end=duration)
                     caption_language = getattr(captions, "language", None)
+                    if choice and choice.caption_edits:
+                        apply_caption_edits(captions, [e.model_dump() for e in choice.caption_edits])
                 elif director.enabled:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     try:
@@ -372,7 +477,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 peak = thumbnail_peak(spec, duration)
                 hook = thumbnail_hook(job, spec, peak, captions)
                 tracking = TrackingSpec.model_validate(spec.get("tracking") or {})
-                facecam_options = FacecamSpec.model_validate(spec.get("facecam", {}))
+                facecam_options = (FacecamSpec(enabled=False) if podcast else
+                                   FacecamSpec.model_validate(spec.get("facecam", {})))
+                conversation = None
                 camera_box, reaction, levels = None, None, None
                 tracking_result = {"status": "disabled"}
                 tracking_still = work / "tracking.jpg"
@@ -383,7 +490,19 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         camera_box = detect_facecam(source, 0, duration)
                     except Exception:
                         logger.debug("Facecam detection failed", exc_info=True)
-                if tracking.enabled:
+                if podcast and tracking.enabled:
+                    update(jid, generation, stage=f"{clip_label} · Finding the active speaker")
+                    turns = [[a - spec["start"], b - spec["start"], who] for a, b, who in analysis.get("turns", [])
+                             if b > spec["start"] and a < spec["end"]]
+                    try:
+                        conversation = frame_conversation(source, duration, turns, choice.layout)
+                        tracking_result = {"status": "unavailable"} if conversation is None else tracking_result
+                    except Exception:
+                        conversation, tracking_result = None, {"status": "unavailable"}
+                        logger.warning("Speaker framing unavailable for %s/%s", jid, cid, exc_info=True)
+                    if conversation and conversation["mode"] == "blur":
+                        spec["mode"] = "blur"
+                elif tracking.enabled:
                     update(jid, generation, stage=f"{clip_label} · Finding what the streamer reacts to")
                     try:
                         levels = loudness(source, duration)
@@ -397,14 +516,26 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if director.enabled:
                     update(jid, generation, stage=f"{clip_label} · AI Director planning edits")
                     try:
-                        plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
-                                         duration, director, peak,
-                                         spec.get("score"), spec.get("thumbnail_text") or hook,
-                                         story_context(stream_metadata(jid, generation, job), spec,
-                                                       caption_language or getattr(captions, "language", None), work,
-                                                       store.root / "voices"),
-                                         trigger=trigger["trigger"] if trigger else None)
-                        directed = cut_source(source, work / "directed.mp4", plan)
+                        if podcast:
+                            context = story_context(job, spec, caption_language, work, store.root / "voices")
+                            teaser = analysis.get("teaser") or {}
+                            hook_span = ({"start": teaser["start"] - spec["start"], "end": teaser["end"] - spec["start"],
+                                          "text": spec.get("thumbnail_text") or spec.get("title")} if teaser else None)
+                            plan = plan_podcast_edit(levels if levels is not None else loudness(source, duration), captions,
+                                                     duration, director, hook_span,
+                                                     voice=lambda text: context["voice"](text, context["language"],
+                                                                                         voice=director.voice,
+                                                                                         delivery=director.delivery))
+                            directed = cut_source(source, work / "directed.mp4", plan)
+                        else:
+                            plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
+                                             duration, director, peak,
+                                             spec.get("score"), spec.get("thumbnail_text") or hook,
+                                             story_context(stream_metadata(jid, generation, job), spec,
+                                                           caption_language or getattr(captions, "language", None), work,
+                                                           store.root / "voices"),
+                                             trigger=trigger["trigger"] if trigger else None)
+                            directed = cut_source(source, work / "directed.mp4", plan)
                     except Exception:
                         plan, directed = None, None
                         director_result = {"status": "unavailable"}
@@ -449,7 +580,24 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     result = {"status": "unavailable", "box": None}
                     logger.debug("Facecam unavailable; rendering without overlay", exc_info=True)
                 camera_keys = None
-                if reaction is not None and spec["mode"] == "crop":
+                if conversation is not None:
+                    if conversation["overlay"] is not None:
+                        overlay = conversation["overlay"]
+                        rect = overlay.rect
+                        caption_limit = max(1, 1500 - rect.y - rect.h - 24)
+                        text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
+                        result = {"status": "used", "box": vars(overlay.box), "position": "split",
+                                  "size": 1.0, "origin": "speaker"}
+                    camera_keys = conversation["path"] or None
+                    tracking_result = {"status": "needs_review" if conversation["needs_review"] else "used",
+                                       "mode": "podcast", "layout": conversation["layout"],
+                                       "auto_layout": conversation["auto_layout"], "seats": conversation["seats"],
+                                       "speaker_seats": conversation.get("speaker_seats"),
+                                       "shots": conversation["shots"], "switches": conversation["switches"],
+                                       "cutaways": conversation["cutaways"],
+                                       "needs_review": conversation["needs_review"],
+                                       "path": [[round(t, 2), round(x, 4)] for t, x, _ in (camera_keys or [])]}
+                elif reaction is not None and spec["mode"] == "crop":
                     try:
                         size = reaction.footage.frames.shape[2], reaction.footage.frames.shape[1]
                         span = ((min(s.start for s in plan.segments), max(s.end for s in plan.segments))
@@ -507,7 +655,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if plan and plan.hook and plan.hook.get("text"):
                     band, hook_height, overlap = hook_layout(plan.hook, layout["rect"], layout["style"], shown, caption_limit)
                     layout.update(hook=band,hook_caption_height=hook_height,hook_captions_overlap=overlap)
-                    story = plan.hook.get("style") == "story"
+                    story = plan.hook.get("style") in ("story", "commentary")
                     ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + (0 if story else .7),
                                          top=band[0],story=story,highlight=plan.hook.get("streamer"),max_height=band[1]-band[0])
                 if ass is not None:
@@ -661,8 +809,14 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             update(jid, generation, status="running", stage="Checking stream metadata", processing_started=time.time())
             with store.lock:
                 job = active_job(jid, generation)
-            info = (fetch_metadata(job["url"], False) if job["request"].get("ai_analysis", False)
-                    else fetch_metadata(job["url"]))
+            if job.get("upload"):
+                path = upload_path(job)
+                info = {"id": job["upload"], "title": Path(job.get("filename") or "Uploaded video").stem,
+                        "duration": probe_source(path)["duration"], "thumbnail": None, "channel": None,
+                        "uploader": None}
+            else:
+                info = (fetch_metadata(job["url"], False) if job["request"].get("ai_analysis", False)
+                        else fetch_metadata(job["url"]))
             with store.lock:
                 job = active_job(jid, generation)
                 metadata_cache[jid, generation] = info
@@ -682,6 +836,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                      (("mode", "crop"), ("captions", True), ("facecam", FacecamSpec().model_dump()),
                       ("tracking", TrackingSpec().model_dump()),
                       ("language", "auto"), ("caption_style", None), ("director", dict(LEGACY_DIRECTOR)))})
+        if is_podcast(job):
+            choice = {**(job["request"].get("podcast") or {}), **(moment.get("edits") or {})}
+            clip.update(podcast=PodcastSpec.model_validate(choice).model_dump(),
+                        podcast_analysis=moment.get("podcast") or {})
         clip.update(id=uuid.uuid4().hex, moment_id=moment["id"], number=number, status="queued", error=None,
                     file_url=None, download_url=None, thumbnail_url=None)
         moment.update(status="rendered", clip_id=clip["id"])
@@ -690,19 +848,23 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     def analyze(jid, generation):
         try:
             started = time.monotonic()
-            update(jid, generation, status="running", stage="Fetching chat replay")
             with store.lock:
                 job = active_job(jid, generation)
                 info = metadata_cache.pop((jid, generation))
+            podcast, upload = is_podcast(job), upload_path(job)
             chat_error = None
-            try:
-                metadata, messages = fetch_chat(job["url"], store.root / jid / "chat", info)
-            except ChatReplayError as error:
-                if not job["request"].get("ai_analysis", False):
-                    raise
-                chat_error = error
+            if podcast or upload:
                 metadata, messages = {key: info.get(key) for key in METADATA_KEYS}, []
-                update(jid, generation, chat_error=str(error))
+            else:
+                update(jid, generation, status="running", stage="Fetching chat replay")
+                try:
+                    metadata, messages = fetch_chat(job["url"], store.root / jid / "chat", info)
+                except ChatReplayError as error:
+                    if not job["request"].get("ai_analysis", False):
+                        raise
+                    chat_error = error
+                    metadata, messages = {key: info.get(key) for key in METADATA_KEYS}, []
+                    update(jid, generation, chat_error=str(error))
             update(jid, generation, metadata=metadata, stage="Detecting chat spikes", progress=0.15,
                    chat_seconds=round(time.monotonic() - started, 2), message_count=len(messages))
             spikes, activity = detect_spikes(messages, metadata["duration"],
@@ -713,22 +875,31 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if job["request"].get("ai_analysis", False):
                 directory = store.root / jid / "analysis"
                 try:
-                    update(jid, generation, stage="Downloading stream audio for AI analysis")
+                    update(jid, generation, status="running", stage="Preparing the source for AI analysis" if upload
+                           else "Downloading audio for AI analysis")
 
                     def should_continue():
                         with store.lock:
                             active_job(jid, generation)
 
-                    audio, video = download_analysis_media(job["url"], directory, should_continue=should_continue)
-                    update(jid, generation, stage="AI analyzing video, audio & speech")
+                    audio, video = (local_analysis_media(upload, directory) if upload else
+                                    download_analysis_media(job["url"], directory, should_continue=should_continue))
+                    stage = "AI understanding the conversation" if podcast else "AI analyzing video, audio & speech"
+                    update(jid, generation, stage=stage)
                     language = job["request"].get("language")
+                    language = None if language == "auto" else language
 
                     def progress(fraction, text):
-                        update(jid, generation, stage="AI analyzing video, audio & speech",
+                        update(jid, generation, stage=stage,
                                progress=.2 + .65 * max(0, min(1, fraction)), analysis_detail=text)
 
-                    ai = analyze_media(audio, video, metadata["duration"], clips=count, lead=lead,
-                                       language=None if language == "auto" else language, progress=progress)[:count]
+                    if podcast:
+                        ai = analyze_podcast(audio, video, metadata["duration"], clips=count, language=language,
+                                             progress=progress,
+                                             speakers=(job["request"].get("podcast") or {}).get("speakers"))[:count]
+                    else:
+                        ai = analyze_media(audio, video, metadata["duration"], clips=count, lead=lead,
+                                           language=language, progress=progress)[:count]
                 except WorkCancelled:
                     raise
                 except Exception as error:
@@ -737,6 +908,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                            else "AI analysis was unavailable. Try this replay again.")
                 finally:
                     shutil.rmtree(directory, ignore_errors=True)
+            if ai_error and (podcast or upload):
+                raise ai_error
             if chat_error and (ai_error or not job["request"].get("ai_analysis", False)):
                 raise ai_error or chat_error
             moments = merge_moments(ai, chat, metadata["duration"], lead)
@@ -845,11 +1018,74 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             "X-Voice-Name": spoken["voice_name"], "X-Voice-Mood": spoken["mood"], "X-Voice-Engine": spoken["engine"],
             "Cache-Control": "no-store"})
 
+    @app.post("/api/uploads", status_code=201)
+    async def upload_source(request: Request):
+        """Raw-body upload of an authorized source file (X-Filename header names it)."""
+        filename = Path(request.headers.get("x-filename") or "source.mp4").name[:120]
+        suffix = Path(filename).suffix.lower()
+        if suffix not in UPLOAD_SUFFIXES:
+            raise HTTPException(400, "Upload an MP4, MOV, M4V, MKV or WebM video.")
+        limit = int(os.environ.get("CLIPPER_UPLOAD_MAX_BYTES", str(8 * 1024 ** 3)))
+        uid = uuid.uuid4().hex
+        folder = store.root / "uploads" / uid
+        folder.mkdir(parents=True)
+        path, size = folder / f"source{suffix}", 0
+        try:
+            with path.open("wb") as handle:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > limit:
+                        raise HTTPException(413, f"Uploads are limited to {limit:,} bytes.")
+                    handle.write(chunk)
+            if not size:
+                raise HTTPException(400, "The upload was empty.")
+            try:
+                info = await run_in_threadpool(probe_source, path)
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from None
+        except BaseException:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        record = {"id": uid, "filename": filename, "duration": info["duration"], "bytes": size}
+        (folder / "upload.json").write_text(json.dumps(record))
+        return record
+
+    @app.get("/api/jobs/{jid}/source")
+    def source_preview(jid: str):
+        job = store.get(jid)
+        try:
+            path = upload_path(job)
+        except FileNotFoundError:
+            path = None
+        if path is None:
+            raise HTTPException(404, "No uploaded source for this job")
+        return FileResponse(path)
+
+    @app.post("/api/jobs/{jid}/rights")
+    def confirm_rights(jid: str, request: RightsRequest):
+        with store.lock:
+            job = store.get(jid)
+            job["rights"] = {**request.model_dump(), "confirmed_at": datetime.now(timezone.utc).isoformat()}
+            store.save(job)
+        return job["rights"]
+
+    @app.get("/api/jobs/{jid}/clips/{cid}/description")
+    def clip_description(jid: str, cid: str):
+        job = store.get(jid)
+        return {"text": export_description(job, find_clip(job, cid))}
+
     @app.post("/api/jobs", status_code=202)
     def create_job(request: JobRequest):
         jid = uuid.uuid4().hex
+        filename = None
+        if request.upload:
+            info = store.root / "uploads" / request.upload / "upload.json"
+            if not info.is_file():
+                raise HTTPException(400, "Upload the source file again; it was not found.")
+            filename = json.loads(info.read_text()).get("filename")
         job = dict(id=jid, created_at=datetime.now(timezone.utc).isoformat(), url=request.url, request=request.model_dump(), status="queued", stage="Queued",
-                   progress=0, metadata=None, activity=[], clips=[], error=None, generation=0, analysis_complete=False)
+                   progress=0, metadata=None, activity=[], clips=[], error=None, generation=0, analysis_complete=False,
+                   upload=request.upload, filename=filename, rights=None)
         with store.lock:
             store.save(job)
             pending.put((jid, None, 0), preflight=True)
@@ -905,6 +1141,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     def download_kept(jid: str):
         with store.lock:
             job = store.get(jid)
+            require_rights(job)
             clips = [c for c in job["clips"] if c.get("kept") and c["status"] == "ready"]
             if not clips:
                 raise HTTPException(409, "Keep at least one ready clip first")
@@ -946,6 +1183,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 moment.update(start=start, end=end, duration=end - start)
             if request.status is not None:
                 moment["status"] = request.status
+            if request.podcast is not None:
+                if not is_podcast(job):
+                    raise HTTPException(422, "Podcast options apply to podcast jobs only")
+                moment["edits"] = request.podcast.model_dump()
             store.save(job)
         return moment
 
@@ -985,9 +1226,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 clip["previous_render"] = {key: clip[key] for key in (
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
                     "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url", "director",
-                    "director_result", "tracking", "tracking_result", "tracking_still_url", "needs_review") if key in clip}
+                    "director_result", "tracking", "tracking_result", "tracking_still_url", "needs_review", "podcast") if key in clip}
                 clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language")})
-            clip.update(request.model_dump(), status="queued", error=None, file_url=None,
+            changes = request.model_dump(exclude={"podcast"})
+            if request.podcast is not None and is_podcast(job):
+                changes["podcast"] = request.podcast.model_dump()
+            clip.update(changes, status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
             if job["status"] not in ACTIVE_STATUSES:
                 job.update(status="queued", stage="Queued re-render", progress=0, error=None,
@@ -1017,10 +1261,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
 
     @app.get("/api/jobs/{jid}/clips/{cid}/download")
     def download(jid: str, cid: str):
+        require_rights(store.get(jid))
         return file(jid, cid, "clip.mp4", True)
 
     @app.get("/api/jobs/{jid}/clips/{cid}/thumbnail")
     def thumbnail(jid: str, cid: str, download: bool = False):
+        if download:
+            require_rights(store.get(jid))
         return file(jid, cid, "thumbnail.jpg", download)
 
     @app.post("/api/jobs/{jid}/clips/{cid}/thumbnail")
