@@ -485,3 +485,13 @@ def test_api_story_voiceover_and_channel_for_older_jobs(monkeypatch, tmp_path, s
                                                                      "delivery": "suspense"}}).status_code == 202
         app.state.pending.join()
         assert len(lookups) == 2
+
+
+def test_plan_keeps_the_reaction_trigger_from_being_cut():
+    times = [t / 2 for t in range(60) if not 20 <= t < 28]
+    args = (levels(30, quiet=[(10, 14)], loud=[(19, 21)]), captions_for(times, loud_at=19.5), 30,
+            DirectorOptions(hook=False))
+    plain = plan_edit(*args, peak=20)
+    assert not any(s.start <= 10.5 and s.end >= 20 for s in plain.segments)
+    kept = plan_edit(*args, peak=20, trigger=11)
+    assert any(s.start <= 10.2 and s.end >= 20 for s in kept.segments)

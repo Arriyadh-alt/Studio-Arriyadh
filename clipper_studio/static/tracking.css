@@ -1,0 +1,13 @@
+.tracking-options{border:1px solid var(--line);border-radius:9px;margin:16px 0;padding:16px;display:grid;gap:10px;min-width:0}
+.tracking-options legend{font-weight:600}
+.tracking-editor{position:relative;cursor:crosshair;user-select:none;line-height:0}
+.tracking-editor img{width:100%;border-radius:6px;display:block}
+.crop-window{position:absolute;top:0;bottom:0;border:2px solid #4da3ff;box-shadow:0 0 0 9999px rgba(0,0,0,.45);pointer-events:none}
+.tracking-editor{overflow:hidden;border-radius:6px}
+.target-dot{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;border:2px solid #fff;pointer-events:none}
+.target-dot.ai{background:#4da3ff}.target-dot.manual{background:#ffb020}
+.tracking-preview-wrap{display:grid;justify-items:center;gap:4px}
+.tracking-preview{width:180px;height:320px;border-radius:8px;border:1px solid var(--line);background:#000}
+.tracking-checks{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px 12px;font-size:.85rem}
+.tracking-checks .pass{color:#b8f477}.tracking-checks .warn{color:#ffb020}
+.badge.review-flag{background:#5a3b00;color:#ffd27a;margin-left:6px}

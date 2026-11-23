@@ -94,6 +94,7 @@ class Plan:
     removed: float = 0.0
     voiceover: str | None = None
     loop: dict | None = None
+    camera: list = field(default_factory=list)  # (t, x, y) keyframes on the output timeline
 
     @property
     def duration(self):
@@ -117,7 +118,8 @@ class Plan:
                 "removed_seconds": round(self.removed + self.trimmed_start, 2),
                 "zooms": len(self.zooms), "transitions": len(self.flashes),
                 "sound_effects": len(self.sfx), "music": self.music,
-                "reframes": len({round(f, 2) for f in self.focal}) if self.focal else 0,
+                "reframes": (len({round(c[1], 2) for c in self.camera}) if self.camera
+                             else len({round(f, 2) for f in self.focal}) if self.focal else 0),
                 "duration": round(self.duration, 2), "loop": self.loop,
                 "timeline": [[round(s.start, 3), round(s.end, 3), round(o, 3)]
                              for o, s in zip(self.offsets(), self.segments) if s.role == "main"]}
@@ -279,7 +281,7 @@ def score_clip(levels, words, duration, peak, hook_strength, spike_score, cut_se
 # ---------------------------------------------------------------- planning
 
 def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, spike_score=None, hook_text=None,
-              story=None) -> Plan:
+              story=None, trigger=None) -> Plan:
     """Plan the edit. With a `story` context (streamer, game, language, chat) and the story option on,
     the clip opens on a written storytelling hook and is re-cut to build-up, event, reaction and ending."""
     words = transcript_words(captions)
@@ -303,6 +305,8 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         if candidates:
             main_start = max(0.0, min(2.5, min(candidates) - 0.3))
     protect = [(peak - 1.5, peak + 3.0)] if peak is not None else []
+    if trigger is not None and peak is not None and trigger < peak:
+        protect.append((trigger - 0.8, peak))  # keep the event that caused the reaction on screen
     intro = None
     if arc:
         intro = _story_intro(story, options, words, arc, duration)
@@ -310,6 +314,11 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         if over > 0:
             main_start = min(main_start + over, max(main_start, arc["event"] - 3.0))
             end = min(end, main_start + MAX_OUTPUT - intro["duration"])
+    if trigger is not None and trigger - 0.8 < main_start:
+        main_start = max(0.0, trigger - 0.8)
+        room = MAX_OUTPUT - (intro["duration"] if intro else 0.0)
+        if end - main_start > room and peak is not None:
+            end = min(end, max(peak + 2.5, main_start + room))
     cuts = find_silences(levels, words, main_start, end, protect) if options.edits else []
     pieces, cursor = [], main_start
     for a, b in cuts:
@@ -571,6 +580,18 @@ class Effects:
     shake: str | None = None
     flash: str | None = None
     focal: str | None = None
+    focal_y: str | None = None
+
+
+def _keyframes(keys, index, var="t", epsilon=0.002):
+    kept = [keys[0]]
+    for key in keys[1:]:
+        if abs(key[index] - kept[-1][index]) >= epsilon and key[0] - kept[-1][0] >= 0.25:
+            kept.append(key)
+    expression = f"{kept[0][index]:.4f}"
+    for a, b in zip(kept, kept[1:]):
+        expression += f"+({b[index] - a[index]:.4f})*clip(({var}-{a[0]:.3f})/{b[0] - a[0]:.3f},0,1)"
+    return expression
 
 
 def effects_for(plan: Plan) -> Effects:
@@ -583,7 +604,12 @@ def effects_for(plan: Plan) -> Effects:
         focal = f"{plan.focal[0]:.4f}"
         for offset, previous, value in zip(plan.offsets()[1:], plan.focal, plan.focal[1:]):
             focal += f"+({value:.4f}-{previous:.4f})*clip((t-{offset:.3f})/0.25+0.5,0,1)"
-    return Effects(zoom=f"min(1.35,1+{zoom})" if zoom else None, shake=shake or None, flash=flash or None, focal=focal)
+    focal_y = None
+    if plan.camera:
+        focal = _keyframes(plan.camera, 1)
+        focal_y = _keyframes(plan.camera, 2, "in_time") if zoom else None
+    return Effects(zoom=f"min(1.35,1+{zoom})" if zoom else None, shake=shake or None, flash=flash or None, focal=focal,
+                   focal_y=focal_y)
 
 
 SFX = {
@@ -788,7 +814,7 @@ def measure(video: Path, audio_only=False) -> dict:
             "true_peak": float(peak.group(1)) if peak and peak.group(1) != "-inf" else None, "black_seconds": black}
 
 
-def quality_check(video: Path, plan: Plan, captions, fixes=(), layout=None) -> list:
+def quality_check(video: Path, plan: Plan, captions, fixes=(), layout=None, tracking=None) -> list:
     checks = []
 
     def add(name, status, detail):
@@ -837,7 +863,24 @@ def quality_check(video: Path, plan: Plan, captions, fixes=(), layout=None) -> l
     add("Visual consistency", "pass" if not microcuts and black < 0.5 else "warn",
         f"{len(plan.segments)} shots, max zoom {1 + max([z[2] for z in plan.zooms] or [0]):.2f}×" +
         (f" · {black:.1f} s black frames" if black >= 0.5 else "") + (f" · {microcuts} very short shots" if microcuts else ""))
+    if tracking and tracking.get("validation"):
+        add("Reaction trigger", "pass" if not tracking.get("needs_review") else "warn", tracking_summary(tracking))
     return checks
+
+
+TRACKING_CHECKS = {"trigger_visible": "trigger visible", "facecam_clear": "facecam clear of the action",
+                   "subject_in_frame": "subject in frame", "camera_follows": "camera follows the action",
+                   "reaction_understandable": "reaction readable", "story_complete": "setup, reaction and outcome kept"}
+
+
+def tracking_summary(tracking: dict) -> str:
+    checks = tracking["validation"]["checks"]
+    failed = [label for key, label in TRACKING_CHECKS.items() if checks.get(key) is False]
+    layout = {"gameplay": "Gameplay focus", "reaction": "Reaction focus", "split": "Split screen"}.get(tracking.get("layout"), "")
+    head = f"{layout} · " if layout else ""
+    if tracking.get("needs_review"):
+        return head + "Needs manual review: " + ", ".join(failed or ["trigger not found"])
+    return head + ("All framing checks passed" if not failed else "Check: " + ", ".join(failed))
 
 
 def plan_record(plan: Plan, options: DirectorOptions, checks) -> dict:

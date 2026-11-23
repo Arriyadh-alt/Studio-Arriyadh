@@ -9,7 +9,7 @@ const keeping = new Map();
 let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
-const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.director,clip.director_result])}`;
+const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.director,clip.director_result,clip.tracking,clip.tracking_result,clip.tracking_still_url,clip.needs_review])}`;
 const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:null,...value});
 const renderedOffset = (clip, offset) => {
   const timeline=clip.director_result?.edits?.timeline;
@@ -173,12 +173,12 @@ function chart(job) {
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index) {
-  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),director:directorDefaults(clip.director),...CaptionControls.options(clip)};
+  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),tracking:TrackingControls.defaults(clip.tracking),director:directorDefaults(clip.director),...CaptionControls.options(clip)};
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
   return `<article id="clip-${clip.id}" class="clip" data-id="${clip.id}" data-version="${escapeHtml(clipVersion(clip))}">
-    <div class="clip-top"><div><h3>Highlight ${String(number).padStart(2,'0')}</h3>${badge(clip.status, clip.queue_position)}</div><button class="keep" aria-label="Keep highlight ${number}" aria-pressed="${!!clip.kept}" data-action="keep">${clip.kept?'★ Kept':'☆ Keep'}</button></div>
+    <div class="clip-top"><div><h3>Highlight ${String(number).padStart(2,'0')}</h3>${badge(clip.status, clip.queue_position)}${clip.needs_review?'<span class="badge review-flag">Needs review</span>':''}</div><button class="keep" aria-label="Keep highlight ${number}" aria-pressed="${!!clip.kept}" data-action="keep">${clip.kept?'★ Kept':'☆ Keep'}</button></div>
     <div class="preview${clip.status==='ready' ? ' with-thumbnail' : ''}">${clip.status==='ready' ? `<video controls playsinline ${clip.director_result?.edits?.loop?.status==='applied'?'loop':''} preload="metadata" poster="${escapeHtml(thumbnailUrl(clip))}"><source src=".${clip.file_url}?v=${clip.rendered_at || 0}-${clip.start}-${clip.end}-${clip.mode}-${clip.captions}" type="video/mp4"></video><figure class="thumbnail-preview" ${clip.thumbnail_url ? '' : 'hidden'}><img src="${escapeHtml(thumbnailUrl(clip))}" alt="Thumbnail for highlight ${number}" loading="lazy"><figcaption>Thumbnail</figcaption></figure>` : `<div class="placeholder"><span style="font-size:30px">${clip.status==='failed'?'!':'✂'}</span><span>${clip.status==='failed'?'This clip needs another try':clip.status==='cancelled'?'Cancelled — re-render to try again':clip.status==='queued'?escapeHtml(queueLabel(clip.queue_position)):`Creating your highlight…<br>Attempt ${clip.attempt || 1} of 3`}</span></div>`}</div>
     <div class="clip-body">${clip.title?`<h3>${escapeHtml(clip.title)}</h3>`:''}${clip.sources?.length?`<p class="moment-source">${escapeHtml(clip.sources.length>1?'AI + Chat':clip.sources[0]==='ai'?'AI Analysis':'Chat Analysis')}</p>`:''}<div class="clip-meta"><span class="score">↗ ${clip.sources?.length?`${Math.round(clip.score)} / 100 Viral Potential`:`${clip.score.toFixed(2)} spike score`}</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">${clip.onset!=null?`Onset ${timestamp(clip.onset)} · `:''}Peak ${timestamp(clip.peak)}</p>
     <div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>
@@ -188,6 +188,7 @@ function clipHtml(clip,index) {
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
       ${directorHtml(clip,draft)}
       ${facecamHtml(clip,draft)}
+      ${TrackingControls.html(clip,draft)}
       ${CaptionControls.html(draft)}
       ${clip.caption_language?`<p class="hint">Transcription language: ${escapeHtml(clip.caption_language)}</p>`:''}
       <p class="draft-note hint" hidden><span>Changes not applied — Re-render to update</span> <button type="button" class="quiet" data-action="reset">Reset</button></p><p class="draft-error error" role="status" hidden></p>
@@ -307,14 +308,14 @@ function saveDraft(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id);
   const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
   const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
-  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,director:Object.fromEntries(directorKeys.map(k=>{const el=$(`[data-director=${k}]`,node);return [k,k==='hook_text'?(el.value.trim()||null):el.type==='checkbox'?el.checked:el.value];})),...CaptionControls.read(node)});
+  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),director:Object.fromEntries(directorKeys.map(k=>{const el=$(`[data-director=${k}]`,node);return [k,k==='hook_text'?(el.value.trim()||null):el.type==='checkbox'?el.checked:el.value];})),...CaptionControls.read(node)});
   draftFeedback(node);
 }
 function draftFeedback(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id), draft=drafts.get(clip.id);
   let error='',changed=false,length=clip.end-clip.start;
   if(draft) {
-    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director));
+    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking));
     changed=changed||JSON.stringify({language:draft.language,caption_style:draft.caption_style})!==JSON.stringify(CaptionControls.options(clip));
     try {
       const start=parseTime(draft.start),end=parseTime(draft.end); length=end-start;
@@ -423,7 +424,7 @@ $('#clips').addEventListener('submit',async event=>{
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,director:draft.director,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:draft.tracking,director:draft.director,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
 let cameraDrag=null;
