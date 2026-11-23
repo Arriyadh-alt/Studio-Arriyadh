@@ -178,3 +178,8 @@ def test_status_patch_preserves_fractional_boundaries(tmp_path):
         assert response.json()["start"] == 100.1 and response.json()["end"] == 160.10000000000002
         assert client.patch(url, json={"end": 160.10000000000002}).status_code == 200
         assert client.patch(url, json={"end": 160.101}).status_code == 422
+        app.state.store.save({**job, "moments": [{**job["moments"][0], "start": 100.4,
+                                                  "end": 159.7, "duration": 59.3}]})
+        response = client.patch(url, json={"start": 100, "end": 160})
+        assert response.status_code == 200
+        assert response.json()["duration"] == 60

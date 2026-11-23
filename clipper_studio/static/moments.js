@@ -113,8 +113,8 @@ globalThis.MomentReview = (() => {
       const data=new FormData(event.target);
       const moment=job.moments.find(m=>m.id===node.dataset.moment);
       const changes={};
-      for(const field of ['start','end']) {
-        if(data.get(field)!==time(moment[field])) changes[field]=parse(data.get(field));
+      if(['start','end'].some(field=>data.get(field)!==time(moment[field]))) {
+        for(const field of ['start','end']) changes[field]=parse(data.get(field));
       }
       await request(`/${node.dataset.moment}`,'PATCH',changes);
       drafts.delete(node.dataset.moment);
