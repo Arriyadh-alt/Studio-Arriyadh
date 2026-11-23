@@ -110,3 +110,22 @@ def test_dynamic_crop_follows_with_facecam_and_split_layout(tmp_path):
     command = build_ffmpeg_command(tmp_path / 's.mp4', tmp_path / 'o.mp4', 0, 5, facecam=split, effects=effects)
     graph = command[command.index('-filter_complex') + 1]
     assert 'crop=1080:1220' in graph and 'pad=1080:1920:0:700' in graph and 'overlay=0:0' in graph
+
+
+def test_hold_does_not_drift_before_the_move():
+    keys = [(t / 2, .3 if t < 10 else .3 + .05 * (t - 9), .5) for t in range(16)]
+    expression = T.keyframe_expression(keys)
+    value = lambda t: eval(expression.replace('clip(', '_clip(').replace('t', str(t)).replace('_cli' + str(t) + '(', '_clip('),
+                           {'_clip': lambda v, lo, hi: min(max(v, lo), hi)})
+    assert value(2.0) == pytest.approx(.3) and value(4.5) == pytest.approx(.3)
+    assert value(7.5) == pytest.approx(.3 + .05 * 6)
+
+
+def test_trigger_must_be_visible_when_it_appears():
+    times = np.arange(0, 10, .25)
+    track = T.Track(times, np.full(len(times), .5), np.full(len(times), .5), np.zeros(len(times)), np.ones(len(times)))
+    trigger = {'trigger': 2.0, 'event': 2.0, 'notice': 4.0, 'reaction': 6.0, 'end': 7.0, 'confidence': .8,
+               'target': [.05, .5], 'box': [0, .4, .1, .2]}
+    path = [(t, .5, .5) for t in times]
+    report = T.validate(track, path, .32, trigger, (0, 10))
+    assert report['checks']['subject_in_frame'] and not report['checks']['trigger_visible']

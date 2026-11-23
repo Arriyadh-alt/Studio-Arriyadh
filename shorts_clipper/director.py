@@ -585,9 +585,14 @@ class Effects:
 
 def _keyframes(keys, index, var="t", epsilon=0.002):
     kept = [keys[0]]
-    for key in keys[1:]:
+    for previous, key in zip(keys, keys[1:]):
         if abs(key[index] - kept[-1][index]) >= epsilon and key[0] - kept[-1][0] >= 0.25:
+            # End the hold where it ends, so the move does not start drifting at the hold's beginning.
+            if previous is not kept[-1] and key[0] - previous[0] > 0.01 and abs(previous[index] - kept[-1][index]) < epsilon:
+                kept.append(previous)
             kept.append(key)
+    if len(kept) == 1:
+        return f"{kept[0][index]:.4f}"
     expression = f"{kept[0][index]:.4f}"
     for a, b in zip(kept, kept[1:]):
         expression += f"+({b[index] - a[index]:.4f})*clip(({var}-{a[0]:.3f})/{b[0] - a[0]:.3f},0,1)"

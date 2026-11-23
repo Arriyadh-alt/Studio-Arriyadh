@@ -228,12 +228,16 @@ def camera_path(track: Track, width: float, fixed: float | None = None, deadzone
     else:
         shift = int(LOOKAHEAD * FPS)
         target = np.clip(np.concatenate([track.x[shift:], np.repeat(track.x[-1:], shift)]), half, 1 - half)
+        zones = np.full(len(times), width * 0.18 if deadzone is None else deadzone)
         if hold is not None:
-            inside = (times >= hold[0]) & (times <= hold[1])
-            target[inside] = np.clip(hold[2], half, 1 - half)
-        zone = width * 0.18 if deadzone is None else deadzone
+            # Arrive on the trigger by the time it appears: start the move early enough for the speed cap.
+            pinned = float(np.clip(hold[2], half, 1 - half))
+            before = target[times < hold[0]]
+            lead = 1.0 + (abs(pinned - float(before[-1])) / MAX_SPEED if len(before) else 0.0)
+            inside = (times >= hold[0] - lead) & (times <= hold[1])
+            target[inside], zones[inside] = pinned, 0.0
         x, position, limit = [], float(target[0]), MAX_SPEED / FPS
-        for value in target:
+        for value, zone in zip(target, zones):
             gap = value - position
             if abs(gap) > zone:
                 position += float(np.clip(gap - np.sign(gap) * zone, -limit, limit))
@@ -291,7 +295,7 @@ def validate(track: Track, path, width: float, trigger: dict | None, clip: tuple
         tx, ty = trigger["target"]
         span = [t for t in times if trigger["trigger"] <= t <= trigger["reaction"]] or [trigger["event"]]
         seen = float(np.mean([visible(tx if abs(t - trigger["event"]) < 0.5 else track.at(t)[0], t) for t in span]))
-        checks["trigger_visible"] = seen >= 0.7
+        checks["trigger_visible"] = seen >= 0.7 and visible(tx, trigger["event"])
         checks["facecam_clear"] = not covered(tx, ty, trigger["event"])
         checks["reaction_understandable"] = trigger["notice"] - trigger["trigger"] <= 12 and trigger["confidence"] >= 0.15
         checks["story_complete"] = clip[0] <= trigger["trigger"] + 0.05 and clip[1] >= min(trigger["end"], trigger["reaction"] + 1.5)
@@ -320,18 +324,8 @@ def to_output_time(path, segments) -> list[tuple[float, float, float]]:
 
 def keyframe_expression(keys, index: int = 1, epsilon: float = 0.002) -> str | None:
     """Piecewise-linear ffmpeg expression of `t` through (t, value...) keyframes."""
-    if not keys:
-        return None
-    kept = [keys[0]]
-    for key in keys[1:]:
-        if abs(key[index] - kept[-1][index]) >= epsilon and key[0] - kept[-1][0] >= 0.25:
-            kept.append(key)
-    if len(kept) == 1:
-        return f"{kept[0][index]:.4f}"
-    expression = f"{kept[0][index]:.4f}"
-    for a, b in zip(kept, kept[1:]):
-        expression += f"+({b[index] - a[index]:.4f})*clip((t-{a[0]:.3f})/{b[0] - a[0]:.3f},0,1)"
-    return expression
+    from .director import _keyframes
+    return _keyframes(keys, index, "t", epsilon) if keys else None
 
 
 def split_band(box: SourceBox, aspect: float) -> int:
