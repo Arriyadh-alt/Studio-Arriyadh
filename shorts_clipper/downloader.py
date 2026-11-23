@@ -1,5 +1,6 @@
 """Download a section of a YouTube video with yt-dlp."""
 
+import os
 from pathlib import Path
 
 import yt_dlp
@@ -9,11 +10,15 @@ from .youtube import YouTubeAccessError, blocking_message, cookie_options
 
 
 def download_section(url: str, output_dir: Path, start: float, end: float, max_height: int = 1080,
-                     cookies: Path | None = None) -> Path:
+                     cookies: Path | None = None, proxy: str | None = None) -> Path:
     """Download only `start`..`end` (seconds) of `url` as an MP4 and return its path.
 
     Raises ValueError if the range starts past the end of the video.
     """
+    proxy = proxy or os.environ.get("CLIPPER_YTDLP_PROXY")
+    if proxy and not proxy.startswith("http://"):
+        raise YouTubeAccessError("YouTube section downloads require an http:// proxy. "
+                                 "Use an http:// proxy so ffmpeg cannot bypass the proxy setting.")
     output_dir.mkdir(parents=True, exist_ok=True)
     window = f"{float(start)!r}-{float(end)!r}"
     options = {
@@ -27,7 +32,7 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
         "no_warnings": True,
         "noprogress": True,
     }
-    with cookie_options(cookies) as authentication:
+    with cookie_options(cookies, proxy=proxy) as authentication:
         try:
             with yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -37,7 +42,7 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
                 info = ydl.process_ie_result(info, download=True)
                 files = [Path(d["filepath"]) for d in info.get("requested_downloads", []) if d.get("filepath")]
         except DownloadError as error:
-            message = blocking_message(error, cookies)
+            message = blocking_message(error, cookies, proxy)
             if message:
                 raise YouTubeAccessError(message) from None
             raise

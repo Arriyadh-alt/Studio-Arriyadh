@@ -27,7 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-download", type=Path, metavar="DIR",
                         help="keep the downloaded section in DIR instead of a temp folder")
     parser.add_argument("--cookies", type=Path, metavar="FILE",
-                        help="Netscape cookies.txt (overrides CLIPPER_YTDLP_COOKIES; source is never rewritten)")
+                        help="Netscape cookies.txt (overrides CLIPPER_YTDLP_COOKIES; refreshed atomically)")
+    parser.add_argument("--proxy", metavar="URL",
+                        help="YouTube proxy URL (overrides CLIPPER_YTDLP_PROXY)")
     parser.add_argument("--no-captions", action="store_true", help="disable local transcription and captions")
     parser.add_argument("--model", default=os.environ.get("CLIPPER_WHISPER_MODEL", "base"), help="faster-whisper model name or local model directory (default: CLIPPER_WHISPER_MODEL or base)")
     parser.add_argument("--language", default=None, help="speech language code, e.g. en (default: auto-detect)")
@@ -57,7 +59,7 @@ def main(argv=None) -> int:
             else:
                 print(f"Downloading {format_timestamp(start)} -> {format_timestamp(end)} of {args.url} ...", flush=True)
                 section = download_section(args.url, args.keep_download or Path(tmp), start, end,
-                                           cookies=args.cookies)
+                                           cookies=args.cookies, proxy=args.proxy)
 
             subtitles = None
             if not args.no_captions:

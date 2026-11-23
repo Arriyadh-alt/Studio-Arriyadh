@@ -63,13 +63,36 @@ The CLI also accepts `--cookies /secure/youtube-cookies.txt`. Precedence is:
 **CLI `--cookies` > `CLIPPER_YTDLP_COOKIES` path > `YOUTUBE_COOKIES` text**. These
 settings cover metadata, chat replay and section downloads. Each yt-dlp invocation
 uses its own writable private copy (0600 file in a 0700 temporary directory),
-removed afterward even on failure; the source file is never rewritten, so read-only
-secret mounts work. Cookie-jar changes from yt-dlp are discarded. An invalid or
-unreadable configured path fails rather than silently falling back to another secret.
+removed afterward even on failure. Refreshed cookies are sanitized and saved back
+to a configured **file path** with an atomic replacement, keeping mode **0600**.
+Only exception-free calls write back; any failure preserves the source. The source directory must be writable
+for a private `.lock` file and same-directory replacement file; read-only secret
+mounts are not suitable. Calls sharing a cookie source are serialized across
+load, request and save so they cannot overwrite one another's refreshed sessions.
+`YOUTUBE_COOKIES` text is never changed or written back; refresh it through your
+secret manager. An invalid or unreadable configured path fails rather than
+silently falling back to another secret.
 With neither variable set (and no CLI option), no cookie option or file is added.
 Refresh the export if rejected or expired, then submit/re-render again. Set server
 environment variables at your next planned server start; this does not hot-update
 an already running process.
+
+## Proxy
+
+YouTube blocks datacenter IPs, including this VM's IP, even with fresh cookies.
+A **residential proxy** is needed for requests from this deployment. Configure
+`CLIPPER_YTDLP_PROXY` with the full proxy URL (for example
+`http://proxy.example:8080`); HTTP URLs with `user:password@host:port` and `socks5://`
+URLs are passed through to yt-dlp for metadata and chat. Section downloads require
+an `http://` proxy: HTTPS and SOCKS proxies are rejected before any request because
+ffmpeg can otherwise bypass them. The CLI accepts `--proxy URL`, overriding the environment.
+Metadata, replay and section requests all receive the setting; when unset their
+proxy behavior is unchanged. A proxy can also be blocked by YouTube.
+
+Inject credential-bearing URLs through your secret manager; do not paste them
+into shell history, enable shell tracing or share them. yt-dlp log messages and
+escaping errors redact the configured URL and credentials. Restart the server
+at your next planned deploy to pick up environment changes.
 
 ## License
 
