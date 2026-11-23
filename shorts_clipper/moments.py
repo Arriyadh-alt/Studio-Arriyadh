@@ -189,6 +189,17 @@ def analyze_media(audio: Path, video: Path | None, duration: float, clips=8, lea
         else:
             choices = range(max(0, math.ceil(target - 4)), min(len(levels), int(target + 4) + 1))
             start = min(choices, key=lambda s: (levels[s], abs(s - target)))
+        trigger = None
+        if visual is not None:
+            # Backtrack from the reaction to the on-screen event that caused it (15 s, then up to 25 s).
+            for back in (15, 25):
+                lo = max(0, peak - back)
+                window = visual[lo:max(lo, peak - 1)]
+                if len(window) and float(np.max(window)) >= .35:
+                    trigger = float(lo + int(np.argmax(window)))
+                    break
+            if trigger is not None and trigger < start + 1:
+                start = max(0.0, trigger - 2)
         start = min(float(start), max(0, duration - 20))
         limit = min(duration, start + 60)
         end = limit
@@ -230,6 +241,8 @@ def analyze_media(audio: Path, video: Path | None, duration: float, clips=8, lea
                   "title": (category.title() + (f': "{phrase[:45]}"' if phrase else " streamer reaction"))[:60],
                   "description": f"A {category} moment with a sudden streamer reaction.",
                   "reason": " + ".join(reasons), "signals": signals, "transcript": transcript[:500]}
+        if trigger is not None:
+            moment["trigger"] = trigger
         _refine(moment)
         moments.append(moment)
     result = []

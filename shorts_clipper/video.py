@@ -77,30 +77,41 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
     if end <= start:
         raise ValueError("End time must be after start time")
     filters = FILTERS[mode]
+    split = (facecam is not None and facecam.rect.x == 0 and facecam.rect.y == 0
+             and facecam.rect.w == WIDTH and mode == 'crop')
+    main_h = HEIGHT - facecam.rect.h if split else HEIGHT
     if mode == 'crop':
-        focal_x = 0.5 if facecam is not None else detect_focal_x(source, start, end)
-        focal = f"({effects.focal})" if effects is not None and effects.focal and facecam is None else f"{focal_x:.6f}"
+        dynamic = effects is not None and effects.focal
+        focal_x = 0.5 if facecam is not None or dynamic else detect_focal_x(source, start, end)
+        focal = f"({effects.focal})" if dynamic else f"{focal_x:.6f}"
         filters = (
-            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={WIDTH}:{HEIGHT}:x='max(0,min(iw-ow,iw*{focal}-ow/2))':"
+            f"scale={WIDTH}:{main_h}:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH}:{main_h}:x='max(0,min(iw-ow,iw*{focal}-ow/2))':"
             f"y=(ih-oh)/2,setsar=1"
         )
     if effects is not None and effects.zoom:
-        # Zoom only the main picture so the facecam overlay stays put.
+        # Zoom only the main picture so the facecam overlay stays put; aim the zoom at the tracked subject.
+        y = (f"max(0,min(ih-ih/zoom,ih*({effects.focal_y})-ih/zoom/2))"
+             if getattr(effects, "focal_y", None) else "ih/2-(ih/zoom/2)")
         filters += (f",zoompan=z='{effects.zoom}':x='iw/2-(iw/zoom/2)+({effects.shake or 0})':"
-                    f"y='ih/2-(ih/zoom/2)':d=1:s={WIDTH}x{HEIGHT}:fps=30,setsar=1")
+                    f"y='{y}':d=1:s={WIDTH}x{main_h}:fps=30,setsar=1")
     if effects is not None and effects.flash:
         filters += f",eq=brightness='{effects.flash}':eval=frame"
+    if split:
+        filters += f",pad={WIDTH}:{HEIGHT}:0:{facecam.rect.h}"
     if facecam is not None:
         box, rect = facecam.box, facecam.rect
+        fit = (f"scale={rect.w}:{rect.h}:force_original_aspect_ratio=increase,crop={rect.w}:{rect.h},setsar=1"
+               if split else
+               f"scale={rect.w}:{rect.h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+               f"pad={rect.w}:{rect.h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+               f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3")
         filters = (
             f"[0:v]split[mainin][camin];[mainin]{filters}[main];"
             f"[camin]crop=w='max(2,trunc(iw*{box.w:.8f}/2)*2)':"
             f"h='max(2,trunc(ih*{box.h:.8f}/2)*2)':"
             f"x='iw*{box.x:.8f}':y='ih*{box.y:.8f}',"
-            f"setsar=1,scale={rect.w}:{rect.h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-            f"pad={rect.w}:{rect.h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3[cam];"
+            f"setsar=1,{fit}[cam];"
             f"[main][cam]overlay={rect.x}:{rect.y}"
         )
     if captions is not None:

@@ -33,7 +33,7 @@ from shorts_clipper.captions import FONT_DIR, CaptionStyle, caption_height, to_a
 from shorts_clipper.downloader import download_analysis_media, download_section
 from shorts_clipper.moments import analyze_media
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_layout,
+from shorts_clipper.director import (STEP, DirectorOptions, Effects, cut_source, effects_for, framing_fix, hook_layout,
                                      hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
                                      plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.story import game_name, hook_language, streamer_name
@@ -41,6 +41,7 @@ from shorts_clipper.voices import DELIVERY_CHOICES, MOODS, PERSONAS, SAMPLES, VO
 from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
                                     layout_facecam, save_source_still)
+from shorts_clipper.tracking import analyze_reaction, keyframe_expression, layout_options, plan_reframe, to_output_time
 from shorts_clipper.youtube import YouTubeAccessError
 
 from .chat import METADATA_KEYS, ChatReplayError, fetch_chat, fetch_metadata
@@ -92,6 +93,23 @@ VoiceChoice = Annotated[str, _one_of(VOICE_CHOICES, "voice")]
 DeliveryChoice = Annotated[str, _one_of(DELIVERY_CHOICES, "delivery")]
 
 
+class TrackingTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    t: float = Field(ge=0, allow_inf_nan=False)
+    x: float = Field(ge=0, le=1, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+
+class TrackingSpec(BaseModel):
+    """Reaction-aware reframing: automatic by default, with manual layout, crop and target overrides."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    enabled: bool = True
+    layout: Literal["auto", "gameplay", "reaction", "split"] = "auto"
+    follow: Literal["auto", "fixed"] = "auto"
+    x: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    target: TrackingTarget | None = None
+
+
 class DirectorSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     enabled: bool = True
@@ -129,6 +147,7 @@ class JobRequest(BaseModel):
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
     facecam: FacecamSpec = Field(default_factory=FacecamSpec)
+    tracking: TrackingSpec = Field(default_factory=TrackingSpec)
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
     director: DirectorSpec = Field(default_factory=DirectorSpec)
@@ -165,6 +184,7 @@ class RenderRequest(BaseModel):
     mode: Literal["crop", "blur"] = "crop"
     captions: bool = True
     facecam: FacecamSpec = Field(default_factory=FacecamSpec)
+    tracking: TrackingSpec = Field(default_factory=TrackingSpec)
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
     director: DirectorSpec = Field(default_factory=DirectorSpec)
@@ -247,6 +267,7 @@ class Store:
                 job["request"].setdefault("director", dict(LEGACY_DIRECTOR))
                 for clip in job.get("clips", []):
                     clip.setdefault("facecam", FacecamSpec().model_dump())
+                    clip.setdefault("tracking", TrackingSpec().model_dump())
                     clip.setdefault("director", dict(LEGACY_DIRECTOR))
                 return job
             except FileNotFoundError:
@@ -350,14 +371,39 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 plan, directed, director_result = None, None, {"status": "disabled"}
                 peak = thumbnail_peak(spec, duration)
                 hook = thumbnail_hook(job, spec, peak, captions)
+                tracking = TrackingSpec.model_validate(spec.get("tracking") or {})
+                facecam_options = FacecamSpec.model_validate(spec.get("facecam", {}))
+                camera_box, reaction, levels = None, None, None
+                tracking_result = {"status": "disabled"}
+                tracking_still = work / "tracking.jpg"
+                if facecam_options.box:
+                    camera_box = SourceBox(**facecam_options.box.model_dump())
+                elif facecam_options.enabled:
+                    try:
+                        camera_box = detect_facecam(source, 0, duration)
+                    except Exception:
+                        logger.debug("Facecam detection failed", exc_info=True)
+                if tracking.enabled:
+                    update(jid, generation, stage=f"{clip_label} · Finding what the streamer reacts to")
+                    try:
+                        levels = loudness(source, duration)
+                        reaction = analyze_reaction(source, duration, peak, camera_box,
+                                                    ([i * STEP for i in range(len(levels))], list(levels)))
+                        tracking_result = {"status": "unavailable"} if reaction is None else tracking_result
+                    except Exception:
+                        reaction, tracking_result = None, {"status": "unavailable"}
+                        logger.warning("Reaction tracking unavailable for %s/%s", jid, cid, exc_info=True)
+                trigger = reaction.trigger if reaction is not None else None
                 if director.enabled:
                     update(jid, generation, stage=f"{clip_label} · AI Director planning edits")
                     try:
-                        plan = plan_edit(loudness(source, duration), captions, duration, director, peak,
+                        plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
+                                         duration, director, peak,
                                          spec.get("score"), spec.get("thumbnail_text") or hook,
                                          story_context(stream_metadata(jid, generation, job), spec,
                                                        caption_language or getattr(captions, "language", None), work,
-                                                       store.root / "voices"))
+                                                       store.root / "voices"),
+                                         trigger=trigger["trigger"] if trigger else None)
                         directed = cut_source(source, work / "directed.mp4", plan)
                     except Exception:
                         plan, directed = None, None
@@ -378,9 +424,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 except Exception:
                     logger.debug("Could not save source still", exc_info=True)
                 try:
-                    options = FacecamSpec.model_validate(spec.get("facecam", {}))
+                    options = facecam_options
                     if options.enabled:
-                        box = SourceBox(**options.box.model_dump()) if options.box else detect_facecam(render_source, 0, render_duration)
+                        box = camera_box
                         result = {"status": "not_found", "box": None}
                         if box is not None:
                             if options.position == "auto":
@@ -393,7 +439,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                     capture.release()
                                 overlay = layout_facecam(box, size, options.position, options.size)
                             rect = overlay.rect
-                            caption_limit = max(1, rect.y-260-24 if rect.y != 24 else 1500-rect.y-rect.h-24)
+                            caption_limit = max(1, rect.y-260-24 if rect.y > 24 else 1500-rect.y-rect.h-24)
                             text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
                             corner = ("top" if rect.y == 24 else "bottom") + ("-left" if rect.x == 24 else "-right")
                             result = {"status": "used", "box": vars(box), "position": corner,
@@ -402,6 +448,43 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     overlay = None
                     result = {"status": "unavailable", "box": None}
                     logger.debug("Facecam unavailable; rendering without overlay", exc_info=True)
+                camera_keys = None
+                if reaction is not None and spec["mode"] == "crop":
+                    try:
+                        size = reaction.footage.frames.shape[2], reaction.footage.frames.shape[1]
+                        span = ((min(s.start for s in plan.segments), max(s.end for s in plan.segments))
+                                if plan and plan.segments else (0.0, duration))
+                        reframe = plan_reframe(reaction, span, layout_options(overlay, size), tracking.layout,
+                                               tracking.follow, tracking.x,
+                                               tracking.target.model_dump() if tracking.target else None)
+                        if reframe["overlay"] is not overlay:
+                            overlay = reframe["overlay"]
+                            rect = overlay.rect
+                            caption_limit = max(1, rect.y-260-24 if rect.y > 24 else 1500-rect.y-rect.h-24)
+                            text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
+                            result.update(size=round(rect.w / 1080, 3),
+                                          position="split" if reframe["layout"] == "split" else result.get("position"))
+                        camera_keys = reframe["path"]
+                        tracking_result = {
+                            "status": "needs_review" if reframe["needs_review"] else "used",
+                            "layout": reframe["layout"], "auto_layout": reframe["auto_layout"],
+                            "follow": tracking.follow, "attempts": reframe["attempts"],
+                            "trigger": reframe["trigger"], "target": reframe["target"],
+                            "validation": reframe["validation"], "needs_review": reframe["needs_review"],
+                            "window": round(reframe["width"], 4),
+                            "path": [[round(t, 2), round(x, 4)] for t, x, _ in camera_keys[::2]],
+                            "manual_target": tracking.target.model_dump() if tracking.target else None}
+                    except Exception:
+                        camera_keys, tracking_result = None, {"status": "unavailable"}
+                        logger.warning("Dynamic reframing unavailable for %s/%s", jid, cid, exc_info=True)
+                elif reaction is not None:
+                    tracking_result = {"status": "not_cropped", "trigger": trigger, "needs_review": False}
+                if reaction is not None:
+                    tracking_result["still_time"] = trigger["event"] if trigger else round(duration / 2, 2)
+                    try:
+                        save_source_still(source, tracking_still, tracking_result["still_time"])
+                    except Exception:
+                        logger.debug("Could not save tracking still", exc_info=True)
                 fixes = []
                 if plan and plan.hook and spec["captions"] and text_height is None:
                     text_height = caption_height(shown, style)
@@ -410,7 +493,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     if note:
                         fixes.append(note)
                 if plan:
-                    if spec["mode"] == "crop" and overlay is None:
+                    if camera_keys:
+                        plan.camera = to_output_time(camera_keys, plan.segments)
+                    elif spec["mode"] == "crop" and overlay is None:
                         plan.focal = [detect_focal_x(render_source, offset, offset + segment.length)
                                       for offset, segment in zip(plan.offsets(), plan.segments)]
                 ass = None
@@ -428,7 +513,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if ass is not None:
                     subtitles = work / "captions.ass"
                     subtitles.write_text(ass, encoding="utf-8")
-                effects = {"effects": effects_for(plan)} if plan else {}
+                effects = ({"effects": effects_for(plan)} if plan else
+                           {"effects": Effects(focal=keyframe_expression(camera_keys))} if camera_keys else {})
                 if overlay is None:
                     make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles, **effects)
                 else:
@@ -461,7 +547,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     except Exception:
                         logger.warning("AI Director loudness correction failed for %s/%s", jid, cid, exc_info=True)
                     update(jid, generation, stage=f"{clip_label} · AI Director quality check")
-                    director_result = plan_record(plan, director, quality_check(video, plan, shown, fixes, layout))
+                    director_result = plan_record(plan, director, quality_check(video, plan, shown, fixes, layout,
+                                                                                tracking_result))
                     peak = plan.map_time(peak) if peak is not None else None
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
                 thumbnail = work / "thumbnail.jpg"
@@ -483,6 +570,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     else:
                         clip.pop("source_still_url", None)
                     clip["facecam_result"] = result
+                    if tracking_still.is_file():
+                        tracking_still.replace(output_dir / "tracking.jpg")
+                        clip["tracking_still_url"] = base + "/tracking-still"
+                    else:
+                        clip.pop("tracking_still_url", None)
+                    clip["tracking_result"] = tracking_result
+                    clip["needs_review"] = bool(tracking_result.get("needs_review"))
                     clip["director_result"] = director_result
                     revision = str(time.time_ns())
                     clip.update(status="ready", rendered_at=int(revision), file_url=base + "/video",
@@ -586,6 +680,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                        "sources", "score", "message_sample")}
         clip.update({k: job["request"].get(k, default) for k, default in
                      (("mode", "crop"), ("captions", True), ("facecam", FacecamSpec().model_dump()),
+                      ("tracking", TrackingSpec().model_dump()),
                       ("language", "auto"), ("caption_style", None), ("director", dict(LEGACY_DIRECTOR)))})
         clip.update(id=uuid.uuid4().hex, moment_id=moment["id"], number=number, status="queued", error=None,
                     file_url=None, download_url=None, thumbnail_url=None)
@@ -890,7 +985,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 clip["previous_render"] = {key: clip[key] for key in (
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
                     "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url", "director",
-                    "director_result") if key in clip}
+                    "director_result", "tracking", "tracking_result", "tracking_still_url", "needs_review") if key in clip}
                 clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language")})
             clip.update(request.model_dump(), status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
@@ -972,6 +1067,14 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if not clip.get("source_still_url"):
                 raise HTTPException(404, "Source still not available")
         return file(jid, cid, "source.jpg")
+
+    @app.get("/api/jobs/{jid}/clips/{cid}/tracking-still")
+    def tracking_still(jid: str, cid: str):
+        with store.lock:
+            clip = find_clip(store.get(jid), cid)
+            if not clip.get("tracking_still_url"):
+                raise HTTPException(404, "Tracking still not available")
+        return file(jid, cid, "tracking.jpg")
 
     @app.delete("/api/jobs/{jid}/clips/{cid}")
     def delete_clip(jid: str, cid: str):
