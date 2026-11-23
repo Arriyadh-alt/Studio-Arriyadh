@@ -81,6 +81,7 @@ def test_analysis_download(monkeypatch, tmp_path, video_failure):
     assert all("download_ranges" not in options for options in options_seen)
     assert options_seen[0]["format"] == "ba[abr<=80]/ba/wa"
     assert options_seen[1]["format"] == "bv[height<=160]/wv"
+    assert all(o["max_filesize"] == 1_500_000_000 for o in options_seen)
 
 
 def test_analysis_download_errors(monkeypatch, tmp_path):
@@ -95,4 +96,32 @@ def test_analysis_download_errors(monkeypatch, tmp_path):
         download_analysis_media("url", tmp_path)
     monkeypatch.setattr("shorts_clipper.downloader.blocking_message", lambda *args: "blocked")
     with pytest.raises(YouTubeAccessError, match="blocked"):
+        download_analysis_media("url", tmp_path)
+
+
+@pytest.mark.parametrize("limit", ["duration", "bytes"])
+def test_analysis_limits(monkeypatch, tmp_path, limit):
+    monkeypatch.setenv("CLIPPER_ANALYSIS_MAX_BYTES", "100")
+    monkeypatch.setenv("CLIPPER_ANALYSIS_MAX_HOURS", "1")
+
+    class Downloader:
+        def __init__(self, options):
+            self.options = options
+            assert options["max_filesize"] == 100
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, *args, **kwargs):
+            return {"duration": 3601 if limit == "duration" else 600}
+
+        def process_ie_result(self, *args, **kwargs):
+            assert limit == "bytes", "Overlong replay must not start downloading"
+            self.options["progress_hooks"][0]({"downloaded_bytes": 101})
+
+    monkeypatch.setattr("shorts_clipper.downloader.yt_dlp.YoutubeDL", Downloader)
+    with pytest.raises(YouTubeAccessError, match="1 hours|100-byte"):
         download_analysis_media("url", tmp_path)
