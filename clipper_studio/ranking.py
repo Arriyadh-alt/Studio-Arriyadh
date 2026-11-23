@@ -30,7 +30,8 @@ def merge_moments(ai, chat, duration, lead):
                 "chat_score": score if source == "chat" else None,
                 **{k: item.get(k, "") for k in ("title", "description", "reason", "transcript")},
                 "category": item.get("category", "reaction"), "signals": item.get("signals", {}),
-                "message_sample": item.get("message_sample", []), "status": "suggested", "clip_id": None}
+                "message_sample": item.get("message_sample", []), "status": "suggested", "clip_id": None,
+                **({"podcast": item["podcast"]} if item.get("podcast") else {})}
 
     result = [normalize(a, "ai") for a in ai]
     for original in chat:

@@ -186,7 +186,8 @@ def _decode_raw(path: Path, rate: int, extra: str) -> np.ndarray:
 
 
 def narrate(text: str, language: str, output: Path, cache: Path, voice: str = "auto",
-            category: str | None = None, seed: str = "", delivery: str = "auto") -> dict:
+            category: str | None = None, seed: str = "", delivery: str = "auto",
+            max_seconds: float = MAX_SECONDS) -> dict:
     """Speak the hook to a WAV at `output`; returns its length and how it was voiced."""
     language = language if language in LEAD_INS else "en"
     mood = mood_for(category, delivery)
@@ -207,14 +208,14 @@ def narrate(text: str, language: str, output: Path, cache: Path, voice: str = "a
             clips = _offline(lines, language, cache, work)
         clips = [_trim(c) for c in clips]
         keep = list(zip(clips, lines))
-        if sum(len(c) / RATE + l.pause for c, l in keep) > MAX_SECONDS and keep[0][1].lead:
+        if sum(len(c) / RATE + l.pause for c, l in keep) > max_seconds and keep[0][1].lead:
             keep = keep[1:]
         audio = np.concatenate([np.concatenate([c, np.zeros(int(l.pause * RATE), dtype="<f4")])
                                 for c, l in keep] or [np.zeros(RATE // 4, dtype="<f4")])
-        tempo = min(1.35, max(1.0, len(audio) / RATE / MAX_SECONDS))
+        tempo = min(1.35, max(1.0, len(audio) / RATE / max_seconds))
         raw = work / "voice.f32"
         raw.write_bytes(audio.astype("<f4").tobytes())
-        seconds = min(MAX_SECONDS, len(audio) / RATE / tempo)  # the hook card never outlasts this
+        seconds = min(max_seconds, len(audio) / RATE / tempo)  # the hook card never outlasts this
         chain = (f"atempo={tempo:.4f}," if tempo > 1 else "") + (
             f"atrim=duration={seconds:.3f},afade=t=out:st={max(0.0, seconds - 0.15):.3f}:d=0.15,") + (
             "highpass=f=80,acompressor=threshold=-20dB:ratio=3:attack=5:release=80:makeup=2,"

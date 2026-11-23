@@ -4,6 +4,11 @@ A local web workspace that turns YouTube livestream chat spikes into vertical,
 captioned highlights. Paste a replay URL, let Autopilot find the moments, then
 review, nudge, re-render, keep and download your favorites.
 
+A second **Podcast / Interview** mode clips conversations instead: it reads the
+whole episode, separates speakers, and suggests complete questions, answers and
+stories with speaker-aware framing (see `STUDIO.md`). It also accepts uploaded
+videos you are authorized to use.
+
 ## Run the web app on your laptop
 
 Install Python 3.11+ and ffmpeg (including ffprobe and libass). From this folder:

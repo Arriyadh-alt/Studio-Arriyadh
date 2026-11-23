@@ -186,6 +186,46 @@ near the chat peak. It styles the selected still with a short hook from nearby
 captions, chat reactions, or the stream title. The clip card previews the JPG
 and lets you download it or change its text; custom text is kept on re-render.
 
+### Podcast & Interview mode
+
+The dashboard offers two clippers: **Gaming / Livestream** (unchanged: chat spikes,
+reaction tracking, facecam, AI Director) and **Podcast / Interview**. Both take a
+YouTube URL or an uploaded file you are authorized to use.
+
+- `POST /api/uploads` with the raw file as the body and `X-Filename` (URL-encoded) →
+  201 `{id,filename,duration,bytes}`. MP4/MOV/M4V/MKV/WebM with audio and video,
+  stored under `CLIPPER_DATA_DIR/uploads/` (limit `CLIPPER_UPLOAD_MAX_BYTES`, 8 GB).
+  `GET /api/jobs/{id}/source` streams it back for moment previews.
+- `POST /api/jobs` accepts `{upload}` instead of `url`, plus
+  `content_type:"gaming"|"podcast"` and `podcast:{layout,version,speakers,hook_text,
+  commentary,caption_edits}`. Uploads and podcasts skip chat replay and always use AI.
+- Podcast analysis transcribes the whole episode, separates speakers from voice timbre,
+  splits topics, finds complete questions & answers, stories, debates and insights, and
+  ranks windows that start at the question/setup and end at a sentence boundary. Each
+  moment carries `podcast`: `dimensions` (entertaining, educational, surprising,
+  emotional, controversial, retention), `hook` (text, strength), `context` (completeness
+  score and notes), `topic`, `kind`, `question`, `speakers`, `turns` and a grounded
+  `commentary` suggestion. Missing context lowers the score, and controversy is only
+  rewarded in proportion to context, so out-of-context statements rank low. With
+  `CLIPPER_LLM_API_KEY` an LLM refines titles and hooks over the whole outline.
+- `PATCH /api/jobs/{id}/moments/{mid}` and clip re-renders accept `podcast` edits.
+  Layouts: `speaker` (single speaker focus), `split` (two-person split screen), `switch`
+  (dynamic speaker switching), `wide` (full conversation) or `auto`. Faces are matched
+  to voices by mouth motion; shots last at least 2.5 s and a listener reaction is cut to
+  only when it is clear.
+- The Podcast Director keeps natural delivery: only pauses over ~1 s shrink, the hook is
+  a short teaser of the strongest line, zooms are subtle, there are no sound effects or
+  shakes, and a gentle voice-clarity chain plus loudness normalisation is applied.
+  Version A is the original highlight; Version B prepends AI commentary that is shown
+  with an "AI commentary" label and narrated by a separate AI voice. Speakers' voices
+  are never replaced. `caption_edits` are whole-word subtitle fixes.
+- Rights: podcast downloads (clip, kept ZIP, thumbnail download) return 403 until
+  `POST /api/jobs/{id}/rights` `{basis:"owned"|"licensed"|"permission"|"remix",
+  confirmed:true, attribution:true, include_link:true}`. A public YouTube video is not
+  treated as permission. `GET /api/jobs/{id}/clips/{cid}/description` returns an upload
+  description with source attribution, the original link when chosen, and an AI
+  commentary disclosure for Version B.
+
 ### AI Director
 
 Jobs and re-renders accept `director` (`{"enabled": true, "hook": true, "edits": true,

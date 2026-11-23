@@ -21,6 +21,11 @@ FPS = 30
 MAX_OUTPUT = 60.0
 TARGET_LUFS = -14.0
 MUSIC_MODES = ("auto", "on", "off")
+PRESETS = ("gaming", "podcast")
+COMMENTARY_LABEL = "AI commentary"
+SENTENCE_END = re.compile(r"[.?!…][\'\"”’)\]]*$")
+# Gentle voice cleanup for spoken-word clips: rumble cut, light denoise, soft levelling.
+VOICE_CLARITY = "highpass=f=75,afftdn=nf=-28,acompressor=threshold=0.125:ratio=2.5:attack=15:release=250:makeup=1.5"
 EXCITED = re.compile(r"(!|\?{2,}|\b(?:wow|what|no+|yes+|omg|lol|lmao|haha+|wkwk+|anjir|anjay|gila|astaga|bro|holy|insane|crazy)\b)", re.I)
 
 
@@ -37,6 +42,8 @@ class DirectorOptions:
     voice: str = "auto"
     delivery: str = "auto"
     loop: bool = True
+    preset: str = "gaming"
+    commentary: str | None = None
 
     @classmethod
     def from_dict(cls, value=None):
@@ -56,6 +63,11 @@ class DirectorOptions:
         text = value.get("hook_text")
         if isinstance(text, str) and text.strip():
             result.hook_text = " ".join(text.split())[:64]
+        if value.get("preset") in PRESETS:
+            result.preset = value["preset"]
+        text = value.get("commentary")
+        if isinstance(text, str) and text.strip():
+            result.commentary = " ".join(text.split())[:160]
         return result
 
 
@@ -95,6 +107,8 @@ class Plan:
     voiceover: str | None = None
     loop: dict | None = None
     camera: list = field(default_factory=list)  # (t, x, y) keyframes on the output timeline
+    voice_clarity: bool = False
+    commentary: dict | None = None
 
     @property
     def duration(self):
@@ -121,6 +135,7 @@ class Plan:
                 "reframes": (len({round(c[1], 2) for c in self.camera}) if self.camera
                              else len({round(f, 2) for f in self.focal}) if self.focal else 0),
                 "duration": round(self.duration, 2), "loop": self.loop,
+                "voice_clarity": self.voice_clarity, "commentary": self.commentary,
                 "timeline": [[round(s.start, 3), round(s.end, 3), round(o, 3)]
                              for o, s in zip(self.offsets(), self.segments) if s.role == "main"]}
 
@@ -403,6 +418,108 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     return plan
 
 
+IMPORTANT = re.compile(r"\b(never|always|nobody|everyone|biggest|worst|best|secret|truth|key|wrong|love|"
+                       r"million|billion|percent|first|last|only|most|\d[\d,.%]*)\b", re.I)
+
+
+def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook=None, voice=None) -> Plan:
+    """Spoken-word edit: keep natural delivery, trim only long pauses, open on the clip's strongest line,
+    use subtle zooms and no sound effects. `hook` = clip-relative {start, end, text}. With `options.commentary`
+    (Version B) the clip opens on a clearly labelled AI commentary card; the original voices are never replaced."""
+    words = transcript_words(captions)
+    main_start, end = 0.0, duration
+    if words:
+        if words[0].start < 3.0:
+            main_start = max(0.0, words[0].start - 0.3)
+        end = min(duration, max(words[-1].end + 0.6, main_start + 1.0))
+    cuts = []
+    if options.edits:
+        for a, b in find_silences(levels, words, main_start, end, minimum=1.2):
+            a, b = a + 0.15, b - 0.15  # keep ~0.35 s of breath either side
+            if b - a >= 0.4:
+                cuts.append((a, b))
+    pieces, cursor = [], main_start
+    for a, b in cuts:
+        if a - cursor >= 0.6:
+            pieces.append(Segment(cursor, a))
+            cursor = b
+    if end - cursor > 0.3:
+        pieces.append(Segment(cursor, end))
+    elif pieces:
+        pieces[-1].end = end
+    teaser = None
+    if options.hook and hook and hook.get("end", 0) > hook.get("start", 0):
+        a, b = max(0.0, float(hook["start"])), min(duration, float(hook["end"]))
+        if a >= main_start + 4.0 and b - a >= 1.2:
+            teaser = (a, min(b, a + 4.5))
+    segments = ([Segment(*teaser, "hook")] if teaser else []) + pieces
+    intro = None
+    if options.commentary:
+        from .story import intro_length
+        spoken, seconds = None, None
+        if voice is not None:
+            try:
+                spoken, info = voice(options.commentary)
+                seconds = info.get("seconds")
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("Commentary voice-over unavailable", exc_info=True)
+                spoken = None
+        length = max(intro_length(options.commentary, seconds), min(10.4, (seconds or 0) + 0.4))
+        intro = {"duration": round(length, 2), "voice": str(spoken) if spoken else None}
+        segments.insert(0, Segment(main_start, main_start + intro["duration"], "intro"))
+    over = sum(s.length for s in segments) - MAX_OUTPUT
+    while over > 0 and segments:
+        last = segments[-1]
+        if last.length - over >= 0.6:
+            limit = last.end - over
+            inside = [w for w in words if max(last.start + 0.6, limit - 8.0) <= w.end <= limit]
+            sentences = [w.end for w in inside if SENTENCE_END.search(w.word.strip())]
+            last.end = max(sentences or [w.end for w in inside] or [limit])
+            over = 0
+        else:
+            over -= last.length
+            segments.pop()
+    plan = Plan(segments, trimmed_start=main_start + duration - end, removed=sum(b - a for a, b in cuts))
+    offset = 0.0
+    if intro:
+        plan.voiceover = intro["voice"]
+        plan.commentary = {"text": options.commentary, "label": COMMENTARY_LABEL, "voiced": bool(intro["voice"]),
+                           "duration": intro["duration"]}
+        plan.hook = {"style": "commentary", "text": f"{COMMENTARY_LABEL}: {options.commentary}",
+                     "duration": intro["duration"], "source_start": round(main_start, 2),
+                     "source_end": round(main_start, 2)}
+        offset = intro["duration"]
+        plan.zooms.append([0.0, offset, 0.04, 1.0, "hook"])
+    if teaser:
+        length = teaser[1] - teaser[0]
+        text = options.hook_text or (hook or {}).get("text")
+        if not intro:
+            plan.hook = {"source_start": round(teaser[0], 2), "source_end": round(teaser[1], 2),
+                         "duration": round(length, 2), "text": text}
+        plan.zooms.append([offset, offset + length, 0.06, 0.5, "hook"])
+    elif not intro and options.hook and (options.hook_text or (hook or {}).get("text")):
+        plan.hook = {"source_start": round(main_start, 2), "source_end": round(main_start, 2), "duration": 2.5,
+                     "text": options.hook_text or hook["text"]}
+    mains = [(o, s) for o, s in zip(plan.offsets(), plan.segments) if s.role == "main"]
+    for index, (o, segment) in enumerate(mains[1:], 1):
+        if index % 2 and segment.length > 1.5:
+            plan.zooms.append([o, o + segment.length, 0.035, 0.0, "cut"])
+    taken = []
+    for w in words:
+        t = plan.map_time(w.start)
+        if t is None or not IMPORTANT.search(w.word) or any(abs(t - x) < 6.0 for x in taken):
+            continue
+        if t + 1.2 <= plan.duration and len(taken) < 3:
+            plan.zooms.append([t - 0.1, t + 1.2, 0.05, 0.6, "emphasis"])
+            taken.append(t)
+    plan.music = options.music == "on"
+    plan.voice_clarity = True
+    plan.score, plan.suggestions = score_clip(levels, words, duration, None, 0.7 if teaser else 0.4, None,
+                                              plan.removed + main_start)
+    return plan
+
+
 def _story_intro(story, options, words, arc, duration):
     from .story import intro_length, write_hooks
     written = write_hooks(story, words, arc["event"], seed=story.get("seed", ""))
@@ -641,7 +758,8 @@ def music_source(duration: float) -> str:
 
 def mix_command(video: Path, output: Path, plan: Plan) -> list:
     duration = plan.duration
-    parts = [f"[0:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={duration:.3f}[voice0]"]
+    clarity = f"{VOICE_CLARITY}," if plan.voice_clarity else ""
+    parts = [f"[0:a]aresample=48000,{clarity}aformat=channel_layouts=stereo,apad=whole_dur={duration:.3f}[voice0]"]
     beds = ["[voicemix]"]
     inputs = ["-i", str(video)]
     if plan.voiceover:
