@@ -67,20 +67,20 @@ def parse_chat(lines):
     return sorted(messages, key=lambda message: message.offset_seconds)
 
 
-def validate_metadata(info):
+def validate_metadata(info, require_chat=True):
     status = info.get("live_status")
     if status == "not_live" or (status is None and not info.get("was_live") and not info.get("is_live")):
         raise ChatReplayError("This is a regular YouTube video, with no live-chat replay. Paste a finished livestream link with chat replay.")
     if status in ("is_live", "is_upcoming", "post_live") or info.get("is_live"):
         raise ChatReplayError("This livestream replay isn’t ready yet. Try again after the stream ends and chat replay is available.")
-    if not info.get("subtitles", {}).get("live_chat"):
+    if require_chat and not info.get("subtitles", {}).get("live_chat"):
         raise ChatReplayError("This livestream has no live-chat replay. Choose a finished stream with chat replay enabled.")
     duration = info.get("duration")
     if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
         raise ChatReplayError("YouTube hasn’t published the replay duration yet. Try again later.")
 
 
-def fetch_metadata(url: str):
+def fetch_metadata(url: str, require_chat=True):
     options = {"skip_download": True, "writesubtitles": False, "noplaylist": True,
                "quiet": True, "noprogress": True, "socket_timeout": 10,
                "retries": 1, "extractor_retries": 1}
@@ -89,7 +89,7 @@ def fetch_metadata(url: str):
             info = ydl.extract_info(url, download=False)
         except DownloadError as error:
             raise ChatReplayError(_video_error(str(error))) from error
-    validate_metadata(info)
+    validate_metadata(info, require_chat=require_chat)
     return info
 
 

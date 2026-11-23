@@ -221,6 +221,7 @@ def llm_hooks(context: dict, category: str, language: str) -> list:
         f"support. Use the streamer's name when given.\n"
         f"Streamer: {context.get('name') or 'unknown'}\nGame: {context.get('game') or 'unknown'}\n"
         f"Stream title: {context.get('title') or ''}\nLikely event type: {category}\n"
+        + (f"Detected moment: {json.dumps(context['moment'], ensure_ascii=False)}\n" if context.get("moment") else "") +
         f"Transcript around the moment (seconds from the event):\n{context.get('transcript', '')}\n"
         f"Top chat reactions: {json.dumps(list(context.get('messages') or [])[:5], ensure_ascii=False)}\n"
         f"Avoid these hooks already used on this stream: {json.dumps(list(context.get('used') or []), ensure_ascii=False)}\n"

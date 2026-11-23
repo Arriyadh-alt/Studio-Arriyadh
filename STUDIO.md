@@ -81,9 +81,22 @@ and use only media you are authorized to access.
 ## API
 
 - `POST /api/jobs` → 202 `{id}`. Body:
-  `{url, clips:8, lead:18, mode:"crop", captions:true, language:"auto", caption_style:null}`. Use an HTTPS YouTube
+  `{url, clips:8, lead:18, ai_analysis:true, review:true, mode:"crop", captions:true, language:"auto", caption_style:null}`. Use an HTTPS YouTube
   video link (`watch`, `live`, or `youtu.be`, including mobile) for a finished
   livestream; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
+  AI analysis works without chat replay. Jobs include ranked `moments`, optional
+  `chat_error`/`ai_error`, and `analysis_complete`. Review mode completes without
+  creating clips; set `review:false` for automatic rendering of the best moments.
+- `PATCH /api/jobs/{id}/moments/{mid}` accepts `{status?,start?,end?}`; status is
+  `suggested`, `selected`, or `rejected`. Boundaries must fit the replay and be at
+  most 60 seconds (422 otherwise); rendered status cannot be reverted (409).
+- `POST /api/jobs/{id}/moments/render` accepts `{ids?:[...]}` (default: selected
+  moments), queues priority renders, and returns 202 `{clips:[clip_ids]}`; 409
+  when nothing is eligible. Moments become `rendered` with `clip_id`; deleting
+  their clip resets them to `suggested`.
+  Moments expose id/rank/sources, start/end/peak/duration, score/ai_score/chat_score,
+  title/description/reason/category/signals/transcript/message_sample/status/clip_id.
+  Agreements retain source boundaries under `alternatives.ai` and `.chat`.
 - `GET /api/jobs` → array of jobs; add `?summary=true` for recent-stream cards
   without activity and clips, including `clip_count` and `queue_position`.
   `GET /api/jobs/{id}` → job.

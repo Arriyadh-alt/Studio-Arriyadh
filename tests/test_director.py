@@ -364,7 +364,7 @@ def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_p
     monkeypatch.setattr("clipper_studio.api.detect_facecam", lambda *a: None)
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
-        jid = client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=LIxBN4AHMEE",
+        jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=LIxBN4AHMEE",
                                              "clips": 1, "director": {"music": "on"}}).json()["id"]
         app.state.pending.join()
         clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
@@ -469,7 +469,7 @@ def test_api_story_voiceover_and_channel_for_older_jobs(monkeypatch, tmp_path, s
     monkeypatch.setattr("clipper_studio.api.narrate", voice)
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
-        jid = client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=LIxBN4AHMEE", "clips": 1,
+        jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=LIxBN4AHMEE", "clips": 1,
                                              "director": {"voiceover": True, "voice": "trailer",
                                                           "delivery": "suspense"}}).json()["id"]
         app.state.pending.join()

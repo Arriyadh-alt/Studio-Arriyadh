@@ -30,7 +30,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validat
 from starlette.background import BackgroundTask
 
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, caption_height, to_ass, transcribe
-from shorts_clipper.downloader import download_section
+from shorts_clipper.downloader import download_analysis_media, download_section
+from shorts_clipper.moments import analyze_media
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_layout,
                                      hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
@@ -45,6 +46,7 @@ from shorts_clipper.youtube import YouTubeAccessError
 from .chat import METADATA_KEYS, ChatReplayError, fetch_chat, fetch_metadata
 from .scheduler import Scheduler
 from .spikes import detect_spikes
+from .ranking import chat_moment, merge_moments
 
 
 logger = logging.getLogger(__name__)
@@ -120,6 +122,8 @@ LEGACY_DIRECTOR = {**DirectorSpec().model_dump(), "enabled": False}
 
 class JobRequest(BaseModel):
     url: str
+    ai_analysis: bool = True
+    review: bool = True
     clips: int = Field(default=8, ge=1, le=50)
     lead: float = Field(default=18, ge=15, le=20)
     mode: Literal["crop", "blur"] = "crop"
@@ -170,6 +174,16 @@ class KeepRequest(BaseModel):
     kept: bool
 
 
+class MomentPatch(BaseModel):
+    status: Literal["suggested", "selected", "rejected"] | None = None
+    start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    end: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+
+class MomentRender(BaseModel):
+    ids: list[str] | None = None
+
+
 class ThumbnailRequest(BaseModel):
     text: str | None = Field(default=None, max_length=TEXT_LIMIT)
 
@@ -205,7 +219,8 @@ def story_context(job, clip, caption_language, work, voices):
 
     return {"name": streamer_name(metadata), "game": game_name(metadata.get("title")),
             "title": metadata.get("title"), "language": hook_language(caption_language or requested, metadata.get("title")),
-            "messages": clip.get("message_sample", ()), "used": used, "seed": clip.get("id", ""), "voice": voice}
+            "messages": clip.get("message_sample", ()), "used": used, "seed": clip.get("id", ""), "voice": voice,
+            "moment": {k: clip.get(k) for k in ("title", "description", "category")} if clip.get("moment_id") else None}
 
 
 def thumbnail_hook(job, clip, peak, captions=()):
@@ -227,6 +242,7 @@ class Store:
         with self.lock:
             try:
                 job = json.loads((self.root / jid / "job.json").read_text())
+                job.setdefault("moments", [])
                 job.setdefault("request", {}).setdefault("facecam", FacecamSpec().model_dump())
                 job["request"].setdefault("director", dict(LEGACY_DIRECTOR))
                 for clip in job.get("clips", []):
@@ -520,7 +536,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 return
             failed = any(c["status"] == "failed" for c in job["clips"])
             job.update(status="completed_with_errors" if failed else "completed", progress=1,
-                       stage="Finished" if job["clips"] else "No significant chat spikes found",
+                       stage="Finished" if job["clips"] else (f"{len(job['moments'])} moments ready for review"
+                             if job["moments"] else "No viral moments found"),
                        elapsed_seconds=round(time.time() - job.get("processing_started", time.time()), 2))
             store.save(job)
 
@@ -550,7 +567,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             update(jid, generation, status="running", stage="Checking stream metadata", processing_started=time.time())
             with store.lock:
                 job = active_job(jid, generation)
-            info = fetch_metadata(job["url"])
+            info = (fetch_metadata(job["url"], False) if job["request"].get("ai_analysis", False)
+                    else fetch_metadata(job["url"]))
             with store.lock:
                 job = active_job(jid, generation)
                 metadata_cache[jid, generation] = info
@@ -563,6 +581,17 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         except Exception as error:
             fail_job(jid, generation, error)
 
+    def moment_clip(job, moment, number):
+        clip = {k: moment[k] for k in ("start", "end", "peak", "title", "description", "category",
+                                       "sources", "score", "message_sample")}
+        clip.update({k: job["request"].get(k, default) for k, default in
+                     (("mode", "crop"), ("captions", True), ("facecam", FacecamSpec().model_dump()),
+                      ("language", "auto"), ("caption_style", None), ("director", dict(LEGACY_DIRECTOR)))})
+        clip.update(id=uuid.uuid4().hex, moment_id=moment["id"], number=number, status="queued", error=None,
+                    file_url=None, download_url=None, thumbnail_url=None)
+        moment.update(status="rendered", clip_id=clip["id"])
+        return clip
+
     def analyze(jid, generation):
         try:
             started = time.monotonic()
@@ -570,21 +599,57 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             with store.lock:
                 job = active_job(jid, generation)
                 info = metadata_cache.pop((jid, generation))
-            metadata, messages = fetch_chat(job["url"], store.root / jid / "chat", info)
+            chat_error = None
+            try:
+                metadata, messages = fetch_chat(job["url"], store.root / jid / "chat", info)
+            except ChatReplayError as error:
+                if not job["request"].get("ai_analysis", False):
+                    raise
+                chat_error = error
+                metadata, messages = {key: info.get(key) for key in METADATA_KEYS}, []
+                update(jid, generation, chat_error=str(error))
             update(jid, generation, metadata=metadata, stage="Detecting chat spikes", progress=0.15,
                    chat_seconds=round(time.monotonic() - started, 2), message_count=len(messages))
             spikes, activity = detect_spikes(messages, metadata["duration"],
                                             clips=job["request"]["clips"], lead=job["request"]["lead"])
-            clips = [dict(spike, number=number, id=uuid.uuid4().hex, status="queued", error=None,
-                          mode=job["request"]["mode"], captions=job["request"]["captions"],
-                          facecam=job["request"].get("facecam", FacecamSpec().model_dump()),
-                          language=job["request"].get("language", "auto"), caption_style=job["request"].get("caption_style"),
-                          director=job["request"].get("director", dict(LEGACY_DIRECTOR)),
-                          file_url=None, download_url=None, thumbnail_url=None)
-                     for number, spike in enumerate(sorted(spikes, key=lambda s: s["start"]), 1)]
+            count, lead = job["request"]["clips"], job["request"]["lead"]
+            chat = [chat_moment(s) for s in sorted(spikes, key=lambda s: -s.get("score", 0))[:count]]
+            ai, ai_error = [], None
+            if job["request"].get("ai_analysis", False):
+                directory = store.root / jid / "analysis"
+                try:
+                    update(jid, generation, stage="Downloading stream audio for AI analysis")
+
+                    def should_continue():
+                        with store.lock:
+                            active_job(jid, generation)
+
+                    audio, video = download_analysis_media(job["url"], directory, should_continue=should_continue)
+                    update(jid, generation, stage="AI analyzing video, audio & speech")
+                    language = job["request"].get("language")
+
+                    def progress(fraction, text):
+                        update(jid, generation, stage="AI analyzing video, audio & speech",
+                               progress=.2 + .65 * max(0, min(1, fraction)), analysis_detail=text)
+
+                    ai = analyze_media(audio, video, metadata["duration"], clips=count, lead=lead,
+                                       language=None if language == "auto" else language, progress=progress)[:count]
+                except WorkCancelled:
+                    raise
+                except Exception as error:
+                    ai_error = error
+                    update(jid, generation, ai_error=str(error) if isinstance(error, YouTubeAccessError)
+                           else "AI analysis was unavailable. Try this replay again.")
+                finally:
+                    shutil.rmtree(directory, ignore_errors=True)
+            if chat_error and (ai_error or not job["request"].get("ai_analysis", False)):
+                raise ai_error or chat_error
+            moments = merge_moments(ai, chat, metadata["duration"], lead)
             with store.lock:
                 job = active_job(jid, generation)
-                job.update(clips=clips, activity=activity, analysis_complete=True, stage="Queued for rendering")
+                clips = [] if job["request"].get("review", False) else [
+                    moment_clip(job, m, i) for i, m in enumerate(moments[:count], 1)]
+                job.update(clips=clips, moments=moments, activity=activity, analysis_complete=True, stage="Queued for rendering")
                 store.save(job)
                 for clip in clips:
                     pending.put((jid, clip["id"], generation))
@@ -765,6 +830,53 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         return FileResponse(archive, media_type="application/zip", filename=f"{title_slug(job)}-kept-clips.zip",
                             background=BackgroundTask(shutil.rmtree, archive_dir))
 
+    def find_moment(job, mid):
+        moment = next((m for m in job["moments"] if m["id"] == mid), None)
+        if moment is None:
+            raise HTTPException(404, "Moment not found")
+        return moment
+
+    @app.patch("/api/jobs/{jid}/moments/{mid}")
+    def patch_moment(jid: str, mid: str, request: MomentPatch):
+        with store.lock:
+            job = store.get(jid)
+            moment = find_moment(job, mid)
+            if moment["status"] == "rendered" and request.status is not None:
+                raise HTTPException(409, "Delete the rendered clip before changing this moment's status")
+            start = request.start if request.start is not None else moment["start"]
+            end = request.end if request.end is not None else moment["end"]
+            if request.start is not None or request.end is not None:
+                if not 0 <= start < end <= job["metadata"]["duration"] or end - start > 60 + 1e-6:
+                    raise HTTPException(422, "Moment must be within the video and at most 60 seconds long")
+                moment.update(start=start, end=end, duration=end - start)
+            if request.status is not None:
+                moment["status"] = request.status
+            store.save(job)
+        return moment
+
+    @app.post("/api/jobs/{jid}/moments/render", status_code=202)
+    def render_moments(jid: str, request: MomentRender = MomentRender()):
+        with store.lock:
+            job = store.get(jid)
+            if request.ids is not None:
+                for mid in request.ids:
+                    find_moment(job, mid)
+            moments = [m for m in job["moments"] if m["status"] != "rendered" and
+                       (m["id"] in request.ids if request.ids is not None else m["status"] == "selected")]
+            if not moments:
+                raise HTTPException(409, "No moments to render")
+            number = max((clip_number(job, c) for c in job["clips"]), default=0)
+            clips = [moment_clip(job, m, number + i) for i, m in enumerate(moments, 1)]
+            for clip in clips:
+                clip["render_priority"] = True
+            job["clips"].extend(clips)
+            job.update(status="queued", stage="Queued for rendering", progress=0, error=None,
+                       analysis_complete=True, processing_started=time.time())
+            store.save(job)
+            for clip in clips:
+                pending.put((jid, clip["id"], job.get("generation", 0)), priority=True)
+        return {"clips": [c["id"] for c in clips]}
+
     @app.post("/api/jobs/{jid}/clips/{cid}/render", status_code=202)
     def rerender(jid: str, cid: str, request: RenderRequest):
         with store.lock:
@@ -869,6 +981,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if clip["status"] == "rendering":
                 raise HTTPException(409, "Wait for this highlight to finish rendering")
             job["clips"] = [clip for clip in job["clips"] if clip["id"] != cid]
+            for moment in job["moments"]:
+                if moment.get("clip_id") == cid:
+                    moment.update(status="suggested", clip_id=None)
             store.save(job)
             pending.cancel(jid, cid)
             shutil.rmtree(store.root / jid / cid, ignore_errors=True)

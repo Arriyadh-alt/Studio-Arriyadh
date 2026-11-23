@@ -54,7 +54,7 @@ def test_caption_options_worker_and_rerender(monkeypatch, tmp_path, media, legac
         job["clips"][0].update(status="queued", captions=True, peak=10.5)
         app.state.store.save(job)
     with TestClient(app) as client:
-        jid = "old" if legacy else client.post("/api/jobs", json={"url":REPLAY_URL,
+        jid = "old" if legacy else client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":REPLAY_URL,
             "language":"id", "caption_style":{"preset":"minimal","size":100}}).json()["id"]
         app.state.pending.join()
         clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
@@ -105,7 +105,7 @@ def test_cookie_blocking_is_a_friendly_job_error(monkeypatch, tmp_path, phase, c
         monkeypatch.setattr("clipper_studio.api.download_section", fail)
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
-        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": REPLAY_URL}).json()["id"]
         app.state.pending.join()
         job = client.get(f"/api/jobs/{jid}").json()
         assert job["status"] == "failed"
@@ -188,7 +188,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr("clipper_studio.api.subprocess.run", thumbnail)
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
-        response = client.post("/api/jobs", json={"url":REPLAY_URL, "clips":3})
+        response = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":REPLAY_URL, "clips":3})
         assert response.status_code == 202
         jid = response.json()["id"]
         app.state.pending.join()
@@ -298,17 +298,17 @@ def test_errors_and_empty(monkeypatch, tmp_path, metadata):
         assert client.get("/manifest.webmanifest").json()["icons"][0]["sizes"] == "192x192"
         assert client.get("/icon-512.png").headers["content-type"] == "image/png"
         assert client.get("/api/jobs/missing").status_code == 404
-        assert client.post("/api/jobs", json={"url":"https://example.org"}).status_code == 422
-        assert client.post("/api/jobs", json={"url":REPLAY_URL, "lead":10}).status_code == 422
+        assert client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":"https://example.org"}).status_code == 422
+        assert client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":REPLAY_URL, "lead":10}).status_code == 422
         def fail(*args):
             raise ChatReplayError("no live-chat replay")
         monkeypatch.setattr("clipper_studio.api.fetch_metadata", fail)
-        jid = client.post("/api/jobs", json={"url":"https://www.youtube.com/watch?v=LIxBN4AHMEE"}).json()["id"]
+        jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":"https://www.youtube.com/watch?v=LIxBN4AHMEE"}).json()["id"]
         app.state.pending.join()
         assert client.get(f"/api/jobs/{jid}").json()["error"] == "no live-chat replay"
         monkeypatch.setattr("clipper_studio.api.fetch_metadata", metadata)
         monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration":100}, []))
-        jid = client.post("/api/jobs", json={"url":REPLAY_URL}).json()["id"]
+        jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":REPLAY_URL}).json()["id"]
         app.state.pending.join()
         job = client.get(f"/api/jobs/{jid}").json()
         assert job["status"] == "completed" and job["clips"] == []
@@ -317,7 +317,7 @@ def test_errors_and_empty(monkeypatch, tmp_path, metadata):
 def test_restart_and_busy_conflicts(tmp_path, media):
     app = create_app(tmp_path)
     client = TestClient(app)
-    jid = client.post("/api/jobs", json={"url":REPLAY_URL}).json()["id"]
+    jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":REPLAY_URL}).json()["id"]
     store = app.state.store
     job = store.get(jid)
     job.update(saved_job(jid, "running"))
@@ -384,9 +384,9 @@ def test_queued_job_survives_new_client_and_worker_continues(monkeypatch, tmp_pa
     app = create_app(tmp_path, analysis_workers=1)
     with TestClient(app) as client:
         try:
-            first = client.post("/api/jobs", json={"url":"https://youtu.be/LIxBN4AHMEE"}).json()["id"]
+            first = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":"https://youtu.be/LIxBN4AHMEE"}).json()["id"]
             assert started.wait(5)
-            second = client.post("/api/jobs", json={"url":"https://m.youtube.com/watch?v=puMjBYns9L0"}).json()["id"]
+            second = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":"https://m.youtube.com/watch?v=puMjBYns9L0"}).json()["id"]
             assert first != second
             refreshed = TestClient(app)
             assert refreshed.get(f"/api/jobs/{first}").json()["status"] == "running"
@@ -424,7 +424,7 @@ def test_delete_queued_during_autopilot(monkeypatch, tmp_path):
     monkeypatch.setattr("clipper_studio.api.subprocess.run", lambda command, **k: Path(command[-1]).write_bytes(b"jpg"))
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
-        jid = client.post("/api/jobs", json={"url":REPLAY_URL, "captions":False}).json()["id"]
+        jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":REPLAY_URL, "captions":False}).json()["id"]
         try:
             assert entered.wait(5)
             job = client.get(f"/api/jobs/{jid}").json()
@@ -445,7 +445,7 @@ def test_delete_queued_during_autopilot(monkeypatch, tmp_path):
 def test_rerender_ready_while_running(tmp_path):
     app = create_app(tmp_path)
     client = TestClient(app)
-    jid = client.post("/api/jobs", json={"url":REPLAY_URL}).json()["id"]
+    jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":REPLAY_URL}).json()["id"]
     job = app.state.store.get(jid)
     job.update(status="running", progress=0.6, metadata={"duration":100},
                clips=[{"id":"ready", "status":"ready"}, {"id":"rendering", "status":"rendering"}])
@@ -497,10 +497,10 @@ def test_analysis_does_not_block_rerender_or_no_chat(monkeypatch, tmp_path, meta
     app = create_app(tmp_path, analysis_workers=1, render_workers=1, metadata_workers=1)
     app.state.store.save(saved_job("readyjob"))
     with TestClient(app) as client:
-        slow = client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=aaaaaaaaaaa"}).json()["id"]
+        slow = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=aaaaaaaaaaa"}).json()["id"]
         try:
             assert entered.wait(5)
-            nochat = client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=bbbbbbbbbbb"}).json()["id"]
+            nochat = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=bbbbbbbbbbb"}).json()["id"]
             failed = wait_job(client, nochat, lambda job: job["status"] == "failed")
             assert "no live-chat replay" in failed["error"]
             assert client.post("/api/jobs/readyjob/clips/first/render",
@@ -508,7 +508,7 @@ def test_analysis_does_not_block_rerender_or_no_chat(monkeypatch, tmp_path, meta
             ready = wait_job(client, "readyjob", lambda job: job["status"] == "completed")
             assert ready["clips"][0]["rendered_at"]
             assert not release.is_set()
-            queued = client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=ccccccccccc"}).json()["id"]
+            queued = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=ccccccccccc"}).json()["id"]
             waiting = wait_job(client, queued, lambda job: job["metadata"] is not None and job["queue_position"] == 1)
             assert waiting["stage"] == "Queued (position 1)"
             assert client.post(f"/api/jobs/{queued}/cancel").status_code == 200
@@ -705,13 +705,13 @@ def test_unexpected_analysis_failure_is_friendly_and_pool_continues(monkeypatch,
     monkeypatch.setattr("clipper_studio.api.detect_spikes", broken)
     app = create_app(tmp_path, analysis_workers=1)
     with TestClient(app) as client:
-        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": REPLAY_URL}).json()["id"]
         app.state.pending.join()
         failed = client.get(f"/api/jobs/{jid}").json()
         assert failed["status"] == "failed"
         assert failed["error"] == "Studio couldn’t process this replay. Try submitting it again."
         assert "internal detector detail" in caplog.text
         monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([], []))
-        next_job = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        next_job = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": REPLAY_URL}).json()["id"]
         app.state.pending.join()
         assert client.get(f"/api/jobs/{next_job}").json()["status"] == "completed"

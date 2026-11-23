@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import pytest
 import yt_dlp
 
-from shorts_clipper.downloader import download_section
+from shorts_clipper.downloader import download_analysis_media, download_section
+from shorts_clipper.youtube import YouTubeAccessError
 
 
 def test_fractional_windows_do_not_reuse_another_sections_file(monkeypatch, tmp_path):
@@ -42,3 +44,119 @@ def test_fractional_windows_do_not_reuse_another_sections_file(monkeypatch, tmp_
     assert precise.read_text() == "(10.20001, 20.40001)"
     assert download_section("https://youtu.be/video", tmp_path, 10.2, 20.4) == first
     assert len(downloads) == 3
+
+
+@pytest.mark.parametrize("video_failure", [False, True, "missing", "oversized"])
+def test_analysis_download(monkeypatch, tmp_path, video_failure):
+    options_seen = []
+
+    class Downloader:
+        def __init__(self, options):
+            self.options = options
+            options_seen.append(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, url, download=False):
+            return {"id": "video"}
+
+        def process_ie_result(self, info, download=True):
+            video = self.options["format"].startswith("bv")
+            if video and video_failure is True:
+                raise yt_dlp.utils.DownloadError("Requested format is not available")
+            if video and video_failure == "missing":
+                return {}
+            if video and video_failure == "oversized":
+                self.options["progress_hooks"][0]({"downloaded_bytes": self.options["max_filesize"] + 1})
+            path = tmp_path / ("video.mp4" if video else "audio.m4a")
+            path.touch()
+            return {"requested_downloads": [{"filepath": str(path)}]}
+
+    monkeypatch.setattr("shorts_clipper.downloader.yt_dlp.YoutubeDL", Downloader)
+    audio, video = download_analysis_media("url", tmp_path)
+    assert audio.exists()
+    assert (video is None) == bool(video_failure)
+    assert all("download_ranges" not in options for options in options_seen)
+    assert options_seen[0]["format"] == "ba[abr<=80]/ba/wa"
+    assert options_seen[1]["format"] == "bv[height<=160]/wv"
+    assert all(o["max_filesize"] == 1_500_000_000 for o in options_seen)
+
+
+def test_analysis_download_errors(monkeypatch, tmp_path):
+    with pytest.raises(YouTubeAccessError):
+        download_analysis_media("url", tmp_path, proxy="socks5://localhost")
+
+    def fail(*args, **kwargs):
+        raise yt_dlp.utils.DownloadError("unavailable")
+
+    monkeypatch.setattr("shorts_clipper.downloader.yt_dlp.YoutubeDL", fail)
+    with pytest.raises(yt_dlp.utils.DownloadError):
+        download_analysis_media("url", tmp_path)
+    monkeypatch.setattr("shorts_clipper.downloader.blocking_message", lambda *args: "blocked")
+    with pytest.raises(YouTubeAccessError, match="blocked"):
+        download_analysis_media("url", tmp_path)
+
+
+@pytest.mark.parametrize("limit", ["duration", "bytes"])
+def test_analysis_limits(monkeypatch, tmp_path, limit):
+    monkeypatch.setenv("CLIPPER_ANALYSIS_MAX_BYTES", "100")
+    monkeypatch.setenv("CLIPPER_ANALYSIS_MAX_HOURS", "1")
+
+    class Downloader:
+        def __init__(self, options):
+            self.options = options
+            assert options["max_filesize"] == 100
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, *args, **kwargs):
+            return {"duration": 3601 if limit == "duration" else 600}
+
+        def process_ie_result(self, *args, **kwargs):
+            assert limit == "bytes", "Overlong replay must not start downloading"
+            self.options["progress_hooks"][0]({"downloaded_bytes": 101})
+
+    monkeypatch.setattr("shorts_clipper.downloader.yt_dlp.YoutubeDL", Downloader)
+    with pytest.raises(YouTubeAccessError, match="1 hours|100-byte"):
+        download_analysis_media("url", tmp_path)
+
+
+def test_analysis_cancellation_stops_before_video(monkeypatch, tmp_path):
+    from clipper_studio.api import WorkCancelled
+
+    downloads = []
+
+    class Downloader:
+        def __init__(self, options):
+            downloads.append(options["format"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, *args, **kwargs):
+            return {"duration": 600}
+
+        def process_ie_result(self, *args, **kwargs):
+            path = tmp_path / "audio.m4a"
+            path.touch()
+            return {"requested_downloads": [{"filepath": str(path)}]}
+
+    def should_continue():
+        if downloads:
+            raise WorkCancelled
+
+    monkeypatch.setattr("shorts_clipper.downloader.yt_dlp.YoutubeDL", Downloader)
+    with pytest.raises(WorkCancelled):
+        download_analysis_media("url", tmp_path, should_continue=should_continue)
+    assert downloads == ["ba[abr<=80]/ba/wa"]
