@@ -12,7 +12,7 @@ globalThis.MomentReview = (() => {
   const filters = {all:'Ranked (all)',ai:'AI-detected',chat:'Chat-detected',both:'Both'};
   const podcast = () => job?.request?.content_type==='podcast';
   const filterSet = () => podcast() ? PodcastControls.filters : filters;
-  const matches = (m, filter) => filter==='all' || (podcast() ? (PodcastControls.dimension(m,filter) ?? 0)>=40 : filter==='both' ? m.sources.length>1 : m.sources.includes(filter));
+  const matches = (m, filter) => filter==='all' || (podcast() ? PodcastControls.dimension(m,filter)!=null : filter==='both' ? m.sources.length>1 : m.sources.includes(filter));
   const ordered = () => [...job.moments].sort((a,b)=>podcast() && filter!=='all' ? (PodcastControls.dimension(b,filter)??0)-(PodcastControls.dimension(a,filter)??0) : a.rank-b.rank);
   let job, filter='all', key='', active=null, pending=false;
   const drafts = new Map();
