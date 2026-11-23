@@ -11,7 +11,8 @@ from shorts_clipper.captions import MARGIN_BOTTOM, MARGIN_RIGHT
 from shorts_clipper.facecam import (SourceBox, OutputRect, detect_facecam,
                                     find_facecam_border, layout_facecam,
                                     auto_layout_facecam, save_source_still,
-                                    find_persistent_border, CAPTION_BAND_TOP)
+                                    find_persistent_border, BOTTOM_SAFE_EDGE,
+                                    _hud_mask, _saliency_map)
 from shorts_clipper.video import build_ffmpeg_command, make_vertical_clip
 
 
@@ -33,7 +34,7 @@ def test_layout(corner, width):
     assert abs(r.w/r.h - (.2*1920)/(.3*1080)) < .01
     assert r.x+r.w <= 1080-MARGIN_RIGHT-24
     if corner.startswith('bottom'):
-        assert r.y+r.h == CAPTION_BAND_TOP-16
+        assert r.y+r.h == BOTTOM_SAFE_EDGE
     else:
         assert r.y == 24
 
@@ -108,15 +109,16 @@ def test_persistent_border_rejects_moving_gameplay(mirror_x, mirror_y):
     assert find_persistent_border([],face) is None
 
 
-@pytest.mark.parametrize('intensity,bottom', [(10,False),(255,True)])
-def test_auto_prefers_top_unless_clearly_busier(intensity,bottom):
+@pytest.mark.parametrize('intensity', [10, 255])
+@pytest.mark.parametrize('mode', ['crop', 'blur'])
+def test_auto_never_uses_bottom_even_when_top_is_busier(intensity, mode):
     blank=np.zeros((480,270,3),np.uint8)
     changed=blank.copy()
     changed[:160]=intensity
     box=SourceBox(.1,.1,.2,.2)
     with patch('shorts_clipper.facecam._sample_frames',return_value=[blank,changed]*4):
-        spec=auto_layout_facecam(Path('source'),0,1,box)
-    assert (spec.rect.y>24)==bottom
+        spec=auto_layout_facecam(Path('source'),0,1,box,mode)
+    assert spec.rect.y == 24
 
 
 def test_auto_size_stays_readable():
@@ -124,6 +126,7 @@ def test_auto_size_stays_readable():
     with patch('shorts_clipper.facecam._sample_frames',return_value=frames):
         spec=auto_layout_facecam(Path('source'),0,1,SourceBox(.1,.1,.2,.2))
     assert spec.rect.w/1080 >= .38
+    assert spec.rect.w < layout_facecam(SourceBox(.1,.1,.2,.2), (270,480)).rect.w
     assert spec.rect.y==24
 
 
@@ -136,6 +139,8 @@ def test_auto_layout():
     busy[:180, :140] = np.random.default_rng(1).integers(0, 256, (180, 140, 3), dtype=np.uint8)
     with patch('shorts_clipper.facecam._sample_frames', return_value=[busy]*8):
         assert auto_layout_facecam(Path('source'), 0, 1, box).rect.x > 24
+    with patch('shorts_clipper.facecam._sample_frames', return_value=[cv2.flip(busy,1)]*8):
+        assert auto_layout_facecam(Path('source'), 0, 1, box).rect.x == 24
     with patch('shorts_clipper.facecam._sample_frames', return_value=[]):
         with pytest.raises(ValueError):
             auto_layout_facecam(Path('source'), 0, 1, box)
@@ -187,3 +192,84 @@ def test_still_errors(tmp_path):
         save_source_still(tmp_path/'missing', tmp_path/'still.jpg')
     with pytest.raises(ValueError):
         save_source_still(tmp_path/'missing', tmp_path/'still.jpg', -1)
+
+
+@pytest.mark.parametrize('position', ['top-left', 'top-right', 'bottom-left', 'bottom-right'])
+@pytest.mark.parametrize('box', [SourceBox(.1,.1,.2,.15), SourceBox(.1,.1,.05,.8),
+                                 SourceBox(0,0,.209,.279)])
+def test_aspect_preserved_to_nearest_output_pixel(position, box):
+    r = layout_facecam(box, (1920,1080), position).rect
+    aspect = box.w*1920/(box.h*1080)
+    assert min(abs(r.h-r.w/aspect), abs(r.w-r.h*aspect)) <= 2
+    assert r.y >= 24 and r.y+r.h <= BOTTOM_SAFE_EDGE
+
+
+def test_hud_and_saliency_signals():
+    blank = np.zeros((480,270),np.uint8)
+    assert not np.any(_hud_mask(blank))
+    assert not np.any(_saliency_map(blank))
+    text = blank.copy()
+    for y in range(18,110,18):
+        cv2.putText(text, 'SCORE 1250', (8,y), cv2.FONT_HERSHEY_SIMPLEX, .4, 255, 1)
+    assert _hud_mask(text)[:120,:110].mean() > .05
+    saliency = _saliency_map(text)
+    assert np.isfinite(saliency).all() and saliency[:120,:110].mean() > saliency[200:].mean()
+    with patch('shorts_clipper.facecam._sample_frames', return_value=[cv2.cvtColor(text,cv2.COLOR_GRAY2BGR)]*8), patch(
+            'shorts_clipper.facecam._saliency_map', return_value=np.zeros_like(blank)), patch(
+            'shorts_clipper.facecam.cv2.Canny', return_value=blank):
+        assert auto_layout_facecam(Path('source'),0,1,SourceBox(.1,.1,.2,.2)).rect.x > 24
+
+
+def test_fallback_contains_entire_face_track_with_margin():
+    detector, profile = MagicMock(), MagicMock()
+    detector.empty.return_value = False
+    profile.empty.return_value = True
+    faces = [(480+i*3, 50+i*2, 30, 30) for i in range(8)]
+    detector.detectMultiScale.side_effect = [[f] for f in faces]
+    with patch('shorts_clipper.facecam._sample_frames', return_value=[np.zeros((360,640,3),np.uint8)]*8), patch(
+            'shorts_clipper.facecam.cv2.CascadeClassifier', side_effect=[detector,profile]):
+        box = detect_facecam(Path('source'),0,1)
+    assert box is not None
+    assert box.x < min(f[0] for f in faces)/640
+    assert box.y < min(f[1] for f in faces)/360
+    assert box.x+box.w > max(f[0]+f[2] for f in faces)/640
+    assert box.y+box.h > max(f[1]+f[3] for f in faces)/360
+
+
+@pytest.mark.parametrize('mode', ['crop', 'blur'])
+def test_director_effects_precede_facecam_and_captions(mode):
+    from shorts_clipper.director import Effects
+    spec = layout_facecam(SourceBox(0,0,.2,.3), (640,360))
+    command = build_ffmpeg_command(Path('source'),Path('out'),0,1,mode,Path('sub.ass'),spec,
+                                   Effects(zoom='1.2',shake='4',flash='0.1',focal='0.8'))
+    graph = command[command.index('-filter_complex')+1]
+    assert graph.index('zoompan=') < graph.index("eq=brightness='0.1'") < graph.index('[main];')
+    assert graph.index('[main][cam]overlay=') < graph.index(',ass=')
+    assert 'force_original_aspect_ratio=decrease:force_divisible_by=2' in graph
+    assert f'pad={spec.rect.w}:{spec.rect.h}' in graph
+    assert 'zoompan' not in graph.split('[main];')[1]
+
+
+@pytest.mark.parametrize('mode', ['crop', 'blur'])
+def test_facecam_pixels_stay_fixed_through_director_zoom(tmp_path, mode):
+    from shorts_clipper.director import Plan, Segment, effects_for
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('ffmpeg required')
+    source = tmp_path/'source.mp4'
+    subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i',
+                    'color=blue:s=640x360:r=30:d=1,drawbox=x=0:y=0:w=128:h=96:color=red:t=fill',
+                    '-c:v','libx264',str(source)],check=True)
+    spec = layout_facecam(SourceBox(0,0,.2,96/360),(640,360))
+    plan = Plan([Segment(0,1)],zooms=[[.3,.8,.35,.1,'punch']],shakes=[[.4,.8]],flashes=[.5])
+    output = make_vertical_clip(source,tmp_path/'out.mp4',0,1,mode,facecam=spec,effects=effects_for(plan))
+    capture = cv2.VideoCapture(str(output))
+    for second in (.05,.5,.9):
+        capture.set(cv2.CAP_PROP_POS_MSEC,second*1000)
+        ok, frame = capture.read()
+        assert ok
+        r = spec.rect
+        red = frame[r.y+10:r.y+r.h-10,r.x+10:r.x+r.w-10]
+        assert np.mean(red[:,:,2]) > 240
+        assert np.mean(red[:,:,:2]) < 10
+        assert np.mean(frame[r.y+r.h+8,r.x+r.w//2,:2]) > 20
+    capture.release()

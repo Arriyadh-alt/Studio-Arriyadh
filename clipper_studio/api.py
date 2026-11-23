@@ -29,10 +29,10 @@ from cv2 import error as ImageProcessingError
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
-from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
+from shorts_clipper.captions import FONT_DIR, CaptionStyle, caption_height, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.director import (STORY_SIZE, DirectorOptions, cut_source, effects_for, framing_fix, hook_band,
+from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_layout,
                                      hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
                                      plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.story import game_name, hook_language, streamer_name
@@ -349,6 +349,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         logger.warning("AI Director unavailable for %s/%s; rendering unedited", jid, cid, exc_info=True)
                 render_source = directed or source
                 render_duration = plan.duration if plan else duration
+                shown = remap_captions(captions, plan) if plan and spec["captions"] else captions if spec["captions"] else []
+                text_height = None
+                caption_limit = None
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
                 overlay = None
@@ -374,6 +377,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                     capture.release()
                                 overlay = layout_facecam(box, size, options.position, options.size)
                             rect = overlay.rect
+                            caption_limit = max(1, rect.y-260-24 if rect.y != 24 else 1500-rect.y-rect.h-24)
+                            text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
                             corner = ("top" if rect.y == 24 else "bottom") + ("-left" if rect.x == 24 else "-right")
                             result = {"status": "used", "box": vars(box), "position": corner,
                                       "size": rect.w / 1080, "origin": "manual" if options.box else "detected"}
@@ -381,26 +386,29 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     overlay = None
                     result = {"status": "unavailable", "box": None}
                     logger.debug("Facecam unavailable; rendering without overlay", exc_info=True)
-                shown, fixes = captions, []
-                if plan:
-                    shown = remap_captions(captions, plan) if spec["captions"] else []
-                    if spec["captions"]:
-                        style, note = framing_fix(style, overlay.rect if overlay else None)
+                fixes = []
+                if plan and plan.hook and spec["captions"] and text_height is None:
+                    text_height = caption_height(shown, style)
+                if spec["captions"]:
+                    style, note = framing_fix(style, overlay.rect if overlay else None, text_height)
+                    if note:
                         fixes.append(note)
+                if plan:
                     if spec["mode"] == "crop" and overlay is None:
                         plan.focal = [detect_focal_x(render_source, offset, offset + segment.length)
                                       for offset, segment in zip(plan.offsets(), plan.segments)]
-                ass = to_ass(shown, style) if spec["captions"] else None
-                layout = {"rect": overlay.rect if overlay else None, "style": style if spec["captions"] else None}
+                ass = None
+                if spec["captions"]:
+                    caption_options = {"max_height": caption_limit} if caption_limit is not None else {}
+                    ass = to_ass(shown, style, **caption_options)
+                layout = {"rect": overlay.rect if overlay else None, "style": style if spec["captions"] else None,
+                          "caption_height": text_height}
                 if plan and plan.hook and plan.hook.get("text"):
-                    if plan.hook.get("style") == "story":
-                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"],
-                                                   preferred=760, size=STORY_SIZE)
-                        ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"], top=layout["hook"][0],
-                                             story=True, highlight=plan.hook.get("streamer"))
-                    else:
-                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"])
-                        ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + 0.7, top=layout["hook"][0])
+                    band, hook_height, overlap = hook_layout(plan.hook, layout["rect"], layout["style"], shown, caption_limit)
+                    layout.update(hook=band,hook_caption_height=hook_height,hook_captions_overlap=overlap)
+                    story = plan.hook.get("style") == "story"
+                    ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + (0 if story else .7),
+                                         top=band[0],story=story,highlight=plan.hook.get("streamer"),max_height=band[1]-band[0])
                 if ass is not None:
                     subtitles = work / "captions.ass"
                     subtitles.write_text(ass, encoding="utf-8")

@@ -11,6 +11,7 @@ from .captions import FONT_SIZE, MARGIN_BOTTOM, MARGIN_RIGHT
 
 
 CAPTION_BAND_TOP = 1920 - MARGIN_BOTTOM - 2 * FONT_SIZE - 10
+BOTTOM_SAFE_EDGE = 1920 - 320
 
 
 @dataclass(frozen=True)
@@ -167,14 +168,24 @@ def detect_facecam(source: Path, start: float, end: float) -> SourceBox | None:
             return None
         track = max(tracks, key=lambda t: (len(t), np.median([b.w*b.h for b in t])))
         face = SourceBox(*np.median([[b.x, b.y, b.w, b.h] for b in track], axis=0))
+        left, top = min(b.x for b in track), min(b.y for b in track)
+        right, bottom = max(b.x+b.w for b in track), max(b.y+b.h for b in track)
+        safe = SourceBox(max(0, left-face.w*.1), max(0, top-face.h*.1),
+                         min(1, right+face.w*.1)-max(0, left-face.w*.1),
+                         min(1, bottom+face.h*.1)-max(0, top-face.h*.1))
+        def contains_face(border):
+            return (border is not None and border.x <= safe.x and border.y <= safe.y
+                    and border.x+border.w >= safe.x+safe.w
+                    and border.y+border.h >= safe.y+safe.h)
         persistent = find_persistent_border(frames, face)
-        if persistent is not None:
+        if contains_face(persistent):
             return persistent
         borders = [find_facecam_border(frame, face) for frame in frames]
-        borders = [b for b in borders if b is not None]
+        borders = [b for b in borders if contains_face(b)]
         if len(borders) > len(frames)/2:
             return SourceBox(*np.median([[b.x, b.y, b.w, b.h] for b in borders], axis=0))
         height, width = frames[0].shape[:2]
+        face = SourceBox(left, top, right-left, bottom-top)
         h = min(1, face.h*1.7)
         w = min(1, max(face.w*1.65, h*height/width*4/3))
         x = max(0, min(1-w, face.x+face.w/2-w/2))
@@ -192,13 +203,16 @@ def layout_facecam(box: SourceBox, source_size: tuple[int, int], position: str =
         raise ValueError('Invalid facecam size')
     aspect = box.w*source_size[0]/(box.h*source_size[1])
     w = round(1080*min(.6, max(.25, width)))
-    h = round(w/aspect)
-    max_height = CAPTION_BAND_TOP-40
+    h = max(2, round(w/aspect/2)*2)
+    max_height = min(CAPTION_BAND_TOP-40, 1920-MARGIN_BOTTOM-2.6*130-48)
+    if position.startswith('bottom'):
+        max_height = min(max_height, BOTTOM_SAFE_EDGE-260-2.6*130-24)
     if h > max_height:
-        h, w = max_height, max(2, round(max_height*aspect))
+        h = int(max_height)//2*2
+        w = max(2, round(h*aspect/2)*2)
     w, h = max(2, w//2*2), max(2, h//2*2)
     x = 1080-MARGIN_RIGHT-24-w if position.endswith('right') else 24
-    y = CAPTION_BAND_TOP-16-h if position.startswith('bottom') else 24
+    y = BOTTOM_SAFE_EDGE-h if position.startswith('bottom') else 24
     return FacecamOverlay(box, OutputRect(x, y, w, h))
 
 
@@ -231,20 +245,54 @@ def auto_layout_facecam(source: Path, start: float, end: float, box: SourceBox,
         raise ValueError('No readable source frames')
     size = (frames[0].shape[1], frames[0].shape[0])
     previews = [cv2.cvtColor(_main_preview(f, mode), cv2.COLOR_BGR2GRAY) for f in frames]
+    importance = []
+    for index, preview in enumerate(previews):
+        motion = cv2.absdiff(preview, previews[index-1])/255 if index else np.zeros_like(preview)
+        importance.append(cv2.Canny(preview, 60, 160)/255 + motion
+                          + .35*_saliency_map(preview) + .8*_hud_mask(preview))
     candidates = []
-    for corner in ('top-left', 'top-right', 'bottom-left', 'bottom-right'):
+    for corner in ('top-left', 'top-right'):
         spec = layout_facecam(box, size, corner, width)
         r = spec.rect
-        regions = [p[r.y//4:(r.y+r.h)//4, r.x//4:(r.x+r.w)//4] for p in previews]
-        edges = np.mean([np.mean(cv2.Canny(p, 60, 160))/255 for p in regions])
-        motion = np.mean([np.mean(cv2.absdiff(a, b))/255 for a, b in zip(regions, regions[1:])]) if len(regions)>1 else 0
-        candidates.append((float(edges+motion), corner, spec))
-    top = min(candidates[:2], key=lambda c: c[0])
-    bottom = min(candidates[2:], key=lambda c: c[0])
-    score, corner, spec = bottom if top[0] > bottom[0] + .12 and top[0] > bottom[0]*1.5 else top
+        scores = [np.mean(p[r.y//4:math.ceil((r.y+r.h)/4), r.x//4:math.ceil((r.x+r.w)/4)])
+                  for p in importance]
+        candidates.append((float((np.mean(scores)+max(scores))/2), corner, spec))
+    score, corner, spec = min(candidates, key=lambda c: c[0])
     if score > .20 and width > .38:
         return layout_facecam(box, size, corner, max(.38, width*.92))
     return spec
+
+
+def _saliency_map(gray):
+    if np.std(gray) < 1:
+        return np.zeros_like(gray, dtype=float)
+    small = cv2.resize(gray, (64, 112)).astype(float)
+    spectrum = np.fft.fft2(small)
+    amplitude = np.log(np.abs(spectrum)+1e-6)
+    residual = amplitude-cv2.blur(amplitude, (3, 3))
+    saliency = np.abs(np.fft.ifft2(np.exp(residual+1j*np.angle(spectrum))))**2
+    saliency = cv2.GaussianBlur(saliency, (9, 9), 0)
+    saliency /= max(float(saliency.max()), 1e-6)
+    return cv2.resize(saliency, (gray.shape[1], gray.shape[0]))
+
+
+def _hud_mask(gray):
+    mask = np.zeros_like(gray)
+    detector = cv2.MSER_create()
+    detector.setMinArea(4)
+    detector.setMaxArea(300)
+    _, boxes = detector.detectRegions(gray)
+    for x, y, w, h in boxes:
+        if 3 <= h <= 22 and .12 <= w/h <= 1.5:
+            mask[y:y+h, x:x+w] = 255
+    joined = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 9), np.uint8))
+    result = np.zeros_like(gray, dtype=float)
+    contours, _ = cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w >= 15 and w/h >= 2.5 and h <= 28:
+            result[y:y+h, x:x+w] = 1
+    return result
 
 
 def save_source_still(source: Path, output: Path, timestamp: float = 0) -> Path:

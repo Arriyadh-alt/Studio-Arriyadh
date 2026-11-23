@@ -17,6 +17,28 @@ def word(text, start, end):
     return SimpleNamespace(word=text, start=start, end=end)
 
 
+@pytest.mark.parametrize('available', [True,False])
+def test_fitted_caption_font_sizes_are_reused_between_cues(monkeypatch,available):
+    from shorts_clipper.captions import fit_caption_style
+    lookup = Mock(return_value=SimpleNamespace(stdout='font.ttf'))
+    if not available:
+        lookup.side_effect = OSError('font unavailable')
+    monkeypatch.setattr('shorts_clipper.captions.subprocess.run',lookup)
+    monkeypatch.setattr('shorts_clipper.captions.ImageFont.truetype',lambda path,size: SimpleNamespace(
+        getlength=lambda text:len(text)*size/2,getmetrics=lambda:(size,0)))
+    style = CaptionStyle(font='DejaVu Sans',size=130)
+    text = 'amazing reaction hilarious moment amazing reaction hilarious moment'
+    style_font.cache_clear()
+    try:
+        fitted = fit_caption_style(Caption(0,1,text),style,120)
+        count = lookup.call_count
+        assert count > 24
+        assert fit_caption_style(Caption(1,2,text),style,120) == fitted
+        assert lookup.call_count == count
+    finally:
+        style_font.cache_clear()
+
+
 @pytest.mark.parametrize('value', [None, [], 'pop', 1])
 def test_style_invalid_container(value):
     assert CaptionStyle.from_dict(value) == CaptionStyle()

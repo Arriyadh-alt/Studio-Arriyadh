@@ -89,6 +89,8 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
         # Zoom only the main picture so the facecam overlay stays put.
         filters += (f",zoompan=z='{effects.zoom}':x='iw/2-(iw/zoom/2)+({effects.shake or 0})':"
                     f"y='ih/2-(ih/zoom/2)':d=1:s={WIDTH}x{HEIGHT}:fps=30,setsar=1")
+    if effects is not None and effects.flash:
+        filters += f",eq=brightness='{effects.flash}':eval=frame"
     if facecam is not None:
         box, rect = facecam.box, facecam.rect
         filters = (
@@ -96,12 +98,11 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
             f"[camin]crop=w='max(2,trunc(iw*{box.w:.8f}/2)*2)':"
             f"h='max(2,trunc(ih*{box.h:.8f}/2)*2)':"
             f"x='iw*{box.x:.8f}':y='ih*{box.y:.8f}',"
-            f"scale={rect.w}:{rect.h},setsar=1,"
+            f"setsar=1,scale={rect.w}:{rect.h}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            f"pad={rect.w}:{rect.h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
             f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3[cam];"
             f"[main][cam]overlay={rect.x}:{rect.y}"
         )
-    if effects is not None and effects.flash:
-        filters += f",eq=brightness='{effects.flash}':eval=frame"
     if captions is not None:
         path = str(captions.resolve())
         fonts = str(FONT_DIR.resolve())
