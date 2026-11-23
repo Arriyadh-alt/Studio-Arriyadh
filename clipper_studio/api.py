@@ -289,9 +289,9 @@ def story_context(job, clip, caption_language, work, voices):
             and (hook := ((other.get("director_result") or {}).get("edits") or {}).get("hook")) and hook.get("text")]
     requested = clip.get("language") if clip.get("language") not in (None, "auto") else None
 
-    def voice(text, language, voice="auto", category=None, delivery="auto"):
+    def voice(text, language, voice="auto", category=None, delivery="auto", **limits):
         path = work / "hook-voice.wav"
-        return path, narrate(text, language, path, voices, voice, category, clip.get("id", ""), delivery)
+        return path, narrate(text, language, path, voices, voice, category, clip.get("id", ""), delivery, **limits)
 
     return {"name": streamer_name(metadata), "game": game_name(metadata.get("title")),
             "title": metadata.get("title"), "language": hook_language(caption_language or requested, metadata.get("title")),
@@ -343,6 +343,9 @@ class Store:
             return [self.get(path.parent.name) for path in sorted(self.root.glob("*/job.json"), reverse=True)]
 
 
+COMMENTARY_SECONDS = 10.0
+
+
 def is_podcast(job):
     return (job.get("request") or {}).get("content_type") == "podcast"
 
@@ -356,7 +359,7 @@ def export_description(job, clip):
     """Upload description with source attribution and, when chosen, the original link."""
     metadata, rights = job.get("metadata") or {}, job.get("rights") or {}
     lines = [clip.get("title") or "Highlight"]
-    if (clip.get("podcast") or {}).get("version") == "commentary":
+    if ((clip.get("director_result") or {}).get("edits") or {}).get("commentary"):
         lines.append("Includes AI-generated commentary, labelled in the video; the speakers' words are unedited.")
     if rights.get("attribution", True):
         who = metadata.get("channel") or metadata.get("uploader")
@@ -525,7 +528,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                                      duration, director, hook_span,
                                                      voice=lambda text: context["voice"](text, context["language"],
                                                                                          voice=director.voice,
-                                                                                         delivery=director.delivery))
+                                                                                         delivery=director.delivery,
+                                                                                         max_seconds=COMMENTARY_SECONDS))
                             directed = cut_source(source, work / "directed.mp4", plan)
                         else:
                             plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
@@ -815,7 +819,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         "duration": probe_source(path)["duration"], "thumbnail": None, "channel": None,
                         "uploader": None}
             else:
-                info = (fetch_metadata(job["url"], False) if job["request"].get("ai_analysis", False)
+                info = (fetch_metadata(job["url"], False, require_live=False) if is_podcast(job)
+                        else fetch_metadata(job["url"], False) if job["request"].get("ai_analysis", False)
                         else fetch_metadata(job["url"]))
             with store.lock:
                 job = active_job(jid, generation)
@@ -1021,7 +1026,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     @app.post("/api/uploads", status_code=201)
     async def upload_source(request: Request):
         """Raw-body upload of an authorized source file (X-Filename header names it)."""
-        filename = Path(unquote(request.headers.get("x-filename") or "source.mp4")).name[:120]
+        if not request.headers.get("x-filename"):
+            raise HTTPException(400, "Send the file name in the X-Filename header.")
+        filename = Path(unquote(request.headers["x-filename"])).name[:120]
         suffix = Path(filename).suffix.lower()
         if suffix not in UPLOAD_SUFFIXES:
             raise HTTPException(400, "Upload an MP4, MOV, M4V, MKV or WebM video.")

@@ -60,6 +60,7 @@ def test_upload_podcast_review_render_and_rights(monkeypatch, tmp_path, video):
     app = create_app(tmp_path)
     with TestClient(app) as client:
         assert client.post("/api/uploads", content=b"x", headers={"X-Filename": "a.exe"}).status_code == 400
+        assert client.post("/api/uploads", content=b"x").status_code == 400
         assert client.post("/api/uploads", content=b"not video", headers={"X-Filename": "a.mp4"}).status_code == 400
         upload = client.post("/api/uploads", content=video.read_bytes(), headers={"X-Filename": "My Episode.mp4"}).json()
         assert upload["filename"] == "My Episode.mp4" and 29 < upload["duration"] < 31

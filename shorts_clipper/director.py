@@ -350,7 +350,10 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     while over > 0 and segments:
         last = segments[-1]
         if last.length - over >= 0.6:
-            last.end -= over
+            limit = last.end - over
+            inside = [w for w in words if last.start + 0.6 <= w.end <= limit]
+            sentences = [w.end for w in inside if w.word.strip().endswith((".", "!", "?"))]
+            last.end = max(sentences or [w.end for w in inside] or [limit])
             over = 0
         else:
             over -= last.length
@@ -464,7 +467,7 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
                 import logging
                 logging.getLogger(__name__).warning("Commentary voice-over unavailable", exc_info=True)
                 spoken = None
-        length = max(intro_length(options.commentary, seconds), min(6.0, (seconds or 0) + 0.4))
+        length = max(intro_length(options.commentary, seconds), min(10.4, (seconds or 0) + 0.4))
         intro = {"duration": round(length, 2), "voice": str(spoken) if spoken else None}
         segments.insert(0, Segment(main_start, main_start + intro["duration"], "intro"))
     over = sum(s.length for s in segments) - MAX_OUTPUT
