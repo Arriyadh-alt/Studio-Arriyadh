@@ -33,6 +33,8 @@ class DirectorOptions:
     story: bool = True
     voiceover: bool = False
     hook_text: str | None = None
+    voice: str = "auto"
+    delivery: str = "auto"
 
     @classmethod
     def from_dict(cls, value=None):
@@ -42,6 +44,11 @@ class DirectorOptions:
         for key in ("enabled", "hook", "edits", "sfx", "story", "voiceover"):
             if isinstance(value.get(key), bool):
                 setattr(result, key, value[key])
+        from .voices import DELIVERY_CHOICES, VOICE_CHOICES
+        if value.get("voice") in VOICE_CHOICES:
+            result.voice = value["voice"]
+        if value.get("delivery") in DELIVERY_CHOICES:
+            result.delivery = value["delivery"]
         if value.get("music") in MUSIC_MODES:
             result.music = value["music"]
         text = value.get("hook_text")
@@ -390,14 +397,20 @@ def _story_intro(story, options, words, arc, duration):
     text = options.hook_text or written["options"][0]
     voice = None
     seconds = None
+    spoken = {}
     if options.voiceover and story.get("voice"):
         try:
-            voice, seconds = story["voice"](text, written["language"])
+            voice, spoken = story["voice"](text, written["language"], voice=options.voice,
+                                           category=written.get("category"), delivery=options.delivery)
+            seconds = spoken["seconds"]
         except Exception:
             import logging
             logging.getLogger(__name__).warning("Hook voice-over unavailable", exc_info=True)
+            voice, spoken = None, {}
     length = intro_length(text, seconds)
-    return {**written, "duration": length, "voice": str(voice) if voice else None, "voiceover": bool(voice)}
+    narration = {key: spoken[key] for key in ("voice", "voice_name", "mood", "engine", "script") if key in spoken}
+    return {**written, "duration": length, "voice": str(voice) if voice else None, "voiceover": bool(voice),
+            **({"narration": narration} if voice else {})}
 
 
 # ---------------------------------------------------------------- captions

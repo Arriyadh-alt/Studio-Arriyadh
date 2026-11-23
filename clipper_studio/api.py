@@ -1,5 +1,6 @@
 """Local, single-process API. Run with uvicorn clipper_studio.api:app."""
 
+import hashlib
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import parse_qs, urlsplit
 
 import cv2
@@ -25,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from cv2 import error as ImageProcessingError
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
@@ -34,7 +35,8 @@ from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnai
 from shorts_clipper.director import (STORY_SIZE, DirectorOptions, cut_source, effects_for, framing_fix, hook_band,
                                      hook_title_ass, loudness, mix_audio, normalize_loudness, plan_edit, plan_record,
                                      quality_check, remap_captions)
-from shorts_clipper.story import game_name, hook_language, streamer_name, synthesize_voice
+from shorts_clipper.story import game_name, hook_language, streamer_name
+from shorts_clipper.voices import DELIVERY_CHOICES, MOODS, PERSONAS, SAMPLES, VOICE_CHOICES, narrate
 from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
                                     layout_facecam, save_source_still)
@@ -76,6 +78,18 @@ class FacecamSpec(BaseModel):
     box: FacecamBox | None = None
 
 
+def _one_of(choices, name):
+    def check(value):
+        if value not in choices:
+            raise ValueError(f"{name} must be one of {', '.join(choices)}")
+        return value
+    return AfterValidator(check)
+
+
+VoiceChoice = Annotated[str, _one_of(VOICE_CHOICES, "voice")]
+DeliveryChoice = Annotated[str, _one_of(DELIVERY_CHOICES, "delivery")]
+
+
 class DirectorSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     enabled: bool = True
@@ -86,6 +100,17 @@ class DirectorSpec(BaseModel):
     story: bool = True
     voiceover: bool = False
     hook_text: str | None = Field(default=None, max_length=64)
+    voice: VoiceChoice = "auto"
+    delivery: DeliveryChoice = "auto"
+
+
+class VoicePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    voice: VoiceChoice = "auto"
+    delivery: DeliveryChoice = "auto"
+    text: str | None = Field(default=None, max_length=64)
+    language: Literal["en", "id"] = "en"
+    category: str | None = Field(default=None, max_length=24)
 
 
 LEGACY_DIRECTOR = {**DirectorSpec().model_dump(), "enabled": False}
@@ -172,9 +197,9 @@ def story_context(job, clip, caption_language, work, voices):
             and (hook := ((other.get("director_result") or {}).get("edits") or {}).get("hook")) and hook.get("text")]
     requested = clip.get("language") if clip.get("language") not in (None, "auto") else None
 
-    def voice(text, language):
+    def voice(text, language, voice="auto", category=None, delivery="auto"):
         path = work / "hook-voice.wav"
-        return path, synthesize_voice(text, language, path, voices)
+        return path, narrate(text, language, path, voices, voice, category, clip.get("id", ""), delivery)
 
     return {"name": streamer_name(metadata), "game": game_name(metadata.get("title")),
             "title": metadata.get("title"), "language": hook_language(caption_language or requested, metadata.get("title")),
@@ -606,6 +631,35 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     app = FastAPI(title="Clipper Studio", lifespan=lifespan)
     app.state.store = store
     app.state.pending = pending
+
+    @app.get("/api/voices")
+    def list_voices():
+        return {"voices": [{"id": key, "name": p.name, "description": p.description} for key, p in PERSONAS.items()],
+                "deliveries": list(MOODS)}
+
+    @app.post("/api/voices/preview")
+    def preview_voice(request: VoicePreview):
+        text = " ".join((request.text or SAMPLES[request.language]).split())
+        key = hashlib.sha1(json.dumps([text, request.voice, request.delivery, request.language, request.category]).encode())
+        folder = store.root / "voice-previews"
+        path = folder / f"{key.hexdigest()[:20]}.wav"
+        info = path.with_suffix(".json")
+        if not (path.is_file() and info.is_file()):
+            folder.mkdir(parents=True, exist_ok=True)
+            partial = path.with_name(path.stem + f".{uuid.uuid4().hex[:6]}.wav")
+            try:
+                spoken = narrate(text, request.language, partial, store.root / "voices", request.voice,
+                                 request.category, "preview", request.delivery)
+            except Exception as error:
+                partial.unlink(missing_ok=True)
+                logger.warning("Voice preview failed", exc_info=True)
+                raise HTTPException(503, "Voice preview is unavailable right now") from error
+            partial.replace(path)
+            info.write_text(json.dumps(spoken))
+        spoken = json.loads(info.read_text())
+        return FileResponse(path, media_type="audio/wav", headers={
+            "X-Voice-Name": spoken["voice_name"], "X-Voice-Mood": spoken["mood"], "X-Voice-Engine": spoken["engine"],
+            "Cache-Control": "no-store"})
 
     @app.post("/api/jobs", status_code=202)
     def create_job(request: JobRequest):

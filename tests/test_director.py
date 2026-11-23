@@ -247,12 +247,13 @@ def test_api_story_voiceover_and_channel_for_older_jobs(monkeypatch, tmp_path, s
         lookups.append(url)
         return {"id": "x", "duration": 600, "title": "Stream", "channel": "Valkyrae", "uploader": "Valkyrae"}
 
-    def voice(text, language, output, cache):
-        assert cache == tmp_path.resolve() / "voices"
+    def voice(text, language, output, cache, voice, category, seed, delivery):
+        assert cache == tmp_path.resolve() / "voices" and (voice, delivery) == ("trailer", "suspense")
         with wave.open(str(output), "wb") as file:
             file.setnchannels(1), file.setsampwidth(2), file.setframerate(22050)
             file.writeframes(b"\0\0" * 22050 * 2)
-        return 2.0
+        return {"seconds": 2.0, "voice": voice, "voice_name": "Movie Trailer", "mood": delivery, "engine": "neural",
+                "script": "Watch closely. " + text}
 
     monkeypatch.setattr("clipper_studio.api.fetch_metadata", metadata)
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 600, "title": "Stream"}, []))
@@ -263,19 +264,22 @@ def test_api_story_voiceover_and_channel_for_older_jobs(monkeypatch, tmp_path, s
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **k: Transcript(list(captions), "en"))
     monkeypatch.setattr("clipper_studio.api.generate_thumbnail", lambda video, output, text, peak: output.write_bytes(b"jpg"))
     monkeypatch.setattr("clipper_studio.api.detect_facecam", lambda *a: None)
-    monkeypatch.setattr("clipper_studio.api.synthesize_voice", voice)
+    monkeypatch.setattr("clipper_studio.api.narrate", voice)
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
         jid = client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=LIxBN4AHMEE", "clips": 1,
-                                             "director": {"voiceover": True}}).json()["id"]
+                                             "director": {"voiceover": True, "voice": "trailer",
+                                                          "delivery": "suspense"}}).json()["id"]
         app.state.pending.join()
         job = client.get(f"/api/jobs/{jid}").json()
         clip = job["clips"][0]
         assert clip["status"] == "ready", clip.get("error")
         hook = clip["director_result"]["edits"]["hook"]
         assert hook["voiceover"] and hook["streamer"] == "Valkyrae" and "Valkyrae" in hook["text"]
+        assert hook["narration"]["voice_name"] == "Movie Trailer" and hook["narration"]["mood"] == "suspense"
         assert job["metadata"]["channel"] == "Valkyrae" and len(lookups) == 2
         assert client.post(f"/api/jobs/{jid}/clips/{clip['id']}/render",
-                           json={"start": 10, "end": 22, "director": {"voiceover": True}}).status_code == 202
+                           json={"start": 10, "end": 22, "director": {"voiceover": True, "voice": "trailer",
+                                                                     "delivery": "suspense"}}).status_code == 202
         app.state.pending.join()
         assert len(lookups) == 2

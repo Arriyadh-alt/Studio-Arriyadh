@@ -34,6 +34,9 @@
           <label class="check"><input id="director" type="checkbox" checked> AI Director edits</label>
           <label class="check"><input id="director-story" type="checkbox" checked> Storytelling hook</label>
           <label class="check"><input id="director-voiceover" type="checkbox"> AI voice-over on the hook</label>
+          <label>Voice<select id="director-voice"><option value="auto">Auto (match the scene)</option></select></label>
+          <label>Voice delivery<select id="director-delivery"><option value="auto">Auto (from the scene)</option></select></label>
+          <div class="voice-picker"><button type="button" id="create-voice-preview">▶ Preview voice</button><span id="create-voice-status" class="hint" aria-live="polite"></span></div>
           <label>Background music<select id="director-music"><option value="auto">Auto (quiet clips)</option><option value="on">Always</option><option value="off">Off</option></select></label>
         </div></details>
         <div id="create-caption-style"></div>

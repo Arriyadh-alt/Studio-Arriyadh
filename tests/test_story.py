@@ -173,7 +173,7 @@ def test_full_story_render_with_voiceover(source, tmp_path):
     with wave.open(str(voice), "wb") as wav:
         wav.setnchannels(1), wav.setsampwidth(2), wav.setframerate(22050)
         wav.writeframes((np.sin(np.arange(22050 * 2) * 0.05) * 8000).astype("<i2").tobytes())
-    context = {"name": "Ninja", "language": "en", "voice": lambda text, language: (voice, 2.0)}
+    context = {"name": "Ninja", "language": "en", "voice": lambda text, language, **k: (voice, {"seconds": 2.0})}
     plan = plan_edit(loudness(source, 20), captions(words), 20, DirectorOptions(voiceover=True), peak=12.5,
                      story=context)
     assert plan.segments[0].role == "intro" and plan.hook["voiceover"] and plan.voiceover == str(voice)
