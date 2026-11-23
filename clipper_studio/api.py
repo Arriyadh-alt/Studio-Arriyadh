@@ -546,7 +546,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         logger.warning("AI Director unavailable for %s/%s; rendering unedited", jid, cid, exc_info=True)
                 render_source = directed or source
                 render_duration = plan.duration if plan else duration
-                shown = remap_captions(captions, plan) if plan and spec["captions"] else captions if spec["captions"] else []
+                edited_captions = remap_captions(captions, plan) if plan and (spec["captions"] or director.loop) else captions
+                shown = edited_captions if spec["captions"] else []
                 text_height = None
                 caption_limit = None
                 update(jid, generation, stage=f"{clip_label} · Rendering")
@@ -684,20 +685,20 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     except Exception:
                         fixes.append("Sound effects and music skipped (audio mix failed)")
                         logger.warning("AI Director audio mix failed for %s/%s", jid, cid, exc_info=True)
+                    try:
+                        normalize_loudness(video)
+                    except Exception:
+                        logger.warning("AI Director loudness correction failed for %s/%s", jid, cid, exc_info=True)
                     if director.loop:
                         update(jid, generation, stage=f"{clip_label} · AI Director smoothing the loop")
                         looped = work / "looped.mp4"
                         try:
-                            plan.loop = make_seamless_loop(video, looped, shown)
+                            plan.loop = make_seamless_loop(video, looped, shown, speech=edited_captions)
                             if plan.loop["status"] == "applied":
                                 looped.replace(video)
                         except (OSError, ValueError, KeyError, StopIteration, subprocess.CalledProcessError):
                             plan.loop = {"status": "skipped", "reason": "Could not render loop"}
                             logger.warning("AI Director loop failed for %s/%s", jid, cid, exc_info=True)
-                    try:
-                        normalize_loudness(video)
-                    except Exception:
-                        logger.warning("AI Director loudness correction failed for %s/%s", jid, cid, exc_info=True)
                     update(jid, generation, stage=f"{clip_label} · AI Director quality check")
                     director_result = plan_record(plan, director, quality_check(video, plan, shown, fixes, layout,
                                                                                 tracking_result))

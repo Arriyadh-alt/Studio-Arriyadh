@@ -816,10 +816,47 @@ def _loop_seconds(head, tail, end, captions):
     return seconds
 
 
-def make_seamless_loop(video: Path, output: Path, captions=()) -> dict:
+def _loop_audio_bridge(video, audio, video_end, speech):
+    rate = int(audio["sample_rate"])
+    channels = int(audio["channels"])
+    length = round(float(audio["duration"]) * rate)
+    end = max(length, round(video_end * rate))
+    window = round(0.02 * rate)
+    span = 7 * window
+    if (length < 2 * span or end - length > round(0.04 * rate)
+            or abs(float(audio.get("start_time", 0))) > 1 / rate
+            or any(word.end > (end - span) / rate and word.start < end / rate for word in transcript_words(speech))):
+        return None
+
+    edges = ("[0:a:0]asplit[h][t];"
+             f"[h]atrim=end_sample={span},asetpts=N/SR/TB[head];"
+             f"[t]atrim=start_sample={end - span}:end_sample={length},asetpts=N/SR/TB[tail];"
+             "[head][tail]concat=n=2:v=0:a=1[edges]")
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-filter_complex", edges, "-map", "[edges]",
+                          "-f", "f32le", "-"], check=True, capture_output=True).stdout
+    samples = np.frombuffer(raw, dtype="<f4")
+    if samples.size != (2 * span - (end - length)) * channels:
+        return None
+    levels = np.sqrt(np.mean(np.square(np.pad(samples, (0, (end - length) * channels))
+                                      .reshape(14, window * channels)), axis=1))
+    opening, ending = np.linalg.norm(levels[:5]) / math.sqrt(5), levels[7:].max()
+    if opening < 10 ** (-24 / 20) or ending > min(10 ** (-32 / 20), opening / 4):
+        return None
+
+    # Let a short reverse swell resolve into the exact opening waveform, only over a quiet ending.
+    start = end - span
+    return (f"[0:a:0]atrim=end_sample={length},apad=whole_len={end},asplit[base][lead];"
+            f"[base]afade=t=out:ss={start}:ns={2 * window}:c=hsin[body];"
+            f"[lead]atrim=end_sample={span},areverse,asetpts=N/SR/TB,afade=ns={2 * window}:c=hsin,"
+            f"adelay={start}S:all=1[reversed];"
+            "[body][reversed]amix=inputs=2:duration=first:normalize=0[loop_audio]")
+
+
+def make_seamless_loop(video: Path, output: Path, captions=(), *, speech=None) -> dict:
     """Dissolve into the composed first frame without moving the opener, captions, or payoff."""
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-                             "stream=codec_type,nb_frames,duration,avg_frame_rate", "-of", "json", str(video)],
+                             "stream=codec_type,nb_frames,duration,avg_frame_rate,sample_rate,channels,start_time",
+                             "-of", "json", str(video)],
                             check=True, capture_output=True, text=True)
     streams = json.loads(result.stdout)["streams"]
     picture = next(s for s in streams if s["codec_type"] == "video")
@@ -836,16 +873,19 @@ def make_seamless_loop(video: Path, output: Path, captions=()) -> dict:
     weight = f"clip((N-{start + 1})/{intervals},0,1)"
     graph = ("[0:v]split[clip][head];[head]trim=end_frame=1[first];"
              f"[clip][first]blend=all_expr='A+(B-A)*{weight}':enable='gte(n,{start})'[out]")
+    audio = next((s for s in streams if s["codec_type"] == "audio"), None)
+    bridge = _loop_audio_bridge(video, audio, end, captions if speech is None else speech) if audio else None
+    if bridge:
+        graph += ";" + bridge
     command = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-filter_complex", graph, "-map", "[out]",
                "-vsync", "0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-pix_fmt", "yuv420p"]
-    audio = next((s for s in streams if s["codec_type"] == "audio"), None)
     if audio:
-        audio_end = float(audio["duration"])
-        # A de-click ramp is short enough not to cover speech or introduce an audible pause.
-        fade = min(0.008, audio_end / 2)
-        command.extend(["-map", "0:a:0", "-af", f"atrim=duration={audio_end:.6f},"
-                        f"afade=t=in:d={fade:.6f},afade=t=out:st={audio_end-fade:.6f}:d={fade:.6f}",
-                        "-c:a", "aac", "-b:a", "160k"])
+        command.extend(["-map", "[loop_audio]" if bridge else "0:a:0", "-c:a", "aac", "-b:a", "160k"])
+        if not bridge:
+            audio_end = float(audio["duration"])
+            fade = min(0.008, audio_end / 2)
+            command.extend(["-af", f"atrim=duration={audio_end:.6f},afade=t=in:d={fade:.6f},"
+                            f"afade=t=out:st={audio_end-fade:.6f}:d={fade:.6f}"])
     subprocess.run([*command, "-movflags", "+faststart", str(output)], check=True)
     return {"status": "applied", "seconds": round(intervals / fps, 3)}
 
