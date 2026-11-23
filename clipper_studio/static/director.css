@@ -17,3 +17,4 @@
 .story-options{display:flex;flex-wrap:wrap;gap:6px}
 .story-options button{font-size:.8rem;padding:4px 8px;border-radius:999px}
 .voice-picker{display:flex;flex-wrap:wrap;align-items:end;gap:8px}.voice-picker label{flex:1;min-width:140px}.voice-picker button{min-height:44px}.voice-status{flex-basis:100%;margin:0}
+.voice-audio{display:block;width:100%;height:36px;margin-top:6px}

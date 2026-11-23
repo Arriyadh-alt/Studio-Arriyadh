@@ -23,15 +23,23 @@ let voiceCatalog = {voices:[],deliveries:['excited','surprise','suspense','humor
 const deliveryLabels = {excited:'Excited',surprise:'Surprised',suspense:'Suspense',humor:'Funny',warm:'Warm'};
 const voiceOptions = selected => `<option value="auto">Auto (match the scene)</option>${voiceCatalog.voices.map(v=>`<option value="${escapeHtml(v.id)}" title="${escapeHtml(v.description)}" ${selected===v.id?'selected':''}>${escapeHtml(v.name)}</option>`).join('')}`;
 const deliveryOptions = selected => `<option value="auto">Auto (from the scene)</option>${voiceCatalog.deliveries.map(m=>`<option value="${m}" ${selected===m?'selected':''}>${deliveryLabels[m]||m}</option>`).join('')}`;
+const speechLanguage = (root, hook) => {
+  const chosen=$('[data-caption=language]',root)?.value;
+  if(chosen && chosen!=='auto') return ['id','ms','jw','su'].includes(chosen) ? 'id' : 'en';
+  return hook?.language==='id' ? 'id' : 'en';
+};
 async function previewVoice(body, button, status) {
+  const audio=new Audio();
+  audio.play().catch(()=>{}); // unlocks playback inside the tap, before the fetch (iOS Safari)
   button.disabled=true; status.textContent='Generating preview…';
   try {
     const response=await fetch('./api/voices/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!response.ok) throw new Error((await response.json().catch(()=>({}))).detail || 'Voice preview failed');
-    const audio=new Audio(URL.createObjectURL(await response.blob()));
-    status.textContent=`Playing ${response.headers.get('X-Voice-Name')} · ${deliveryLabels[response.headers.get('X-Voice-Mood')]||''}${response.headers.get('X-Voice-Engine')==='offline'?' · offline voice':''}`;
-    audio.addEventListener('ended',()=>URL.revokeObjectURL(audio.src));
-    await audio.play();
+    audio.src=URL.createObjectURL(await response.blob());
+    status.textContent=`${response.headers.get('X-Voice-Name')} · ${deliveryLabels[response.headers.get('X-Voice-Mood')]||''}${response.headers.get('X-Voice-Engine')==='offline'?' · offline voice':''}`;
+    audio.controls=true; audio.className='voice-audio';
+    status.append(audio);
+    await audio.play().catch(()=>{});
   } catch(error) { status.textContent=error.message; }
   finally { button.disabled=false; }
 }
@@ -92,7 +100,7 @@ fetch('./api/voices').then(r=>r.ok?r.json():null).then(catalog=>{
   document.querySelectorAll('.clip').forEach(node=>{node.dataset.version='';});
   if(current) drawJob(current);
 }).catch(()=>{});
-$('#create-voice-preview').addEventListener('click',event=>previewVoice({voice:$('#director-voice').value,delivery:$('#director-delivery').value},event.currentTarget,$('#create-voice-status')));
+$('#create-voice-preview').addEventListener('click',event=>previewVoice({voice:$('#director-voice').value,delivery:$('#director-delivery').value,language:speechLanguage($('#start-form'))},event.currentTarget,$('#create-voice-status')));
 const thumbnailUrl = clip => clip.thumbnail_url ? `.${clip.thumbnail_url}?v=${clip.thumbnail_version || clip.rendered_at || 0}` : '';
 
 function timestamp(value) {
@@ -367,7 +375,7 @@ $('#clips').addEventListener('click',async event=>{
     } else if(button.dataset.action==='voice-preview') {
       const clip=current.clips.find(c=>c.id===cid), hook=clip?.director_result?.edits?.hook, field=button.closest('fieldset');
       const input=$('[data-director=hook_text]',field), text=input?.value.trim() || (hook?.style==='story' ? hook.text : null);
-      await previewVoice({voice:$('[data-director=voice]',field).value,delivery:$('[data-director=delivery]',field).value,text,language:hook?.language==='id'?'id':'en',category:hook?.category||null},button,$('.voice-status',field));
+      await previewVoice({voice:$('[data-director=voice]',field).value,delivery:$('[data-director=delivery]',field).value,text,language:speechLanguage(node,hook),category:hook?.category||null},button,$('.voice-status',field));
     } else if(button.dataset.action==='facecam-reset') {
       saveDraft(node); drafts.get(cid).facecam.box=null;
       const box=$('.camera-box',node); if(box)box.hidden=true;
