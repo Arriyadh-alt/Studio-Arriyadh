@@ -173,7 +173,7 @@ and lets you download it or change its text; custom text is kept on re-render.
 
 Jobs and re-renders accept `director` (`{"enabled": true, "hook": true, "edits": true,
 "sfx": true, "music": "auto"|"on"|"off", "story": true, "voiceover": false,
-"hook_text": null}`; new jobs default to enabled, clips from older jobs stay off until
+"hook_text": null, "loop": true}`; new jobs default to enabled, clips from older jobs stay off until
 re-rendered with it). Before the final MP4 it plans the edit locally from Whisper word
 timings, audio loudness and the chat peak:
 
@@ -206,6 +206,13 @@ timings, audio loudness and the chat peak:
 - **Sound**: synthesized whoosh/hit/pop effects; a soft music bed (`auto` adds it only
   to quiet clips with little speech) ducked under the voice with a sidechain
   compressor; the mix is normalized to −14 LUFS, −1.5 dBTP.
+- **Seamless loop** (`loop`, on by default): samples the first and last frames of the
+  rendered clip, then blends the ending into the opening picture. The blend is shorter
+  over fast motion or captions. A brief audio ramp avoids clicks without moving or
+  repeating narration. The opening, clip length and edit timeline stay intact.
+  `director_result.edits.loop` records whether the transition was applied or skipped.
+  Applied clips replay automatically in the preview; the transition is also in the
+  downloaded MP4.
 - **Viral score and quality check**: `director_result` has a 0–100 `score` (hook,
   pacing, emotion, dialogue, chat), `edits` counts, `suggestions`, and `quality`
   checks (format 1080×1920 H.264/AAC ≤ 60 s, loudness, caption overlaps/flashes after

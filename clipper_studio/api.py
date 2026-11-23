@@ -32,8 +32,8 @@ from shorts_clipper.captions import FONT_DIR, CaptionStyle, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.director import (STORY_SIZE, DirectorOptions, cut_source, effects_for, framing_fix, hook_band,
-                                     hook_title_ass, loudness, mix_audio, normalize_loudness, plan_edit, plan_record,
-                                     quality_check, remap_captions)
+                                     hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
+                                     plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.story import game_name, hook_language, streamer_name, synthesize_voice
 from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
@@ -86,6 +86,7 @@ class DirectorSpec(BaseModel):
     story: bool = True
     voiceover: bool = False
     hook_text: str | None = Field(default=None, max_length=64)
+    loop: bool = True
 
 
 LEGACY_DIRECTOR = {**DirectorSpec().model_dump(), "enabled": False}
@@ -395,6 +396,16 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     except Exception:
                         fixes.append("Sound effects and music skipped (audio mix failed)")
                         logger.warning("AI Director audio mix failed for %s/%s", jid, cid, exc_info=True)
+                    if director.loop:
+                        update(jid, generation, stage=f"{clip_label} · AI Director smoothing the loop")
+                        looped = work / "looped.mp4"
+                        try:
+                            plan.loop = make_seamless_loop(video, looped, shown)
+                            if plan.loop["status"] == "applied":
+                                looped.replace(video)
+                        except (OSError, ValueError, KeyError, StopIteration, subprocess.CalledProcessError):
+                            plan.loop = {"status": "skipped", "reason": "Could not render loop"}
+                            logger.warning("AI Director loop failed for %s/%s", jid, cid, exc_info=True)
                     try:
                         normalize_loudness(video)
                     except Exception:
