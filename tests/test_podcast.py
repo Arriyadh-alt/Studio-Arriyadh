@@ -205,3 +205,11 @@ def test_regular_videos_pass_metadata_checks_for_podcasts():
     with pytest.raises(ChatReplayError):
         validate_metadata(info, require_chat=False)
     validate_metadata(info, require_chat=False, require_live=False)
+
+
+def test_silhouette_samples_every_cluster_of_long_episodes():
+    import numpy as np
+    from shorts_clipper.podcast import _silhouette
+    points = np.concatenate([np.zeros((1500, 2)), np.ones((5, 2))])
+    labels = np.array([0] * 1500 + [1] * 5)
+    assert _silhouette(points, labels) > 0.9

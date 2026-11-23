@@ -156,7 +156,8 @@ def _kmeans(points, k, iterations=25, restarts=8):
 
 def _silhouette(points, labels, limit=600):
     if len(points) > limit:
-        keep = np.linspace(0, len(points) - 1, limit).astype(int)
+        keep = np.concatenate([np.flatnonzero(labels == label)[:: max(1, (labels == label).sum() * len(set(labels)) // limit)]
+                               for label in sorted(set(labels))])
         points, labels = points[keep], labels[keep]
     distances = np.sqrt(((points[:, None] - points[None]) ** 2).sum(2))
     scores = []
@@ -165,7 +166,10 @@ def _silhouette(points, labels, limit=600):
         if same.sum() < 2:
             continue
         a = distances[i, same].sum() / (same.sum() - 1)
-        b = min(distances[i, labels == other].mean() for other in set(labels) if other != label)
+        others = [distances[i, labels == other].mean() for other in set(labels) if other != label]
+        if not others:
+            continue
+        b = min(others)
         scores.append((b - a) / max(a, b, 1e-9))
     return float(np.mean(scores)) if scores else -1.0
 
