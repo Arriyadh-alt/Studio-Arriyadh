@@ -59,7 +59,7 @@ def test_review_and_endpoints(monkeypatch, tmp_path, analysis):
         assert m["status"] == "suggested" and m["clip_id"] is None
 
 
-@pytest.mark.parametrize("source", ["ai", "chat", "empty", "both_fail"])
+@pytest.mark.parametrize("source", ["ai", "chat", "empty", "chatless_empty", "both_fail"])
 def test_source_fallbacks(monkeypatch, tmp_path, analysis, source):
     def fail_chat(*args):
         raise ChatReplayError("Chat disabled")
@@ -67,12 +67,12 @@ def test_source_fallbacks(monkeypatch, tmp_path, analysis, source):
     def fail_ai(*args, **kwargs):
         raise YouTubeAccessError("YouTube is blocking this server")
 
-    if source in ("ai", "both_fail"):
+    if source in ("ai", "chatless_empty", "both_fail"):
         monkeypatch.setattr("clipper_studio.api.fetch_chat", fail_chat)
         monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([], []))
     if source in ("chat", "both_fail"):
         monkeypatch.setattr("clipper_studio.api.download_analysis_media", fail_ai)
-    if source == "empty":
+    if source in ("empty", "chatless_empty"):
         monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([], []))
         monkeypatch.setattr("clipper_studio.api.analyze_media", lambda *a, **k: [])
     app = create_app(tmp_path)
@@ -82,7 +82,8 @@ def test_source_fallbacks(monkeypatch, tmp_path, analysis, source):
         job = client.get(f"/api/jobs/{jid}").json()
         if source == "both_fail":
             assert job["status"] == "failed" and "YouTube is blocking" in job["error"]
-        elif source == "empty":
+        elif source in ("empty", "chatless_empty"):
+            assert job["status"] == "completed"
             assert job["stage"] == "No viral moments found"
         else:
             assert job["status"] == "completed" and job["moments"][0]["sources"] == [source]

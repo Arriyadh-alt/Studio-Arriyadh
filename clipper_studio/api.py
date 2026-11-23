@@ -637,7 +637,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                            else "AI analysis was unavailable. Try this replay again.")
                 finally:
                     shutil.rmtree(directory, ignore_errors=True)
-            if not ai and not chat and (ai_error or chat_error):
+            if chat_error and (ai_error or not job["request"].get("ai_analysis", False)):
                 raise ai_error or chat_error
             moments = merge_moments(ai, chat, metadata["duration"], lead)
             with store.lock:
