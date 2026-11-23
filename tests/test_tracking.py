@@ -80,6 +80,8 @@ def test_layout_choice_and_split_geometry():
     track = T.Track(np.arange(8.0), np.full(8, .5), np.full(8, .5), np.full(8, .3), np.ones(8))
     trigger = {'trigger': 1, 'reaction': 6, 'confidence': .8}
     assert T.choose_layout(track, trigger, False, 16 / 9) == 'gameplay'
+    assert T.choose_layout(track, trigger, True, 16 / 9) == 'split'
+    track.spread[:] = .2  # wide but still fits the corner-cam crop (real Windah footage sits near here)
     assert T.choose_layout(track, trigger, True, 16 / 9) == 'gameplay'
     track.spread[:] = 0
     assert T.choose_layout(track, trigger, True, 16 / 9) == 'gameplay'
@@ -125,6 +127,9 @@ def test_split_hides_the_source_facecam_in_the_gameplay_pane(tmp_path):
     subprocess.run(command, check=True)
     corner_overlay = layout_facecam(corner, (1280, 720), 'top-right')
     command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=corner_overlay)
+    assert 'delogo' not in command[command.index('-filter_complex') + 1]
+    shared = FacecamOverlay(corner, OutputRect(0, 0, 1080, 700), hide_source=False)
+    command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=shared)
     assert 'delogo' not in command[command.index('-filter_complex') + 1]
 
 
