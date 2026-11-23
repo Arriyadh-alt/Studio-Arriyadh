@@ -50,6 +50,7 @@ class OutputRect:
 class FacecamOverlay:
     box: SourceBox
     rect: OutputRect
+    hide_source: bool = True  # split screen: paint this region out of the main picture (off when it's a shared camera)
 
 
 def _sample_frames(source, start, end):
