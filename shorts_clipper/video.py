@@ -92,9 +92,14 @@ def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
     ch = (min(h, math.ceil((box.y + box.h + margin) * h)) - y0) // 2 * 2
     if cw < 8 or ch < 8:
         return ""
-    # Replace the region with a smooth wash of its own colours: no streaks, and nothing of the face survives.
-    return (f"split[hidemain][hidecam];[hidecam]crop={cw}:{ch}:{x0}:{y0},scale=4:4:flags=area,"
-            f"scale={cw}:{ch}:flags=bicubic[hidden];[hidemain][hidden]overlay={x0}:{y0},")
+    # A cam against the side of the frame is covered by the gameplay beside it, mirrored, so it reads as more game.
+    if x0 == 0 and 2 * cw <= w:
+        fill = f"crop={cw}:{ch}:{cw}:{y0},hflip"
+    elif x0 + cw >= w - 2 and x0 >= cw:
+        fill = f"crop={cw}:{ch}:{x0 - cw}:{y0},hflip"
+    else:  # otherwise a smooth wash of its own colours: no streaks, and nothing of the face survives
+        fill = f"crop={cw}:{ch}:{x0}:{y0},scale=4:4:flags=area,scale={cw}:{ch}:flags=bicubic"
+    return f"split[hidemain][hidecam];[hidecam]{fill}[hidden];[hidemain][hidden]overlay={x0}:{y0},"
 
 
 def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None) -> list:

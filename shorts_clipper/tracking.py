@@ -219,19 +219,21 @@ def window_width(layout_height: int, aspect: float) -> float:
 
 
 def camera_path(track: Track, width: float, fixed: float | None = None, deadzone: float | None = None,
-                hold: tuple | None = None) -> list[tuple[float, float, float]]:
-    """Smooth (t, x, y) keyframes in source time. `hold` = (start, end, x) pins the camera on a trigger."""
+                hold: tuple | None = None, bounds: tuple[float, float] | None = None) -> list[tuple[float, float, float]]:
+    """Smooth (t, x, y) keyframes in source time. `hold` = (start, end, x) pins the camera on a trigger;
+    `bounds` limits the crop centre (default: anywhere the crop stays inside the frame)."""
     times = track.times
     half = width / 2
+    lo, hi = bounds or (half, 1 - half)
     if fixed is not None:
         x = np.full(len(times), float(np.clip(fixed, half, 1 - half)))
     else:
         shift = int(LOOKAHEAD * FPS)
-        target = np.clip(np.concatenate([track.x[shift:], np.repeat(track.x[-1:], shift)]), half, 1 - half)
+        target = np.clip(np.concatenate([track.x[shift:], np.repeat(track.x[-1:], shift)]), lo, hi)
         zones = np.full(len(times), width * 0.18 if deadzone is None else deadzone)
         if hold is not None:
             # Arrive on the trigger by the time it appears: start the move early enough for the speed cap.
-            pinned = float(np.clip(hold[2], half, 1 - half))
+            pinned = float(np.clip(hold[2], lo, hi))
             before = target[times < hold[0]]
             lead = 1.0 + (abs(pinned - float(before[-1])) / MAX_SPEED if len(before) else 0.0)
             inside = (times >= hold[0] - lead) & (times <= hold[1])
@@ -248,7 +250,7 @@ def camera_path(track: Track, width: float, fixed: float | None = None, deadzone
         kernel /= kernel.sum()
         pad = len(kernel) // 2
         x = np.convolve(np.pad(x, pad, mode="edge"), kernel, mode="valid")[:len(times)]
-        x = np.clip(x, half, 1 - half)
+        x = np.clip(x, lo, hi)
     y = np.clip(np.convolve(np.pad(track.y, 4, mode="edge"), np.ones(9) / 9, mode="valid")[:len(times)], 0, 1)
     return [(float(t), float(a), float(b)) for t, a, b in zip(times, x, y)]
 
@@ -256,6 +258,18 @@ def camera_path(track: Track, width: float, fixed: float | None = None, deadzone
 def _camera_at(path, t):
     times = [p[0] for p in path]
     return float(np.interp(t, times, [p[1] for p in path]))
+
+
+def avoid_source_cam(box: SourceBox | None, width: float, margin: float = 0.01) -> tuple[float, float] | None:
+    """Crop-centre range that keeps a cam flush against the left or right frame edge out of the picture."""
+    if box is None:
+        return None
+    lo, hi = width / 2, 1 - width / 2
+    if box.x <= margin:
+        lo = max(lo, box.x + box.w + margin + width / 2)
+    elif box.x + box.w >= 1 - margin:
+        hi = min(hi, box.x - margin - width / 2)
+    return (lo, hi) if lo <= hi and (lo, hi) != (width / 2, 1 - width / 2) else None
 
 
 def choose_layout(track: Track, trigger: dict | None, has_facecam: bool, aspect: float) -> str:
@@ -380,17 +394,22 @@ def plan_reframe(reaction: Reaction, clip: tuple[float, float], layouts: dict, l
             trigger = {**trigger, "target": [round(tx, 4), round(ty, 4)]}
     automatic = layout not in layouts
     first = choose_layout(track, trigger, len(layouts) > 1, footage.aspect) if automatic else layout
-    attempts = [(first, False), (first, True)]
+    # Keep the crop off the streamer's own cam first (so it never has to be painted out), then drop that if it loses the trigger.
+    attempts = [(first, False, True), (first, False, False), (first, True, True), (first, True, False)]
     if automatic and "split" in layouts and first != "split":
-        attempts.append(("split", True))
+        attempts += [("split", True, True), ("split", True, False)]
     if follow == "fixed":
         attempts = attempts[:1]
-    best = None
-    for number, (name, hold) in enumerate(attempts, 1):
+    best, tried = None, set()
+    for number, (name, hold, avoid) in enumerate(attempts, 1):
         overlay, top, height = layouts[name]
         width = window_width(height, footage.aspect)
+        bounds = avoid_source_cam(overlay.box, width) if avoid and overlay and overlay.hide_source else None
+        if (name, hold, bounds) in tried:
+            continue
+        tried.add((name, hold, bounds))
         pin = (trigger["trigger"], trigger["reaction"] + 0.5, trigger["target"][0]) if hold and trigger else None
-        path = camera_path(track, width, fixed=x if follow == "fixed" else None, hold=pin)
+        path = camera_path(track, width, fixed=x if follow == "fixed" else None, hold=pin, bounds=bounds)
         report = validate(track, path, width, trigger, clip, overlay.rect if overlay else None, top, height)
         checks = report["checks"]
         rank = (report["passed"], checks.get("trigger_visible", False), checks.get("facecam_clear", True),
@@ -402,7 +421,7 @@ def plan_reframe(reaction: Reaction, clip: tuple[float, float], layouts: dict, l
             break
     result = best[1]
     checks = result["validation"]["checks"]
-    result.update(attempts=min(number, len(attempts)), auto_layout=automatic, trigger=trigger,
+    result.update(attempts=len(tried), auto_layout=automatic, trigger=trigger,
                   needs_review=not (checks.get("trigger_visible") and checks.get("facecam_clear", True)),
                   target=[round(v, 4) for v in (track.at(trigger["event"]) if trigger else track.at(clip[0]))])
     return result

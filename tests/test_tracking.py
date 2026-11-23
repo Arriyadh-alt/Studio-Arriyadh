@@ -123,14 +123,17 @@ def test_source_facecam_is_hidden_in_the_gameplay_picture(tmp_path):
     split = FacecamOverlay(corner, OutputRect(0, 0, 1080, 700))
     command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=split)
     graph = command[command.index('-filter_complex') + 1]
-    assert '[mainin]split[hidemain][hidecam];[hidecam]crop=270:224:1010:496,' in graph
+    assert '[mainin]split[hidemain][hidecam];[hidecam]crop=270:224:740:496,hflip[hidden];[hidemain][hidden]overlay=1010:496,' in graph
     subprocess.run(command, check=True)
     corner_overlay = layout_facecam(corner, (1280, 720), 'top-right')
     command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=corner_overlay)
-    assert '[mainin]split[hidemain][hidecam];[hidecam]crop=270:224:1010:496,' in command[command.index('-filter_complex') + 1]
+    assert '[mainin]split[hidemain][hidecam];[hidecam]crop=270:224:740:496,hflip[hidden];[hidemain][hidden]overlay=1010:496,' in command[command.index('-filter_complex') + 1]
     shared = FacecamOverlay(corner, OutputRect(0, 0, 1080, 700), hide_source=False)
     command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=shared)
-    assert 'delogo' not in command[command.index('-filter_complex') + 1]
+    assert 'hidecam' not in command[command.index('-filter_complex') + 1]
+    inset = FacecamOverlay(SourceBox(.4, .4, .2, .2), OutputRect(0, 0, 1080, 700))
+    command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=inset)
+    assert 'crop=282:160:498:280,scale=4:4:flags=area,scale=282:160' in command[command.index('-filter_complex') + 1]
 
 
 def test_hold_does_not_drift_before_the_move():
@@ -160,3 +163,17 @@ def test_keyframes_never_ramp_over_zero_time_at_cuts():
 def test_target_time_uses_nearest_sample():
     footage = T.Footage(np.arange(0, 3, .25), np.zeros((12, 2, 2)))
     assert footage.index(1.26) == 5 and footage.index(1.4) == 6
+
+
+def test_crop_stays_off_an_edge_flush_source_cam():
+    left = SourceBox(0.0, 0.28, 0.156, 0.31)
+    lo, hi = T.avoid_source_cam(left, 0.316)
+    assert abs(lo - (0.166 + 0.158)) < 1e-6 and abs(hi - 0.842) < 1e-6
+    right = SourceBox(0.84, 0.0, 0.16, 0.3)
+    assert abs(T.avoid_source_cam(right, 0.316)[1] - (0.83 - 0.158)) < 1e-6
+    assert T.avoid_source_cam(SourceBox(0.4, 0.4, 0.2, 0.2), 0.316) is None
+    assert T.avoid_source_cam(SourceBox(0.0, 0.0, 0.9, 0.3), 0.316) is None
+    times = np.arange(0, 6, 1 / T.FPS)
+    track = T.Track(times, np.full(len(times), 0.05), np.full(len(times), 0.5), np.zeros(len(times)), np.ones(len(times)))
+    path = T.camera_path(track, 0.316, bounds=(lo, hi))
+    assert min(x for _, x, _ in path) >= lo - 1e-9
