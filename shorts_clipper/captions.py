@@ -249,7 +249,7 @@ def literal_text(text):
     return text.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\n", " ").replace("\r", " ")
 
 
-@lru_cache(maxsize=24)
+@lru_cache(maxsize=None)
 def style_font(font, size):
     try:
         if font in VENDORED_FONTS:
