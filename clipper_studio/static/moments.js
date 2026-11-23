@@ -16,6 +16,12 @@ globalThis.MomentReview = (() => {
   const errors = new Map();
   const source = m => m.sources.length>1?'AI + Chat':m.sources.includes('ai')?'AI Analysis':'Chat Analysis';
   const range = m => `${time(m.start)}–${time(m.end)}`;
+  const previewUrl = m => {
+    const url=new URL(job.url);
+    const id=url.hostname==='youtu.be'?url.pathname.slice(1):url.searchParams.get('v') || url.pathname.split('/').pop();
+    if(!/^[\w-]{11}$/.test(id))return null;
+    return `https://www.youtube-nocookie.com/embed/${id}?start=${Math.floor(m.start)}&end=${Math.ceil(m.end)}&autoplay=1&playsinline=1`;
+  };
   function card(m) {
     const draft=drafts.get(m.id) || {start:time(m.start),end:time(m.end)};
     const clip=job.clips.find(c=>c.id===m.clip_id);
@@ -49,7 +55,12 @@ globalThis.MomentReview = (() => {
       <p class="error moment-batch-error" role="status" hidden></p><div class="moment-grid">${[...job.moments].sort((a,b)=>a.rank-b.rank).filter(m=>matches(m,filter)).map(card).join('') || '<p class="empty">No moments in this filter.</p>'}</div>`;
     if(iframe && active) {
       const target=[...panel.querySelectorAll('[data-moment]')].find(n=>n.dataset.moment===active);
-      if(target) target.querySelector('.moment-player').append(iframe);
+      if(target) {
+        const moment=job.moments.find(m=>m.id===active);
+        const url=previewUrl(moment);
+        if(iframe.getAttribute('src')!==url)iframe.src=url;
+        target.querySelector('.moment-player').append(iframe);
+      }
       else active=null;
     }
     if(pending) panel.querySelectorAll('button').forEach(b=>b.disabled=true);
@@ -126,11 +137,10 @@ globalThis.MomentReview = (() => {
       active=close?null:m.id;
       panel.querySelectorAll('.moment-preview').forEach(b=>b.textContent='▶ Preview');
       if(close)return;
-      const url=new URL(job.url);
-      const id=url.hostname==='youtu.be'?url.pathname.slice(1):url.searchParams.get('v') || url.pathname.split('/').pop();
-      if(!/^[\w-]{11}$/.test(id)){active=null;return;}
+      const url=previewUrl(m);
+      if(!url){active=null;return;}
       const frame=document.createElement('iframe');
-      frame.src=`https://www.youtube-nocookie.com/embed/${id}?start=${Math.floor(m.start)}&end=${Math.ceil(m.end)}&autoplay=1&playsinline=1`;
+      frame.src=url;
       frame.title=`Preview: ${m.title}`;frame.allow='autoplay; encrypted-media; picture-in-picture';frame.allowFullscreen=true;
       node.querySelector('.moment-player').append(frame);button.textContent='■ Close preview';return;
     }
