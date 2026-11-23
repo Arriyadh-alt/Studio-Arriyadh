@@ -9,6 +9,7 @@ import math
 import re
 import subprocess
 from dataclasses import asdict, dataclass, field
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -33,13 +34,14 @@ class DirectorOptions:
     story: bool = True
     voiceover: bool = False
     hook_text: str | None = None
+    loop: bool = True
 
     @classmethod
     def from_dict(cls, value=None):
         if not isinstance(value, dict):
             return cls()
         result = cls()
-        for key in ("enabled", "hook", "edits", "sfx", "story", "voiceover"):
+        for key in ("enabled", "hook", "edits", "sfx", "story", "voiceover", "loop"):
             if isinstance(value.get(key), bool):
                 setattr(result, key, value[key])
         if value.get("music") in MUSIC_MODES:
@@ -84,6 +86,7 @@ class Plan:
     trimmed_start: float = 0.0
     removed: float = 0.0
     voiceover: str | None = None
+    loop: dict | None = None
 
     @property
     def duration(self):
@@ -108,7 +111,7 @@ class Plan:
                 "zooms": len(self.zooms), "transitions": len(self.flashes),
                 "sound_effects": len(self.sfx), "music": self.music,
                 "reframes": len({round(f, 2) for f in self.focal}) if self.focal else 0,
-                "duration": round(self.duration, 2),
+                "duration": round(self.duration, 2), "loop": self.loop,
                 "timeline": [[round(s.start, 3), round(s.end, 3), round(o, 3)]
                              for o, s in zip(self.offsets(), self.segments) if s.role == "main"]}
 
@@ -602,6 +605,64 @@ def mix_command(video: Path, output: Path, plan: Plan) -> list:
 def mix_audio(video: Path, output: Path, plan: Plan) -> Path:
     subprocess.run(mix_command(video, output, plan), check=True)
     return output
+
+
+_LOOP_SAMPLE_SIZE = (54, 96)
+
+
+def _loop_frames(video, seek=0.0, limit=None):
+    width, height = _LOOP_SAMPLE_SIZE
+    command = ["ffmpeg", "-v", "error", "-ss", f"{seek:.6f}", "-i", str(video), "-map", "0:v:0",
+               "-vf", f"scale={width}:{height}:flags=area,format=rgb24", "-vsync", "0"]
+    if limit is not None:
+        command.extend(["-frames:v", str(limit)])
+    raw = subprocess.run([*command, "-f", "rawvideo", "-"], check=True, capture_output=True).stdout
+    return np.frombuffer(raw, dtype=np.uint8).reshape(-1, height, width, 3).astype(np.float32) / 255
+
+
+def _loop_seconds(head, tail, end, captions):
+    gap = np.abs(head[0] - tail[-1]).mean()
+    motion = max(np.abs(np.diff(frames, axis=0)).mean() if len(frames) > 1 else 0
+                 for frames in (head[:4], tail[-4:]))
+    seconds = 0.30 if gap >= 0.16 else 0.20 if gap >= 0.06 else 0.12
+    # Keep fast action and the last caption legible instead of prolonging a double image.
+    if motion >= 0.06 or any(c.end > end - seconds and c.start < end for c in captions):
+        seconds = min(seconds, 0.12)
+    return seconds
+
+
+def make_seamless_loop(video: Path, output: Path, captions=()) -> dict:
+    """Dissolve into the composed first frame without moving the opener, captions, or payoff."""
+    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                             "stream=codec_type,nb_frames,duration,avg_frame_rate", "-of", "json", str(video)],
+                            check=True, capture_output=True, text=True)
+    streams = json.loads(result.stdout)["streams"]
+    picture = next(s for s in streams if s["codec_type"] == "video")
+    count, end = int(picture["nb_frames"]), float(picture["duration"])
+    fps = float(Fraction(picture["avg_frame_rate"]))
+    if end < 0.6 or count < 4:
+        return {"status": "skipped", "reason": "Clip too short"}
+    head, tail = _loop_frames(video, limit=4), _loop_frames(video, seek=end - 0.4)
+    if not len(head) or not len(tail):
+        return {"status": "skipped", "reason": "Could not sample clip boundaries"}
+    intervals = max(2, round(_loop_seconds(head, tail, end, captions) * fps))
+    start = count - 1 - intervals
+    # blend's N is one-based; enable's n is zero-based. Hold the single reference frame to EOF.
+    weight = f"clip((N-{start + 1})/{intervals},0,1)"
+    graph = ("[0:v]split[clip][head];[head]trim=end_frame=1[first];"
+             f"[clip][first]blend=all_expr='A+(B-A)*{weight}':enable='gte(n,{start})'[out]")
+    command = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-filter_complex", graph, "-map", "[out]",
+               "-vsync", "0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-pix_fmt", "yuv420p"]
+    audio = next((s for s in streams if s["codec_type"] == "audio"), None)
+    if audio:
+        audio_end = min(end, float(audio["duration"]))
+        # A de-click ramp is short enough not to cover speech or introduce an audible pause.
+        fade = min(0.008, audio_end / 2)
+        command.extend(["-map", "0:a:0", "-af", f"atrim=duration={audio_end:.6f},"
+                        f"afade=t=in:d={fade:.6f},afade=t=out:st={audio_end-fade:.6f}:d={fade:.6f}",
+                        "-c:a", "aac", "-b:a", "160k"])
+    subprocess.run([*command, "-movflags", "+faststart", str(output)], check=True)
+    return {"status": "applied", "seconds": round(intervals / fps, 3)}
 
 
 PEAK_LIMIT = 10 ** (-1.5 / 20)

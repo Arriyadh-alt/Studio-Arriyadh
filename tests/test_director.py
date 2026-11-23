@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 
 from shorts_clipper.captions import Caption, CaptionStyle, to_ass
-from shorts_clipper.director import (DirectorOptions, Plan, Segment, cut_source, effects_for, framing_conflicts, framing_fix,
-                                     hook_band, hook_title_ass, normalize_loudness, measure, loudness, mix_audio, mix_command, plan_edit, plan_record, quality_check,
-                                     remap_captions)
+from shorts_clipper.director import (DirectorOptions, Plan, Segment, _loop_seconds, cut_source, effects_for,
+                                     framing_conflicts, framing_fix, hook_band, hook_title_ass, loudness,
+                                     make_seamless_loop, measure, mix_audio, mix_command, normalize_loudness,
+                                     plan_edit, plan_record, probe, quality_check, remap_captions)
 from shorts_clipper.facecam import OutputRect
 from shorts_clipper.video import build_ffmpeg_command, make_vertical_clip
 
@@ -37,6 +38,8 @@ def levels(duration, quiet=(), loud=()):
 def test_options_ignore_bad_values():
     assert DirectorOptions.from_dict({"enabled": "yes", "music": "loud", "sfx": False}) == DirectorOptions(sfx=False)
     assert DirectorOptions.from_dict(None).enabled
+    assert DirectorOptions.from_dict(None).loop
+    assert not DirectorOptions.from_dict({"loop": False}).loop
 
 
 def test_plan_hooks_the_peak_cuts_dead_air_and_keeps_order():
@@ -152,6 +155,53 @@ def test_full_director_render(source, tmp_path):
     json.dumps(plan_record(plan, DirectorOptions(), quality_check(video, plan, shown)))
 
 
+def test_loop_transition_adapts_to_boundaries_and_captions():
+    head = np.zeros((4, 2, 2, 3))
+    tail = np.full_like(head, 0.8)
+    assert _loop_seconds(head, tail, 10, []) == 0.30
+    assert _loop_seconds(head, tail, 10, [Caption(9.5, 9.95, "Final line")]) == 0.12
+    tail[-2] = 0
+    assert _loop_seconds(head, tail, 10, []) == 0.12
+    assert _loop_seconds(head, head, 10, []) == 0.12
+
+
+def test_loop_export_matches_first_and_last_frames_without_cutting_audio(tmp_path):
+    original, looped = tmp_path / "original.mp4", tmp_path / "looped.mp4"
+    subprocess.run(["ffmpeg", "-v", "error",
+                    "-f", "lavfi", "-i", "color=c=blue:s=160x284:r=30:d=1",
+                    "-f", "lavfi", "-i", "color=c=red:s=160x284:r=30:d=1",
+                    "-f", "lavfi", "-i", "sine=f=407:d=2:r=48000",
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+                    "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-r", "30",
+                    "-c:a", "aac", str(original)], check=True)
+
+    assert make_seamless_loop(original, looped) == {"status": "applied", "seconds": 0.3}
+    assert probe(looped) == probe(original)
+
+    def colors(video):
+        raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(video), "-vf", "scale=2:2:flags=area",
+                                       "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+        return np.frombuffer(raw, dtype=np.uint8).reshape(-1, 4, 3).mean(axis=1)
+
+    before, after = colors(original), colors(looped)
+    assert before.shape == after.shape == (60, 3)
+    assert np.max(np.abs(before[:51] - after[:51])) < 5
+    assert np.max(np.abs(before[0] - before[-1])) > 240
+    assert np.max(np.abs(after[0] - after[-1])) < 5
+    assert np.all(np.diff(after[50:, 2]) > 0)
+
+    def samples(video):
+        raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(video), "-map", "0:a", "-t", "2",
+                                       "-f", "f32le", "-"])
+        return np.frombuffer(raw, dtype=np.float32)
+
+    before, after = samples(original), samples(looped)
+    assert len(before) == len(after) == 96_000
+    assert np.corrcoef(before[1000:-1000], after[1000:-1000])[0, 1] > 0.99
+    assert np.max(np.abs(after[:100])) < 0.04
+    assert np.max(np.abs(after[-100:])) < 0.04
+
+
 def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_path, source):
     import shutil
     from fastapi.testclient import TestClient
@@ -176,8 +226,15 @@ def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_p
         assert clip["status"] == "ready", clip.get("error")
         result = clip["director_result"]
         assert result["status"] == "used" and result["edits"]["hook"] and result["edits"]["music"]
+        assert clip["director"]["loop"] and result["edits"]["loop"]["status"] == "applied"
         assert {q["check"] for q in result["quality"]} >= {"Format", "Audio balance", "Subtitle timing", "Framing"}
         assert clip["director"]["music"] == "on"
+        assert client.post(f"/api/jobs/{jid}/clips/{clip['id']}/render",
+                           json={"start": 10, "end": 22, "director": {"loop": False}}).status_code == 202
+        app.state.pending.join()
+        clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
+        assert clip["status"] == "ready" and clip["director_result"]["status"] == "used"
+        assert not clip["director"]["loop"] and clip["director_result"]["edits"]["loop"] is None
         assert client.post(f"/api/jobs/{jid}/clips/{clip['id']}/render",
                            json={"start": 10, "end": 22, "director": {"enabled": False}}).status_code == 202
         app.state.pending.join()
