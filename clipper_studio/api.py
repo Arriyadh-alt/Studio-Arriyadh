@@ -619,7 +619,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 directory = store.root / jid / "analysis"
                 try:
                     update(jid, generation, stage="Downloading stream audio for AI analysis")
-                    audio, video = download_analysis_media(job["url"], directory)
+
+                    def should_continue():
+                        with store.lock:
+                            active_job(jid, generation)
+
+                    audio, video = download_analysis_media(job["url"], directory, should_continue=should_continue)
                     update(jid, generation, stage="AI analyzing video, audio & speech")
                     language = job["request"].get("language")
 

@@ -17,7 +17,9 @@ def analysis(monkeypatch):
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 600}, []))
     monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([proposal(4)], []))
 
-    def download(url, directory):
+    def download(url, directory, should_continue=None):
+        if should_continue:
+            should_continue()
         directory.mkdir()
         path = directory / "audio.wav"
         path.touch()

@@ -125,3 +125,36 @@ def test_analysis_limits(monkeypatch, tmp_path, limit):
     monkeypatch.setattr("shorts_clipper.downloader.yt_dlp.YoutubeDL", Downloader)
     with pytest.raises(YouTubeAccessError, match="1 hours|100-byte"):
         download_analysis_media("url", tmp_path)
+
+
+def test_analysis_cancellation_stops_before_video(monkeypatch, tmp_path):
+    from clipper_studio.api import WorkCancelled
+
+    downloads = []
+
+    class Downloader:
+        def __init__(self, options):
+            downloads.append(options["format"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def extract_info(self, *args, **kwargs):
+            return {"duration": 600}
+
+        def process_ie_result(self, *args, **kwargs):
+            path = tmp_path / "audio.m4a"
+            path.touch()
+            return {"requested_downloads": [{"filepath": str(path)}]}
+
+    def should_continue():
+        if downloads:
+            raise WorkCancelled
+
+    monkeypatch.setattr("shorts_clipper.downloader.yt_dlp.YoutubeDL", Downloader)
+    with pytest.raises(WorkCancelled):
+        download_analysis_media("url", tmp_path, should_continue=should_continue)
+    assert downloads == ["ba[abr<=80]/ba/wa"]

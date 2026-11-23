@@ -11,7 +11,7 @@ from .youtube import YouTubeAccessError, blocking_message, cookie_options
 
 
 def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = None,
-                            proxy: str | None = None) -> tuple[Path, Path | None]:
+                            proxy: str | None = None, should_continue=None) -> tuple[Path, Path | None]:
     """Download full-length compact audio and optional low-resolution video."""
     max_bytes = int(os.environ.get("CLIPPER_ANALYSIS_MAX_BYTES", "1500000000"))
     max_hours = float(os.environ.get("CLIPPER_ANALYSIS_MAX_HOURS", "12"))
@@ -31,6 +31,8 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
     with cookie_options(cookies, proxy=proxy) as authentication:
         for kind, selector in (("audio", "ba[abr<=80]/ba/wa"),
                                ("video", "bv[height<=160]/wv")):
+            if should_continue is not None:
+                should_continue()
             options = {"format": selector, "outtmpl": str(output_dir / f"%(id)s_analysis_{kind}.%(ext)s"),
                        "noplaylist": True, "quiet": True, "no_warnings": True, "noprogress": True,
                        "max_filesize": max_bytes, "progress_hooks": [check_size]}
