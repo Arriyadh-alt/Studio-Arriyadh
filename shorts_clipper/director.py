@@ -434,24 +434,29 @@ def _bands_overlap(a, b, gap=0):
     return a[0] < b[1] + gap and a[1] + gap > b[0]
 
 
-def reserve_facecam_space(overlay, hook=None):
-    """Leave a story-title band above an explicitly bottom-anchored camera."""
-    if overlay is None or overlay.rect.y == 24 or not hook or hook.get("style") != "story":
+def reserve_facecam_space(overlay, hook=None, caption_height=None):
+    """Fit the camera clear of the rendered text while retaining its corner anchor."""
+    if overlay is None:
         return overlay
     r = overlay.rect
-    limit = max(2, int(BOTTOM_SAFE_EDGE-100-hook_height(hook["text"], STORY_SIZE))//2*2)
+    limit = r.h
+    if r.y != 24 and hook and hook.get("style") == "story":
+        limit = min(limit, BOTTOM_SAFE_EDGE-100-hook_height(hook["text"], STORY_SIZE))
+    if caption_height:
+        limit = min(limit, 1500-caption_height-48 if r.y == 24 else BOTTOM_SAFE_EDGE-260-caption_height-24)
+    limit = max(2, int(limit)//2*2)
     if r.h <= limit:
         return overlay
     w = max(2, round(r.w*limit/r.h/2)*2)
     x = 24 if r.x == 24 else r.x+r.w-w
-    return FacecamOverlay(overlay.box, OutputRect(x, BOTTOM_SAFE_EDGE-limit, w, limit))
+    return FacecamOverlay(overlay.box, OutputRect(x, 24 if r.y == 24 else BOTTOM_SAFE_EDGE-limit, w, limit))
 
 
-def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE):
+def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE, caption_height=None):
     """Vertical band for the hook banner clear of the facecam and the captions."""
     height = hook_height(text, size)
     blocked = ([(rect.y, rect.y + rect.h)] if rect is not None else []) + \
-              ([caption_band(style, getattr(style, "size", 80))] if style is not None else [])
+              ([caption_band(style, getattr(style, "size", 80), caption_height)] if style is not None else [])
     candidates = [preferred, 960 - height / 2] + [b[1] + 40 for b in blocked] + [b[0] - 40 - height for b in blocked]
     clear = [top for top in candidates if 60 <= top and top + height <= 1860
              and not any(_bands_overlap((top, top + height), b, 20) for b in blocked)]
@@ -647,9 +652,9 @@ def normalize_loudness(video: Path, tolerance=0.5, attempts=3):
 
 # ---------------------------------------------------------------- quality check
 
-def caption_band(style, size=80):
+def caption_band(style, size=80, height=None):
     position = getattr(style, "position", "bottom")
-    height = size * 2.6
+    height = size * 2.6 if height is None else height
     if position == "top":
         return 260, 260 + height
     if position == "middle":
@@ -657,26 +662,26 @@ def caption_band(style, size=80):
     return 1920 - 420 - height, 1920 - 420
 
 
-def framing_fix(style, rect):
+def framing_fix(style, rect, height=None):
     """Move captions off the facecam; returns (style, note or None)."""
     if rect is None or style is None:
         return style, None
-    top, bottom = caption_band(style, getattr(style, "size", 80))
+    top, bottom = caption_band(style, getattr(style, "size", 80), height)
     if rect.y < bottom and rect.y + rect.h > top:
         preferred = ["middle", "bottom", "top"] if rect.y < 960 else ["middle", "top", "bottom"]
         for new in preferred:
             candidate = type(style).from_dict({**vars(style), "position": new})
-            top, bottom = caption_band(candidate, getattr(style, "size", 80))
+            top, bottom = caption_band(candidate, getattr(style, "size", 80), height)
             if rect.y >= bottom or rect.y + rect.h <= top:
                 style.position = new
                 return style, f"Moved captions to {new} so they don't cover the facecam"
     return style, None
 
 
-def framing_conflicts(rect=None, style=None, hook=None, hook_captions_overlap=True) -> list:
+def framing_conflicts(rect=None, style=None, hook=None, hook_captions_overlap=True, caption_height=None) -> list:
     """Overlaps between the facecam, the caption band and the hook banner in the rendered layout."""
     facecam = (rect.y, rect.y + rect.h) if rect is not None else None
-    captions = caption_band(style, getattr(style, "size", 80)) if style is not None else None
+    captions = caption_band(style, getattr(style, "size", 80), caption_height) if style is not None else None
     pairs = (("Hook title covers the facecam", hook, facecam), ("Captions cover the facecam", captions, facecam),
              ("Hook title covers the captions", hook, captions))
     return [label for label, a, b in pairs if a and b and _bands_overlap(a, b)

@@ -285,6 +285,25 @@ def styled_lines(text, style):
     return lines
 
 
+def caption_height(captions, style):
+    if not captions:
+        return 0
+    size = 76 if style.preset == "classic" and style.size == 80 else style.size
+    if style.preset == "minimal":
+        size = round(size*.8)
+    effective = CaptionStyle(**{**vars(style), "size": size})
+    font = style_font(effective.font, size)
+    line_height = sum(font.getmetrics()) if font else size*1.3
+    heights = []
+    for caption in captions:
+        text = literal_text(caption.text)
+        if style.uppercase:
+            text = text.upper()
+        lines = wrap_caption(text) if style == CaptionStyle(preset="classic") else styled_lines(text, effective)
+        heights.append(len(lines)*line_height*(1.15 if style.preset == "pop" else 1)+12)
+    return math.ceil(max(heights))
+
+
 def to_ass(captions: list[Caption], style: CaptionStyle | dict | None = None) -> str:
     # Preserve the historical serializer for callers supplying only static chunks.
     if style is None and not any(c.words for c in captions):

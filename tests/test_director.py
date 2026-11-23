@@ -146,6 +146,67 @@ def test_story_reserve_leaves_other_layouts_unchanged():
     assert reserve_facecam_space(overlay,None) is overlay
 
 
+def test_wrapped_captions_stay_above_tall_bottom_camera():
+    from shorts_clipper.captions import styled_lines, caption_height
+    from shorts_clipper.director import caption_band, reserve_facecam_space
+    from shorts_clipper.facecam import SourceBox, layout_facecam
+    overlay = layout_facecam(SourceBox(.1,.1,.1,.8),(1920,1080),'bottom-right')
+    style = CaptionStyle(size=130)
+    caption = Caption(0,1,'amazing reaction hilarious moment')
+    height = caption_height([caption],style)
+    overlay = reserve_facecam_space(overlay,caption_height=height)
+    style, _ = framing_fix(style,overlay.rect,height)
+    lines = styled_lines(caption.text,style)
+    assert len(lines) >= 4
+    assert caption_band(style,height=height)[1] <= overlay.rect.y
+    assert 260+len(lines)*style.size*1.3 <= overlay.rect.y
+    assert not framing_conflicts(overlay.rect,style,caption_height=height)
+
+
+@pytest.mark.parametrize('story', [False,True])
+def test_rendered_text_leaves_tall_bottom_camera_visible(tmp_path, story):
+    import shutil
+    import cv2
+    from shorts_clipper.captions import FONT_DIR, caption_height
+    from shorts_clipper.director import STORY_SIZE, reserve_facecam_space
+    from shorts_clipper.facecam import SourceBox, layout_facecam
+    if shutil.which('ffmpeg') is None:
+        pytest.skip('ffmpeg required')
+    style = CaptionStyle(size=130)
+    captions = [Caption(2,3,'amazing reaction hilarious moment')]
+    hook = {'style':'story','text':'Windah takes one wrong turn and instantly regrets it'} if story else None
+    height = caption_height(captions,style)
+    overlay = reserve_facecam_space(layout_facecam(SourceBox(.1,.1,.1,.8),(1920,1080),'bottom-right'),hook,height)
+    style, _ = framing_fix(style,overlay.rect,height)
+    ass = to_ass(captions,style)
+    if hook:
+        band = hook_band(hook['text'],overlay.rect,None,preferred=760,size=STORY_SIZE)
+        ass = hook_title_ass(ass,hook['text'],2,top=band[0],story=True)
+    subtitles = tmp_path/'text.ass'
+    subtitles.write_text(ass)
+    r = overlay.rect
+    for time in ([1,2.5] if story else [2.5]):
+        output = tmp_path/f'frame-{time}.png'
+        graph = (f"drawbox=x={r.x}:y={r.y}:w={r.w}:h={r.h}:color=red:t=fill,"
+                 f"ass=filename={subtitles}:fontsdir={FONT_DIR}")
+        subprocess.run(['ffmpeg','-y','-v','error','-f','lavfi','-i','color=blue:s=1080x1920:r=2:d=3',
+                        '-vf',graph,'-ss',str(time),'-frames:v','1',str(output)],check=True)
+        frame = cv2.imread(str(output))
+        camera = frame[r.y+4:r.y+r.h-4,r.x+4:r.x+r.w-4]
+        assert np.mean(camera[:,:,2]) > 245
+        assert np.max(camera[:,:,:2]) < 25
+
+
+def test_caption_height_handles_empty_minimal_and_font_fallback(monkeypatch):
+    from shorts_clipper.captions import caption_height
+    assert caption_height([],CaptionStyle()) == 0
+    captions = [Caption(0,1,'amazing reaction hilarious moment')]
+    assert caption_height(captions,CaptionStyle(size=130)) > caption_height(captions,CaptionStyle(size=80))
+    assert caption_height(captions,CaptionStyle(preset='minimal')) < caption_height(captions,CaptionStyle())
+    monkeypatch.setattr('shorts_clipper.captions.style_font',lambda *a: None)
+    assert caption_height(captions,CaptionStyle()) > 0
+
+
 def test_framing_check_flags_overlaps():
     facecam = OutputRect(414, 24, 450, 520)
     assert framing_conflicts(facecam, CaptionStyle(), (380, 530)) == ["Hook title covers the facecam"]
