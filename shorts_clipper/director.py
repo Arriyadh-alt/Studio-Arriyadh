@@ -23,6 +23,7 @@ TARGET_LUFS = -14.0
 MUSIC_MODES = ("auto", "on", "off")
 PRESETS = ("gaming", "podcast")
 COMMENTARY_LABEL = "AI commentary"
+SENTENCE_END = re.compile(r"[.?!…][\'\"”’)\]]*$")
 # Gentle voice cleanup for spoken-word clips: rumble cut, light denoise, soft levelling.
 VOICE_CLARITY = "highpass=f=75,afftdn=nf=-28,acompressor=threshold=0.125:ratio=2.5:attack=15:release=250:makeup=1.5"
 EXCITED = re.compile(r"(!|\?{2,}|\b(?:wow|what|no+|yes+|omg|lol|lmao|haha+|wkwk+|anjir|anjay|gila|astaga|bro|holy|insane|crazy)\b)", re.I)
@@ -473,7 +474,7 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
         if last.length - over >= 0.6:
             limit = last.end - over
             inside = [w for w in words if max(last.start + 0.6, limit - 8.0) <= w.end <= limit]
-            sentences = [w.end for w in inside if w.word.strip().endswith((".", "!", "?"))]
+            sentences = [w.end for w in inside if SENTENCE_END.search(w.word.strip())]
             last.end = max(sentences or [w.end for w in inside] or [limit])
             over = 0
         else:
