@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import cv2
 
@@ -1021,7 +1021,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     @app.post("/api/uploads", status_code=201)
     async def upload_source(request: Request):
         """Raw-body upload of an authorized source file (X-Filename header names it)."""
-        filename = Path(request.headers.get("x-filename") or "source.mp4").name[:120]
+        filename = Path(unquote(request.headers.get("x-filename") or "source.mp4")).name[:120]
         suffix = Path(filename).suffix.lower()
         if suffix not in UPLOAD_SUFFIXES:
             raise HTTPException(400, "Upload an MP4, MOV, M4V, MKV or WebM video.")

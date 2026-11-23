@@ -14,8 +14,10 @@
   <link rel="stylesheet" href="./director.css">
   <link rel="stylesheet" href="./tracking.css">
   <link rel="stylesheet" href="./moments.css">
+  <link rel="stylesheet" href="./podcast.css">
   <script src="./captions.js" defer></script>
   <script src="./tracking.js" defer></script>
+  <script src="./podcast.js" defer></script>
   <script src="./app.js" defer></script>
   <script src="./moments.js" defer></script>
 </head>
@@ -25,28 +27,39 @@
     <div id="notice" role="alert" hidden></div>
     <p id="poll-notice" class="error" role="status" hidden></p>
     <section id="home">
-      <div class="hero"><span class="eyebrow">Your chat knows the best moments</span><h1>Long stream.<br><span>Shortlist of highlights.</span></h1><p>Paste a livestream replay. Autopilot finds the chat spikes<br class="desktop"> and turns the reaction into ready-to-review vertical clips.</p></div>
+      <div class="hero"><span class="eyebrow">Your chat knows the best moments</span><h1>Long stream.<br><span>Shortlist of highlights.</span></h1><p>Paste a livestream replay or a podcast. Autopilot finds the chat spikes or the strongest<br class="desktop"> complete conversations and turns them into ready-to-review vertical clips.</p></div>
       <form id="start-form" class="panel start-panel">
-        <label for="url">Paste YouTube livestream URL</label>
-        <div class="url-row"><input id="url" type="url" placeholder="https://www.youtube.com/watch?v=…" required autocomplete="url"><button class="primary" id="start-button" type="submit">Start Autopilot <span aria-hidden="true">↗</span></button></div>
+        <fieldset class="content-type"><legend>What are you clipping?</legend>
+          <label class="type-option"><input type="radio" name="content-type" value="gaming" checked><span><strong>Gaming / Livestream Clipper</strong><small>Chat spikes, reactions, facecam overlay</small></span></label>
+          <label class="type-option"><input type="radio" name="content-type" value="podcast"><span><strong>Podcast / Interview Clipper</strong><small>Speakers, topics, complete questions &amp; answers</small></span></label>
+        </fieldset>
+        <label for="url" id="url-label">Paste YouTube livestream URL</label>
+        <div class="url-row"><input id="url" type="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="url"><button class="primary" id="start-button" type="submit">Start Autopilot <span aria-hidden="true">↗</span></button></div>
+        <label class="upload-row">Or upload a video you’re authorized to use<input id="upload" type="file" accept=".mp4,.mov,.m4v,.mkv,.webm,video/*"></label>
+        <p id="upload-status" class="hint" role="status" hidden></p>
+        <div id="podcast-options" class="podcast-options" hidden>
+          <label>Speakers<select id="podcast-speakers"><option value="auto">Detect automatically</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+          <label>Speaker framing<select id="podcast-layout"><option value="auto">Auto (best for the conversation)</option><option value="speaker">Single speaker focus</option><option value="split">Two-person split screen</option><option value="switch">Dynamic speaker switching</option><option value="wide">Full conversation view</option></select></label>
+          <label>Editing version<select id="podcast-version"><option value="original">A · Original podcast highlight</option><option value="commentary">B · AI-enhanced commentary</option></select></label>
+        </div>
         <details><summary>Options <span>Fine-tune your highlights</span></summary><div class="options">
           <label>Number of clips<input id="clip-count" type="number" min="1" max="50" value="8" required></label>
-          <label>Lead-in <output id="lead-value">18 seconds</output><input id="lead" type="range" min="15" max="20" value="18"></label>
+          <label data-gaming-only>Lead-in <output id="lead-value">18 seconds</output><input id="lead" type="range" min="15" max="20" value="18"></label>
           <label>Layout<select id="mode"><option value="crop">Center crop</option><option value="blur">Blurred background</option></select></label>
           <label class="check"><input id="captions" type="checkbox" checked> Burn in captions</label>
-          <label class="check"><input id="facecam" type="checkbox" checked> Facecam overlay</label>
+          <label class="check" data-gaming-only><input id="facecam" type="checkbox" checked> Facecam overlay</label>
           <label class="check"><input id="director" type="checkbox" checked> AI Director edits</label>
-          <label class="check"><input id="director-story" type="checkbox" checked> Storytelling hook</label>
+          <label class="check" data-gaming-only><input id="director-story" type="checkbox" checked> Storytelling hook</label>
           <label class="check"><input id="director-loop" type="checkbox" checked> Seamless loop</label>
-          <label class="check"><input id="director-voiceover" type="checkbox" checked> AI voice-over on the hook</label>
+          <label class="check" data-gaming-only><input id="director-voiceover" type="checkbox" checked> AI voice-over on the hook</label>
           <label>Voice<select id="director-voice"><option value="auto">Auto (match the scene)</option></select></label>
           <label>Voice delivery<select id="director-delivery"><option value="auto">Auto (from the scene)</option></select></label>
           <div class="voice-picker"><button type="button" id="create-voice-preview">▶ Preview voice</button><span id="create-voice-status" class="hint" aria-live="polite"></span></div>
           <label>Background music<select id="director-music"><option value="auto">Auto (quiet clips)</option><option value="on">Always</option><option value="off">Off</option></select></label>
         </div></details>
         <div id="create-caption-style"></div>
-        <div class="analysis-options"><label class="check"><input id="ai-analysis" type="checkbox" checked> AI video &amp; audio analysis</label><label class="check"><input id="review-moments" type="checkbox" checked> Review moments before rendering</label></div>
-        <p class="hint">✦ AI + chat detection <span>·</span> AI Director <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
+        <div class="analysis-options"><label class="check" data-gaming-only><input id="ai-analysis" type="checkbox" checked> AI video &amp; audio analysis</label><label class="check"><input id="review-moments" type="checkbox" checked> Review moments before rendering</label></div>
+        <p class="hint">✦ AI + chat or conversation detection <span>·</span> AI Director <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
       </form>
       <div class="section-heading"><div><span class="eyebrow">Your workspace</span><h2>Recent streams</h2></div><button id="refresh-jobs" class="quiet">Refresh ↻</button></div>
       <div id="jobs" class="jobs"></div>
@@ -55,6 +68,7 @@
       <a class="back" href="#">← All streams</a>
       <div id="job-heading"></div>
       <div class="panel progress-panel"><div class="status-row"><strong id="stage" aria-live="polite"></strong><span id="progress-label"></span></div><progress id="progress" max="1" value="0"></progress><p id="analysis-detail" class="hint" role="status" hidden></p><button id="cancel-job" class="quiet" hidden>Cancel job</button><p id="cancel-hint" class="hint" hidden>Stops further clips. An in-flight download or render may finish before stopping.</p><div id="job-error" class="error" hidden></div></div>
+      <div id="rights-panel" hidden></div>
       <section class="panel activity-panel"><div class="section-heading"><div><span class="eyebrow">The pulse of your stream</span><h2>Chat activity</h2></div><span class="hint">Tap a spike to review ↓</span></div><div id="chart"></div></section>
       <section id="moments-panel" hidden aria-label="Detected moments"></section>
       <div class="section-heading clips-heading"><div><span class="eyebrow">Made for the moment</span><h2 id="clips-title">Your highlights</h2></div><div class="heading-actions"><a id="download-kept" class="button" hidden>Download kept clips ↓</a><button id="delete-unkept" class="quiet" hidden>Delete unkept</button></div></div>

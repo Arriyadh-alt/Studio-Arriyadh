@@ -9,7 +9,7 @@ const keeping = new Map();
 let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
-const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.director,clip.director_result,clip.tracking,clip.tracking_result,clip.tracking_still_url,clip.needs_review])}`;
+const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([current?.rights?.confirmed,clip.podcast,clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.director,clip.director_result,clip.tracking,clip.tracking_result,clip.tracking_still_url,clip.needs_review])}`;
 const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:null,...value});
 const renderedOffset = (clip, offset) => {
   const timeline=clip.director_result?.edits?.timeline;
@@ -138,6 +138,7 @@ function date(job) {
 }
 function jobTitle(job) {
   if (job.metadata?.title) return job.metadata.title;
+  if (job.filename) return job.filename;
   try {
     const url = new URL(job.url);
     const id = url.searchParams.get('v') || url.pathname.split('/').filter(Boolean).pop();
@@ -173,7 +174,7 @@ function chart(job) {
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index) {
-  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),tracking:TrackingControls.defaults(clip.tracking),director:directorDefaults(clip.director),...CaptionControls.options(clip)};
+  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),tracking:TrackingControls.defaults(clip.tracking),director:directorDefaults(clip.director),podcast:PodcastControls.defaults(clip),...CaptionControls.options(clip)};
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
@@ -181,19 +182,20 @@ function clipHtml(clip,index) {
     <div class="clip-top"><div><h3>Highlight ${String(number).padStart(2,'0')}</h3>${badge(clip.status, clip.queue_position)}${clip.needs_review?'<span class="badge review-flag">Needs review</span>':''}</div><button class="keep" aria-label="Keep highlight ${number}" aria-pressed="${!!clip.kept}" data-action="keep">${clip.kept?'★ Kept':'☆ Keep'}</button></div>
     <div class="preview${clip.status==='ready' ? ' with-thumbnail' : ''}">${clip.status==='ready' ? `<video controls playsinline ${clip.director_result?.edits?.loop?.status==='applied'?'loop':''} preload="metadata" poster="${escapeHtml(thumbnailUrl(clip))}"><source src=".${clip.file_url}?v=${clip.rendered_at || 0}-${clip.start}-${clip.end}-${clip.mode}-${clip.captions}" type="video/mp4"></video><figure class="thumbnail-preview" ${clip.thumbnail_url ? '' : 'hidden'}><img src="${escapeHtml(thumbnailUrl(clip))}" alt="Thumbnail for highlight ${number}" loading="lazy"><figcaption>Thumbnail</figcaption></figure>` : `<div class="placeholder"><span style="font-size:30px">${clip.status==='failed'?'!':'✂'}</span><span>${clip.status==='failed'?'This clip needs another try':clip.status==='cancelled'?'Cancelled — re-render to try again':clip.status==='queued'?escapeHtml(queueLabel(clip.queue_position)):`Creating your highlight…<br>Attempt ${clip.attempt || 1} of 3`}</span></div>`}</div>
     <div class="clip-body">${clip.title?`<h3>${escapeHtml(clip.title)}</h3>`:''}${clip.sources?.length?`<p class="moment-source">${escapeHtml(clip.sources.length>1?'AI + Chat':clip.sources[0]==='ai'?'AI Analysis':'Chat Analysis')}</p>`:''}<div class="clip-meta"><span class="score">↗ ${clip.sources?.length?`${Math.round(clip.score)} / 100 Viral Potential`:`${clip.score.toFixed(2)} spike score`}</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">${clip.onset!=null?`Onset ${timestamp(clip.onset)} · `:''}Peak ${timestamp(clip.peak)}</p>
-    <div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>
+    ${PodcastControls.isPodcastClip(clip)?PodcastControls.summary(clip):`<div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>`}
     ${clip.error ? `<p class="error">${escapeHtml(clip.error)}${clip.status==='failed'?'<br>Adjust the settings below or try Re-render again.':''}</p>` : ''}
     ${clip.status==='ready' ? `<form class="thumbnail-editor"><label>Thumbnail text<input name="text" maxlength="64" value="${escapeHtml(clip.thumbnail_text)}" placeholder="${escapeHtml(clip.thumbnail_hook || 'Automatic hook')}" autocomplete="off"></label><p class="hint">Leave blank to use the automatic hook.</p><div class="actions"><button type="submit">Regenerate ↻</button><a class="button thumbnail-download">Download JPG ↓</a></div><p class="hint thumbnail-status" role="status" hidden></p></form>` : ''}
     <form class="review"><div class="time-grid"><div>${timeField('start')}</div><div>${timeField('end')}</div></div>
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
+      ${PodcastControls.clipHtml(clip,draft,disabled)}
       ${directorHtml(clip,draft)}
-      ${facecamHtml(clip,draft)}
-      ${TrackingControls.html(clip,draft)}
+      <div ${PodcastControls.isPodcastClip(clip)?'hidden':''}>${facecamHtml(clip,draft)}
+      ${TrackingControls.html(clip,draft)}</div>
       ${CaptionControls.html(draft)}
       ${clip.caption_language?`<p class="hint">Transcription language: ${escapeHtml(clip.caption_language)}</p>`:''}
       <p class="draft-note hint" hidden><span>Changes not applied — Re-render to update</span> <button type="button" class="quiet" data-action="reset">Reset</button></p><p class="draft-error error" role="status" hidden></p>
       ${locked(clip)?'<p class="hint">This highlight is queued or rendering. Review actions unlock when it finishes.</p>':''}
-      <div class="actions"><button type="submit" class="primary" ${disabled}>Re-render ↻</button>${clip.status==='ready'?`<a class="button" href=".${clip.download_url}">Download ↓</a>`:''}<button class="delete" type="button" data-action="delete" aria-label="Delete highlight ${number}" ${disabled}>Delete</button></div>
+      <div class="actions"><button type="submit" class="primary" ${disabled}>Re-render ↻</button>${clip.status==='ready'?(PodcastControls.exportable(current)?`<a class="button" href=".${clip.download_url}">Download ↓</a>`:'<span class="hint">Confirm rights above to download</span>'):''}<button class="delete" type="button" data-action="delete" aria-label="Delete highlight ${number}" ${disabled}>Delete</button></div>
     </form></div></article>`;
 }
 function drawJob(job) {
@@ -212,10 +214,12 @@ function drawJob(job) {
   $('#analysis-detail').hidden = !busy(job) || !job.analysis_detail;
   $('#analysis-detail').textContent = job.analysis_detail || '';
   globalThis.MomentReview?.draw(job);
-  chart(job);
+  PodcastControls.drawRights(job);
+  $('.activity-panel').hidden = PodcastControls.isPodcast(job) || !!job.upload;
+  if (!$('.activity-panel').hidden) chart(job);
   $('#clips-title').textContent = `Your highlights${job.clips.length ? ' · '+job.clips.length : ''}`;
   const kept = job.clips.filter(c=>c.kept && c.status==='ready').length;
-  $('#download-kept').hidden = !kept;
+  $('#download-kept').hidden = !kept || !PodcastControls.exportable(job);
   $('#download-kept').href = `./api/jobs/${job.id}/download-kept`;
   $('#download-kept').textContent = `Download kept clips (${kept}) ↓`;
   $('#keep-hint').hidden = kept>0 || !job.clips.some(c=>c.status==='ready');
@@ -298,7 +302,8 @@ $('#refresh-jobs').addEventListener('click',()=>refresh());
 $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
-    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),ai_analysis:$('#ai-analysis').checked,review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked,voice:$('#director-voice').value,delivery:$('#director-delivery').value,loop:$('#director-loop').checked},...CaptionControls.read($('#start-form'))});
+    const source=await PodcastControls.source();
+    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),ai_analysis:$('#ai-analysis').checked,review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked,voice:$('#director-voice').value,delivery:$('#director-delivery').value,loop:$('#director-loop').checked},...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
@@ -308,14 +313,14 @@ function saveDraft(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id);
   const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
   const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
-  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),director:Object.fromEntries(directorKeys.map(k=>{const el=$(`[data-director=${k}]`,node);return [k,k==='hook_text'?(el.value.trim()||null):el.type==='checkbox'?el.checked:el.value];})),...CaptionControls.read(node)});
+  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),director:Object.fromEntries(directorKeys.map(k=>{const el=$(`[data-director=${k}]`,node);return [k,k==='hook_text'?(el.value.trim()||null):el.type==='checkbox'?el.checked:el.value];})),podcast:PodcastControls.read(node,clip),...CaptionControls.read(node)});
   draftFeedback(node);
 }
 function draftFeedback(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id), draft=drafts.get(clip.id);
   let error='',changed=false,length=clip.end-clip.start;
   if(draft) {
-    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking));
+    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking))||JSON.stringify(draft.podcast)!==JSON.stringify(PodcastControls.defaults(clip));
     changed=changed||JSON.stringify({language:draft.language,caption_style:draft.caption_style})!==JSON.stringify(CaptionControls.options(clip));
     try {
       const start=parseTime(draft.start),end=parseTime(draft.end); length=end-start;
@@ -424,7 +429,7 @@ $('#clips').addEventListener('submit',async event=>{
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),director:draft.director,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),director:draft.director,podcast:draft.podcast,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
 // A picked target's time is relative to the rendered section; keep it on the same frame when Start moves.
