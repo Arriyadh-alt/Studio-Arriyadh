@@ -655,7 +655,7 @@ def make_seamless_loop(video: Path, output: Path, captions=()) -> dict:
                "-vsync", "0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-pix_fmt", "yuv420p"]
     audio = next((s for s in streams if s["codec_type"] == "audio"), None)
     if audio:
-        audio_end = min(end, float(audio["duration"]))
+        audio_end = float(audio["duration"])
         # A de-click ramp is short enough not to cover speech or introduce an audible pause.
         fade = min(0.008, audio_end / 2)
         command.extend(["-map", "0:a:0", "-af", f"atrim=duration={audio_end:.6f},"

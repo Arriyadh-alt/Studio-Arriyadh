@@ -165,12 +165,13 @@ def test_loop_transition_adapts_to_boundaries_and_captions():
     assert _loop_seconds(head, head, 10, []) == 0.12
 
 
-def test_loop_export_matches_first_and_last_frames_without_cutting_audio(tmp_path):
+@pytest.mark.parametrize("audio_end", [2.0, 2.15])
+def test_loop_export_matches_first_and_last_frames_without_cutting_audio(tmp_path, audio_end):
     original, looped = tmp_path / "original.mp4", tmp_path / "looped.mp4"
     subprocess.run(["ffmpeg", "-v", "error",
                     "-f", "lavfi", "-i", "color=c=blue:s=160x284:r=30:d=1",
                     "-f", "lavfi", "-i", "color=c=red:s=160x284:r=30:d=1",
-                    "-f", "lavfi", "-i", "sine=f=407:d=2:r=48000",
+                    "-f", "lavfi", "-i", f"sine=f=407:d={audio_end}:r=48000",
                     "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
                     "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-r", "30",
                     "-c:a", "aac", str(original)], check=True)
@@ -191,12 +192,12 @@ def test_loop_export_matches_first_and_last_frames_without_cutting_audio(tmp_pat
     assert np.all(np.diff(after[50:, 2]) > 0)
 
     def samples(video):
-        raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(video), "-map", "0:a", "-t", "2",
+        raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(video), "-map", "0:a", "-t", str(audio_end),
                                        "-f", "f32le", "-"])
         return np.frombuffer(raw, dtype=np.float32)
 
     before, after = samples(original), samples(looped)
-    assert len(before) == len(after) == 96_000
+    assert len(before) == len(after) == round(audio_end * 48_000)
     assert np.corrcoef(before[1000:-1000], after[1000:-1000])[0, 1] > 0.99
     assert np.max(np.abs(after[:100])) < 0.04
     assert np.max(np.abs(after[-100:])) < 0.04
