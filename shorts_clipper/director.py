@@ -816,7 +816,7 @@ def _loop_seconds(head, tail, end, captions):
     return seconds
 
 
-def _loop_audio_bridge(video, audio, video_end, captions):
+def _loop_audio_bridge(video, audio, video_end, speech):
     rate = int(audio["sample_rate"])
     channels = int(audio["channels"])
     length = round(float(audio["duration"]) * rate)
@@ -825,7 +825,7 @@ def _loop_audio_bridge(video, audio, video_end, captions):
     span = 7 * window
     if (length < 2 * span or end - length > round(0.04 * rate)
             or abs(float(audio.get("start_time", 0))) > 1 / rate
-            or any(c.end > (end - span) / rate and c.start < end / rate for c in captions)):
+            or any(word.end > (end - span) / rate and word.start < end / rate for word in transcript_words(speech))):
         return None
 
     edges = ("[0:a:0]asplit[h][t];"
@@ -852,7 +852,7 @@ def _loop_audio_bridge(video, audio, video_end, captions):
             "[body][reversed]amix=inputs=2:duration=first:normalize=0[loop_audio]")
 
 
-def make_seamless_loop(video: Path, output: Path, captions=()) -> dict:
+def make_seamless_loop(video: Path, output: Path, captions=(), *, speech=None) -> dict:
     """Dissolve into the composed first frame without moving the opener, captions, or payoff."""
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                              "stream=codec_type,nb_frames,duration,avg_frame_rate,sample_rate,channels,start_time",
@@ -874,7 +874,7 @@ def make_seamless_loop(video: Path, output: Path, captions=()) -> dict:
     graph = ("[0:v]split[clip][head];[head]trim=end_frame=1[first];"
              f"[clip][first]blend=all_expr='A+(B-A)*{weight}':enable='gte(n,{start})'[out]")
     audio = next((s for s in streams if s["codec_type"] == "audio"), None)
-    bridge = _loop_audio_bridge(video, audio, end, captions) if audio else None
+    bridge = _loop_audio_bridge(video, audio, end, captions if speech is None else speech) if audio else None
     if bridge:
         graph += ";" + bridge
     command = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-filter_complex", graph, "-map", "[out]",

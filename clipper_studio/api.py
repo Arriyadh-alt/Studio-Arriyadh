@@ -546,7 +546,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         logger.warning("AI Director unavailable for %s/%s; rendering unedited", jid, cid, exc_info=True)
                 render_source = directed or source
                 render_duration = plan.duration if plan else duration
-                shown = remap_captions(captions, plan) if plan and spec["captions"] else captions if spec["captions"] else []
+                edited_captions = remap_captions(captions, plan) if plan and (spec["captions"] or director.loop) else captions
+                shown = edited_captions if spec["captions"] else []
                 text_height = None
                 caption_limit = None
                 update(jid, generation, stage=f"{clip_label} · Rendering")
@@ -692,7 +693,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         update(jid, generation, stage=f"{clip_label} · AI Director smoothing the loop")
                         looped = work / "looped.mp4"
                         try:
-                            plan.loop = make_seamless_loop(video, looped, shown)
+                            plan.loop = make_seamless_loop(video, looped, shown, speech=edited_captions)
                             if plan.loop["status"] == "applied":
                                 looped.replace(video)
                         except (OSError, ValueError, KeyError, StopIteration, subprocess.CalledProcessError):

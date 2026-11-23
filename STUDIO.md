@@ -276,9 +276,9 @@ timings, audio loudness and the chat peak:
   compressor; the mix is normalized to −14 LUFS, −1.5 dBTP.
 - **Seamless loop** (`loop`, on by default): samples the first and last frames of the
   rendered clip, then blends the ending into the opening picture. The blend is shorter
-  over fast motion or captions. If the ending is quiet and the opening is loud, a
-  short reverse swell leads into the opening audio. Other joins get a brief
-  de-click ramp. Neither moves the opening, captions, or narration.
+  over fast motion or captions. If the ending is quiet and speech-free and the
+  opening is loud, a short reverse swell leads into the opening audio. Other joins
+  get a brief de-click ramp. Neither moves the opening, captions, or narration.
   `director_result.edits.loop` records whether the transition was applied or skipped.
   Applied clips replay automatically in the preview; the transition is also in the
   downloaded MP4.

@@ -347,16 +347,16 @@ def test_loop_export_matches_first_and_last_frames_without_cutting_audio(tmp_pat
     assert np.max(np.abs(after[-100:])) < 0.04
 
 
-@pytest.mark.parametrize("tail", ["quiet", "active", "captioned"])
-def test_loop_audio_bridge_matches_opening_only_over_quiet_uncaptioned_tail(tmp_path, tail):
+@pytest.mark.parametrize("tail", ["quiet", "active", "spoken"])
+def test_loop_audio_bridge_matches_opening_only_over_quiet_speech_free_tail(tmp_path, tail):
     original, looped = tmp_path / "original.mp4", tmp_path / "looped.mp4"
     ending = ".25" if tail == "active" else ".0002"
     envelope = f"if(lt(t,0.3),.55,if(gt(t,1.7),{ending},.07))"
     audio = f"aevalsrc='{envelope}*sin(2*PI*340*t)|{envelope}*sin(2*PI*460*t)':s=48000:d=1.98"
     subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=s=160x284:r=30:d=2",
                     "-f", "lavfi", "-i", audio, "-c:v", "libx264", "-c:a", "aac", str(original)], check=True)
-    captions = [Caption(1.5, 1.95, "Final line")] if tail == "captioned" else []
-    assert make_seamless_loop(original, looped, captions)["status"] == "applied"
+    speech = [Caption(1.5, 1.95, "Final line")] if tail == "spoken" else []
+    assert make_seamless_loop(original, looped, speech=speech)["status"] == "applied"
 
     def samples(file, duration):
         raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(file), "-map", "0:a:0", "-t", duration,
@@ -395,16 +395,24 @@ def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_p
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **k: Transcript(list(captions), "en"))
     monkeypatch.setattr("clipper_studio.api.generate_thumbnail", lambda video, output, text, peak: output.write_bytes(b"jpg"))
     monkeypatch.setattr("clipper_studio.api.detect_facecam", lambda *a: None)
+    loop_inputs = []
+
+    def record_loop(video, output, visible, *, speech):
+        loop_inputs.append((visible, speech))
+        return make_seamless_loop(video, output, visible, speech=speech)
+
+    monkeypatch.setattr("clipper_studio.api.make_seamless_loop", record_loop)
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
         jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=LIxBN4AHMEE",
-                                             "clips": 1, "director": {"music": "on"}}).json()["id"]
+                                             "clips": 1, "captions": False, "director": {"music": "on"}}).json()["id"]
         app.state.pending.join()
         clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
         assert clip["status"] == "ready", clip.get("error")
         result = clip["director_result"]
         assert result["status"] == "used" and result["edits"]["hook"] and result["edits"]["music"]
         assert clip["director"]["loop"] and result["edits"]["loop"]["status"] == "applied"
+        assert len(loop_inputs) == 1 and loop_inputs[0][0] == [] and loop_inputs[0][1]
         assert {q["check"] for q in result["quality"]} >= {"Format", "Audio balance", "Subtitle timing", "Framing"}
         assert clip["director"]["music"] == "on"
         assert client.post(f"/api/jobs/{jid}/clips/{clip['id']}/render",
