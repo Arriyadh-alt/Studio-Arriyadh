@@ -154,3 +154,14 @@ def test_voice_preview_cache_stays_bounded(client, monkeypatch):
     folder = client.app.state.store.root / "voice-previews"
     assert len(list(folder.glob("*.wav"))) == 3 and len(list(folder.glob("*.json"))) == 3
     assert client.post("/api/voices/preview", json={"text": "Line 5"}).status_code == 200 and len(client.calls) == 6
+
+
+def test_narration_never_outlasts_the_hook_card(monkeypatch, tmp_path):
+    from shorts_clipper.story import intro_length
+    monkeypatch.setattr(voices, "_neural", lambda lines, voice, work: [tone(1.0), tone(1.2), tone(5.5)])
+    out = tmp_path / "long.wav"
+    info = narrate("A Really Long Suspense Line That Goes On", "en", out, tmp_path, "trailer", "scare")
+    with wave.open(str(out)) as wav:
+        spoken = wav.getnframes() / wav.getframerate()
+    assert spoken <= voices.MAX_SECONDS + 0.02 and abs(spoken - info["seconds"]) < 0.02
+    assert intro_length("A Really Long Suspense Line That Goes On", info["seconds"]) >= spoken + 0.15 + 0.2

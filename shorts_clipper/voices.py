@@ -211,15 +211,16 @@ def narrate(text: str, language: str, output: Path, cache: Path, voice: str = "a
             keep = keep[1:]
         audio = np.concatenate([np.concatenate([c, np.zeros(int(l.pause * RATE), dtype="<f4")])
                                 for c, l in keep] or [np.zeros(RATE // 4, dtype="<f4")])
-        tempo = min(1.25, max(1.0, len(audio) / RATE / MAX_SECONDS))
+        tempo = min(1.35, max(1.0, len(audio) / RATE / MAX_SECONDS))
         raw = work / "voice.f32"
         raw.write_bytes(audio.astype("<f4").tobytes())
+        seconds = min(MAX_SECONDS, len(audio) / RATE / tempo)  # the hook card never outlasts this
         chain = (f"atempo={tempo:.4f}," if tempo > 1 else "") + (
+            f"atrim=duration={seconds:.3f},afade=t=out:st={max(0.0, seconds - 0.15):.3f}:d=0.15,") + (
             "highpass=f=80,acompressor=threshold=-20dB:ratio=3:attack=5:release=80:makeup=2,"
             "equalizer=f=3200:t=q:w=1.2:g=3,volume=-1dB")
         output.parent.mkdir(parents=True, exist_ok=True)
         _ffmpeg(["-y", "-f", "f32le", "-ar", str(RATE), "-ac", "1", "-i", str(raw), "-af", chain,
                  "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(output)])
-        seconds = len(audio) / RATE / tempo
     return {"seconds": round(seconds, 2), "voice": voice, "voice_name": persona.name, "mood": mood,
             "engine": engine, "script": " ".join(l.text for _, l in keep)}
