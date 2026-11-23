@@ -87,10 +87,14 @@ def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
     if size is None:
         return ""
     w, h = size
-    x0, y0 = max(1, int((box.x - margin) * w)), max(1, int((box.y - margin) * h))
-    x1 = min(w - 1, math.ceil((box.x + box.w + margin) * w))
-    y1 = min(h - 1, math.ceil((box.y + box.h + margin) * h))
-    return f"delogo=x={x0}:y={y0}:w={x1 - x0}:h={y1 - y0}," if x1 - x0 >= 4 and y1 - y0 >= 4 else ""
+    x0, y0 = max(0, int((box.x - margin) * w)) // 2 * 2, max(0, int((box.y - margin) * h)) // 2 * 2
+    cw = (min(w, math.ceil((box.x + box.w + margin) * w)) - x0) // 2 * 2
+    ch = (min(h, math.ceil((box.y + box.h + margin) * h)) - y0) // 2 * 2
+    if cw < 8 or ch < 8:
+        return ""
+    # Replace the region with a smooth wash of its own colours: no streaks, and nothing of the face survives.
+    return (f"split[hidemain][hidecam];[hidecam]crop={cw}:{ch}:{x0}:{y0},scale=4:4:flags=area,"
+            f"scale={cw}:{ch}:flags=bicubic[hidden];[hidemain][hidden]overlay={x0}:{y0},")
 
 
 def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None) -> list:

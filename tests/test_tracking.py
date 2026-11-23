@@ -123,11 +123,11 @@ def test_source_facecam_is_hidden_in_the_gameplay_picture(tmp_path):
     split = FacecamOverlay(corner, OutputRect(0, 0, 1080, 700))
     command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=split)
     graph = command[command.index('-filter_complex') + 1]
-    assert '[mainin]delogo=x=1011:y=496:w=268:h=223,' in graph
+    assert '[mainin]split[hidemain][hidecam];[hidecam]crop=270:224:1010:496,' in graph
     subprocess.run(command, check=True)
     corner_overlay = layout_facecam(corner, (1280, 720), 'top-right')
     command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=corner_overlay)
-    assert '[mainin]delogo=x=1011:y=496:w=268:h=223,' in command[command.index('-filter_complex') + 1]
+    assert '[mainin]split[hidemain][hidecam];[hidecam]crop=270:224:1010:496,' in command[command.index('-filter_complex') + 1]
     shared = FacecamOverlay(corner, OutputRect(0, 0, 1080, 700), hide_source=False)
     command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=shared)
     assert 'delogo' not in command[command.index('-filter_complex') + 1]
