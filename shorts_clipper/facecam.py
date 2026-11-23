@@ -50,7 +50,7 @@ class OutputRect:
 class FacecamOverlay:
     box: SourceBox
     rect: OutputRect
-    hide_source: bool = True  # split screen: paint this region out of the main picture (off when it's a shared camera)
+    hide_source: bool = True  # paint this region out of the main picture (off when it's a shared camera)
 
 
 def _sample_frames(source, start, end):
@@ -107,7 +107,8 @@ def find_persistent_border(frames: list[np.ndarray], face: SourceBox) -> SourceB
             return limit
         lo, hi = bounds if bounds is not None else (max(0, int(other-.6*other_extent)), min(span, int(other+1.7*other_extent)))
         candidates = []
-        for distance in range(max(2, round(.25*extent)), round(1.25*extent)+1):
+        reach = round((2 if direction > 0 and bounds is not None else 1.5)*extent)  # the body sits below the face
+        for distance in range(max(2, round(.25*extent)), reach+1):
             index = round(near+direction*distance)
             if not 1 <= index < limit-1:
                 continue
@@ -116,7 +117,8 @@ def find_persistent_border(frames: list[np.ndarray], face: SourceBox) -> SourceB
                     and np.mean(line) >= np.mean(edges[lo:hi, index-direction])):
                 candidates.append((index, float(np.mean(line))))
         if not candidates:
-            return None
+            edge = 0 if direction < 0 else limit
+            return edge if abs(edge-near) <= 2*extent else None  # cam flush against the frame edge
         strongest = max(score for _, score in candidates)
         return next(index for index, score in candidates if score >= strongest*.85)
 

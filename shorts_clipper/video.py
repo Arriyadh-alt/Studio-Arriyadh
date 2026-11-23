@@ -82,7 +82,7 @@ def _source_size(source: Path) -> tuple[int, int] | None:
 
 
 def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
-    """Paint the streamer's own cam out of the gameplay picture so split screen doesn't show it twice."""
+    """Paint the streamer's own cam out of the gameplay picture so it only shows once, in the overlay."""
     size = _source_size(source)
     if size is None:
         return ""
@@ -129,7 +129,7 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
                f"pad={rect.w}:{rect.h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3")
         filters = (
-            f"[0:v]split[mainin][camin];[mainin]{_hide_facecam(source, box) if split and facecam.hide_source else ''}{filters}[main];"
+            f"[0:v]split[mainin][camin];[mainin]{_hide_facecam(source, box) if facecam.hide_source else ''}{filters}[main];"
             f"[camin]crop=w='max(2,trunc(iw*{box.w:.8f}/2)*2)':"
             f"h='max(2,trunc(ih*{box.h:.8f}/2)*2)':"
             f"x='iw*{box.x:.8f}':y='ih*{box.y:.8f}',"

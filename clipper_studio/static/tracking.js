@@ -72,10 +72,12 @@ globalThis.TrackingControls = (() => {
     ctx.drawImage(img,(x-width/2)*iw,0,width*iw,ih,0,bandH,W,H-bandH);
     if(cam) {
       const sx=cam.x*iw, sy=cam.y*ih, sw=cam.w*iw, sh=cam.h*ih;
-      if(layout==='split' && result.mode!=='podcast') {
+      if(result.mode!=='podcast') {
         const k=W/(width*iw), mx=(sx-(x-width/2)*iw)*k, my=bandH+sy*(H-bandH)/ih;
         ctx.save(); ctx.beginPath(); ctx.rect(mx,my,sw*k,sh*(H-bandH)/ih); ctx.clip(); ctx.filter='blur(14px)';
         ctx.drawImage(img,(x-width/2)*iw,0,width*iw,ih,0,bandH,W,H-bandH); ctx.restore();
+      }
+      if(layout==='split') {
         const r=W/bandH, cw=Math.min(sw,sh*r), ch=cw/r;
         ctx.drawImage(img,sx+(sw-cw)/2,sy+(sh-ch)/2,cw,ch,0,0,W,bandH);
       } else {
