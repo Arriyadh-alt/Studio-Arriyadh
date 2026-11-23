@@ -377,8 +377,9 @@ $('#clips').addEventListener('click',async event=>{
       await refresh();
     } else if(button.dataset.action==='voice-preview') {
       const clip=current.clips.find(c=>c.id===cid), hook=clip?.director_result?.edits?.hook, field=button.closest('fieldset');
-      const input=$('[data-director=hook_text]',field), text=input?.value.trim() || (hook?.style==='story' ? hook.text : null);
-      await previewVoice({voice:$('[data-director=voice]',field).value,delivery:$('[data-director=delivery]',field).value,text,language:speechLanguage(node,hook),category:hook?.category||null},button,$('.voice-status',field));
+      const input=$('[data-director=hook_text]',field), language=speechLanguage(node,hook);
+      const text=input?.value.trim() || (hook?.style==='story' && hook.language===language ? hook.text : null);
+      await previewVoice({voice:$('[data-director=voice]',field).value,delivery:$('[data-director=delivery]',field).value,text,language,category:hook?.category||null},button,$('.voice-status',field));
     } else if(button.dataset.action==='facecam-reset') {
       saveDraft(node); drafts.get(cid).facecam.box=null;
       const box=$('.camera-box',node); if(box)box.hidden=true;
