@@ -139,16 +139,10 @@ def cookie_options(cookies=None, proxy=None):
             raise YouTubeAccessError(
                 "Could not prepare YouTube cookies. Use a readable Netscape cookies.txt via "
                 "CLIPPER_YTDLP_COOKIES/--cookies or set YOUTUBE_COOKIES (see README).") from None
-        blocked = False
         try:
-            try:
-                yield {**options, "cookiefile": str(private)}
-            except BaseException as error:
-                blocked = blocking_message(error, cookies, proxy) is not None
-                raise
-            finally:
-                if source and not blocked:
-                    _save_cookies(source, private)
+            yield {**options, "cookiefile": str(private)}
+            if source:
+                _save_cookies(source, private)
         except Exception as error:
             if proxy:
                 raise _proxy_error(error, proxy) from None

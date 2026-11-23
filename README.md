@@ -65,7 +65,7 @@ settings cover metadata, chat replay and section downloads. Each yt-dlp invocati
 uses its own writable private copy (0600 file in a 0700 temporary directory),
 removed afterward even on failure. Refreshed cookies are sanitized and saved back
 to a configured **file path** with an atomic replacement, keeping mode **0600**.
-Bot/sign-in/429 failures never write back. The source directory must be writable
+Only exception-free calls write back; any failure preserves the source. The source directory must be writable
 for a private `.lock` file and same-directory replacement file; read-only secret
 mounts are not suitable. Calls sharing a cookie source are serialized across
 load, request and save so they cannot overwrite one another's refreshed sessions.

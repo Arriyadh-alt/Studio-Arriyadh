@@ -325,14 +325,18 @@ def test_explicit_cookie_path_is_not_written_back_on_block(tmp_path, message):
     assert not private.exists()
 
 
-def test_cookie_refresh_survives_non_block_failure(tmp_path):
+@pytest.mark.parametrize("contents", [REFRESHED_COOKIES, ""])
+@pytest.mark.parametrize("error_type", [DownloadError, RuntimeError])
+def test_cookie_refresh_is_discarded_after_any_failure(tmp_path, contents, error_type):
     source = tmp_path / "cookies.txt"
     source.write_text(COOKIE_TEXT)
-    with pytest.raises(DownloadError, match="ffmpeg exited"):
+    with pytest.raises(error_type, match="ffmpeg exited"):
         with cookie_options(source) as options:
-            Path(options["cookiefile"]).write_text(REFRESHED_COOKIES)
-            raise DownloadError("ffmpeg exited with code 1")
-    assert source.read_text() == REFRESHED_COOKIES
+            private = Path(options["cookiefile"])
+            private.write_text(contents)
+            raise error_type("ffmpeg exited with code 1")
+    assert source.read_text() == COOKIE_TEXT
+    assert not private.exists()
 
 
 def test_env_cookie_text_is_never_written_back(monkeypatch, tmp_path):

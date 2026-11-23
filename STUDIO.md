@@ -65,7 +65,7 @@ is copied before use. Text secrets are written under
 `CLIPPER_DATA_DIR` (default `~/clipper-data`). Each invocation has a private 0700
 temporary directory and writable 0600 cookie file, cleaned up after yt-dlp closes;
 refreshed cookies are sanitized and atomically saved to file-path sources with
-mode 0600, except after bot/sign-in/429 failures. The source directory must be
+mode 0600 only after exception-free calls. Any failure preserves the source. The source directory must be
 writable for the lock and replacement file. Calls sharing that file are serialized
 to avoid losing rotated cookies; environment text is never written back.
 Without either setting, cookie behavior is
