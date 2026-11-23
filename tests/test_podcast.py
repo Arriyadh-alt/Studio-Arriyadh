@@ -189,3 +189,19 @@ def test_commentary_version_is_labelled_and_separate():
     assert plan.hook["style"] == "commentary" and plan.hook["text"].startswith(D.COMMENTARY_LABEL)
     assert plan.commentary["label"] == D.COMMENTARY_LABEL and plan.summary()["commentary"]["voiced"]
     assert D.DirectorOptions.from_dict({"preset": "podcast", "commentary": "x"}).preset == "podcast"
+
+
+def test_commentary_with_invented_numbers_is_not_grounded():
+    from shorts_clipper.podcast import grounded
+    source = "I slept 8 hours and still felt tired"
+    assert grounded("Speaker explains 8 hours", source)
+    assert not grounded("Speaker explains 12 hours", source)
+
+
+def test_regular_videos_pass_metadata_checks_for_podcasts():
+    import pytest
+    from clipper_studio.chat import ChatReplayError, validate_metadata
+    info = {"live_status": "not_live", "duration": 3600}
+    with pytest.raises(ChatReplayError):
+        validate_metadata(info, require_chat=False)
+    validate_metadata(info, require_chat=False, require_live=False)

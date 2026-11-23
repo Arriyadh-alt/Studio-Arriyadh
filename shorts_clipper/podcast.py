@@ -154,7 +154,10 @@ def _kmeans(points, k, iterations=25, restarts=8):
     return best
 
 
-def _silhouette(points, labels):
+def _silhouette(points, labels, limit=600):
+    if len(points) > limit:
+        keep = np.linspace(0, len(points) - 1, limit).astype(int)
+        points, labels = points[keep], labels[keep]
     distances = np.sqrt(((points[:, None] - points[None]) ** 2).sum(2))
     scores = []
     for i, label in enumerate(labels):
@@ -239,6 +242,9 @@ def sentences(words, groups, labels):
 
 
 # ---------------------------------------------------------------- conversation structure
+
+NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+
 
 def content_words(text):
     return [t for t in TOKEN.findall(text.lower()) if t not in STOP and len(t) > 2]
@@ -495,7 +501,9 @@ def grounded(text, source):
     allowed = set(content_words(source)) | {"asked", "answers", "explains", "words", "own", "speaker", "guest",
                                             "host", "describes", "shares", "argues", "story", "question", "point",
                                             "context", "here", "talks", "says", "about", "why", "conversation"}
-    return all(w in allowed or w.rstrip("s") in allowed for w in content_words(text))
+    numbers = set(NUMBER.findall(source))
+    return (all(n in numbers for n in NUMBER.findall(text))
+            and all(w in allowed or w.rstrip("s") in allowed for w in content_words(text)))
 
 
 def refine(moments, outline):
