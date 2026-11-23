@@ -588,7 +588,7 @@ def _keyframes(keys, index, var="t", epsilon=0.002):
     for previous, key in zip(keys, keys[1:]):
         if abs(key[index] - kept[-1][index]) >= epsilon and key[0] - kept[-1][0] >= 0.25:
             # End the hold where it ends, so the move does not start drifting at the hold's beginning.
-            if previous is not kept[-1] and key[0] - previous[0] > 0.01 and abs(previous[index] - kept[-1][index]) < epsilon:
+            if previous is not kept[-1] and key[0] - previous[0] > 0.01 and previous[0] - kept[-1][0] > 0.01 and abs(previous[index] - kept[-1][index]) < epsilon:
                 kept.append(previous)
             kept.append(key)
     if len(kept) == 1:

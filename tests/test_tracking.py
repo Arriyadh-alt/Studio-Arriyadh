@@ -129,3 +129,13 @@ def test_trigger_must_be_visible_when_it_appears():
     path = [(t, .5, .5) for t in times]
     report = T.validate(track, path, .32, trigger, (0, 10))
     assert report['checks']['subject_in_frame'] and not report['checks']['trigger_visible']
+
+
+def test_keyframes_never_ramp_over_zero_time_at_cuts():
+    keys = [(0, .1, .5), (2, .3, .5), (2, .3005, .5), (2.5, .5, .5)]
+    assert '/0.000' not in T.keyframe_expression(keys)
+
+
+def test_target_time_uses_nearest_sample():
+    footage = T.Footage(np.arange(0, 3, .25), np.zeros((12, 2, 2)))
+    assert footage.index(1.26) == 5 and footage.index(1.4) == 6
