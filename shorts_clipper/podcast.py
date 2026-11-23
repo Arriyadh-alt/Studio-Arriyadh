@@ -78,8 +78,33 @@ def transcribe_all(audio: Path, language=None) -> list[dict]:
     return [{"start": float(w.start), "end": float(w.end), "word": w.word} for c in captions for w in c.words]
 
 
+def _pitch(samples, rate, size=640):
+    """Median voiced fundamental frequency (Hz) over short sub-frames (YIN), or 0 when unvoiced."""
+    lo, hi = int(rate / 400), int(rate / 65)
+    found = []
+    for start in range(0, len(samples) - size - hi + 1, size):
+        x = samples[start:start + size + hi].astype(np.float64)
+        if np.sqrt((x ** 2).mean()) < 1e-3:
+            continue
+        frame = x[:size]
+        corr = np.fft.irfft(np.conj(np.fft.rfft(frame, 2 * len(x))) * np.fft.rfft(x, 2 * len(x)))[:hi + 1]
+        energy = np.concatenate([[0], np.cumsum(x ** 2)])
+        shifted = energy[np.arange(hi + 1) + size] - energy[np.arange(hi + 1)]
+        diff = energy[size] + shifted - 2 * corr
+        diff[0] = 0
+        cumulative = diff[1:] * np.arange(1, hi + 1) / np.maximum(np.cumsum(diff[1:]), 1e-12)
+        candidates = np.flatnonzero(cumulative[lo - 1:] < 0.2)
+        if not len(candidates):
+            continue
+        tau = lo + int(candidates[0])
+        while tau < hi and cumulative[tau] < cumulative[tau - 1]:
+            tau += 1
+        found.append(rate / tau)
+    return float(np.median(found)) if found else 0.0
+
+
 def voice_features(audio: Path, duration: float) -> np.ndarray:
-    """Log energy in mel-like bands per 0.25 s block: a coarse voice timbre signature."""
+    """Per 0.25 s block: log energy in mel-like bands (timbre) plus the voiced pitch in the last column."""
     rate, size = 16000, int(16000 * BLOCK)
     edges = np.geomspace(90, 5000, BANDS + 1)
     frequencies = np.fft.rfftfreq(size, 1 / rate)
@@ -90,8 +115,8 @@ def voice_features(audio: Path, duration: float) -> np.ndarray:
         samples = np.pad(samples, (0, size - len(samples)))
         power = np.abs(np.fft.rfft(samples * np.hanning(size))) ** 2
         bands = np.array([power[index == b].sum() for b in range(BANDS)])
-        rows.append(np.log10(bands + 1e-9))
-    return np.asarray(rows) if rows else np.zeros((0, BANDS))
+        rows.append(np.append(np.log10(bands + 1e-9), _pitch(samples, rate)))
+    return np.asarray(rows) if rows else np.zeros((0, BANDS + 1))
 
 
 def utterances(words, gap=0.55, longest=8.0):
@@ -107,19 +132,26 @@ def utterances(words, gap=0.55, longest=8.0):
     return [{"start": g[0]["start"], "end": g[-1]["end"], "words": [w["index"] for w in g]} for g in groups]
 
 
-def _kmeans(points, k, iterations=25):
-    centres = [points[0]]
-    for _ in range(1, k):
-        distance = np.min([((points - c) ** 2).sum(1) for c in centres], axis=0)
-        centres.append(points[int(np.argmax(distance))])
-    centres = np.array(centres)
-    for _ in range(iterations):
-        labels = np.argmin(((points[:, None] - centres[None]) ** 2).sum(2), axis=1)
-        moved = np.array([points[labels == j].mean(0) if (labels == j).any() else centres[j] for j in range(k)])
-        if np.allclose(moved, centres):
-            break
-        centres = moved
-    return labels
+def _kmeans(points, k, iterations=25, restarts=8):
+    """Lowest-inertia k-means over deterministic farthest-point starts seeded from spread-out points."""
+    best, best_inertia = None, np.inf
+    seeds = np.unique(np.linspace(0, len(points) - 1, min(restarts, len(points))).astype(int))
+    for seed in seeds:
+        centres = [points[seed]]
+        for _ in range(1, k):
+            distance = np.min([((points - c) ** 2).sum(1) for c in centres], axis=0)
+            centres.append(points[int(np.argmax(distance))])
+        centres = np.array(centres)
+        for _ in range(iterations):
+            labels = np.argmin(((points[:, None] - centres[None]) ** 2).sum(2), axis=1)
+            moved = np.array([points[labels == j].mean(0) if (labels == j).any() else centres[j] for j in range(k)])
+            if np.allclose(moved, centres):
+                break
+            centres = moved
+        inertia = ((points - centres[labels]) ** 2).sum()
+        if inertia < best_inertia - 1e-9:
+            best, best_inertia = labels, inertia
+    return best
 
 
 def _silhouette(points, labels):
@@ -139,15 +171,26 @@ def diarize(groups, features, speakers=None):
     """Label each utterance with a speaker (0, 1, 2 by first appearance) by clustering voice timbre."""
     if not groups:
         return []
-    vectors = []
+    if features.ndim != 2 or features.shape[1] != BANDS + 1:
+        features = np.zeros((0, BANDS + 1))
+    voiced = features[features[:, -1] > 0, -1] if len(features) else np.zeros(0)
+    typical = float(np.median(voiced)) if len(voiced) else 150.0
+    vectors, pitches = [], []
     for g in groups:
         rows = features[int(g["start"] / BLOCK):max(int(g["start"] / BLOCK) + 1, int(math.ceil(g["end"] / BLOCK)))]
-        if len(rows):
-            energy = rows.mean(1)
-            rows = rows[energy >= np.median(energy)]
-        vectors.append(rows.mean(0) - rows.mean() if len(rows) else np.zeros(features.shape[1] if features.ndim == 2 else BANDS))
-    points = np.asarray(vectors)
-    points = (points - points.mean(0)) / (points.std(0) + 1e-6)
+        pitch = rows[rows[:, -1] > 0, -1] if len(rows) else np.zeros(0)
+        pitches.append(np.log2(np.median(pitch) if len(pitch) >= 2 else typical))
+        bands = rows[:, :-1]
+        if len(bands):
+            energy = bands.mean(1)
+            bands = bands[energy >= np.median(energy)]
+        vectors.append(bands.mean(0) - bands.mean() if len(bands) else np.zeros(BANDS))
+    timbre = np.asarray(vectors)
+    timbre = (timbre - timbre.mean(0)) / (timbre.std(0) + 1e-6) / (2 * math.sqrt(BANDS))
+    pitches = np.asarray(pitches)
+    # Pitch separates voices far better than spectra that mostly vary with the words being said.
+    pitch = (pitches - pitches.mean()) / max(pitches.std(), 0.08)
+    points = np.column_stack([timbre, 2.0 * pitch])
     lengths = np.array([g["end"] - g["start"] for g in groups])
     best = np.zeros(len(groups), dtype=int)
     if len(groups) >= 4:
