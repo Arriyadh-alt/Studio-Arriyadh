@@ -83,8 +83,9 @@ YouTube blocks datacenter IPs, including this VM's IP, even with fresh cookies.
 A **residential proxy** is needed for requests from this deployment. Configure
 `CLIPPER_YTDLP_PROXY` with the full proxy URL (for example
 `http://proxy.example:8080`); HTTP URLs with `user:password@host:port` and `socks5://`
-URLs are passed through to yt-dlp. Prefer HTTP for section downloads: ffmpeg does
-not support SOCKS proxies. The CLI accepts `--proxy URL`, overriding the environment.
+URLs are passed through to yt-dlp for metadata and chat. Section downloads require
+an `http://` proxy: HTTPS and SOCKS proxies are rejected before any request because
+ffmpeg can otherwise bypass them. The CLI accepts `--proxy URL`, overriding the environment.
 Metadata, replay and section requests all receive the setting; when unset their
 proxy behavior is unchanged. A proxy can also be blocked by YouTube.
 

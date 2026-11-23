@@ -29,9 +29,11 @@ def cookie_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("CLIPPER_DATA_DIR", str(tmp_path / "data"))
 
 
-@pytest.mark.parametrize("operation", ["metadata", "chat", "section"])
 @pytest.mark.parametrize("configuration", ["none", "path", "text"])
-@pytest.mark.parametrize("proxy", [None, PROXY, "socks5://proxy-user:proxy-password@proxy.invalid:1080"])
+@pytest.mark.parametrize("operation,proxy", [
+    (operation, proxy) for operation in ("metadata", "chat", "section")
+    for proxy in (None, PROXY, "socks5://proxy-user:proxy-password@proxy.invalid:1080")
+    if operation != "section" or proxy is None or proxy.startswith("http://")])
 def test_cookie_options_reach_all_download_stages(monkeypatch, tmp_path, operation, configuration, proxy):
     source = tmp_path / "source.txt"
     source.write_text(COOKIE_TEXT)
@@ -253,6 +255,27 @@ def test_explicit_proxy_overrides_environment(monkeypatch):
     explicit = "socks5://another-user:another-password@other.invalid:1080"
     with cookie_options(proxy=explicit) as options:
         assert options["proxy"] == explicit
+
+
+@pytest.mark.parametrize("scheme", ["https", "socks4", "socks5", "socks5h", "HTTP"])
+@pytest.mark.parametrize("configuration", ["env", "explicit"])
+def test_section_rejects_non_http_proxy_before_any_request(monkeypatch, tmp_path, capfd, caplog, scheme, configuration):
+    proxy = f"{scheme}://proxy-user:proxy-password@proxy.invalid:8080"
+    if configuration == "env":
+        monkeypatch.setenv("CLIPPER_YTDLP_PROXY", proxy)
+
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("An unsupported section proxy must fail before constructing yt-dlp")
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", unexpected_request)
+    output = tmp_path / "output"
+    with pytest.raises(YouTubeAccessError, match="Use an http:// proxy") as raised:
+        download_section("https://youtu.be/test", output, 0, 10,
+                         proxy=proxy if configuration == "explicit" else None)
+    captured = capfd.readouterr()
+    message = str(raised.value) + caplog.text + captured.out + captured.err
+    assert not output.exists()
+    assert all(secret not in message for secret in (proxy, "proxy-user", "proxy-password"))
 
 
 @pytest.mark.parametrize("proxy", [PROXY, "socks5://proxy-user:p%40ss%3Aword@proxy.invalid:1080"])

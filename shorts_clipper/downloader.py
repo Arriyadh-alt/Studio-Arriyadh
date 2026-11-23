@@ -1,5 +1,6 @@
 """Download a section of a YouTube video with yt-dlp."""
 
+import os
 from pathlib import Path
 
 import yt_dlp
@@ -14,6 +15,10 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
 
     Raises ValueError if the range starts past the end of the video.
     """
+    proxy = proxy or os.environ.get("CLIPPER_YTDLP_PROXY")
+    if proxy and not proxy.startswith("http://"):
+        raise YouTubeAccessError("YouTube section downloads require an http:// proxy. "
+                                 "Use an http:// proxy so ffmpeg cannot bypass the proxy setting.")
     output_dir.mkdir(parents=True, exist_ok=True)
     window = f"{float(start)!r}-{float(end)!r}"
     options = {
