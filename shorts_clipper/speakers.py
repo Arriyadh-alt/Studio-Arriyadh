@@ -244,7 +244,7 @@ def frame_conversation(source: Path, duration: float, turns, layout="auto", samp
     elif layout == "split":
         width = window_width(OUTPUT_HEIGHT - SPLIT_BAND, aspect)
         main, top = seats[order[0]], seats[order[1]]
-        overlay = FacecamOverlay(split_box(top, aspect), OutputRect(0, 0, OUTPUT_WIDTH, SPLIT_BAND))
+        overlay = FacecamOverlay(split_box(top, aspect), OutputRect(0, 0, OUTPUT_WIDTH, SPLIT_BAND), hide_source=False)
         path = [(0.0, _x(main, width), main["y"]), (duration, _x(main, width), main["y"])]
         shots = [[0.0, duration, order[0]]]
     else:

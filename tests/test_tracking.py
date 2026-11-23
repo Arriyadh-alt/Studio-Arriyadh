@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -80,6 +81,8 @@ def test_layout_choice_and_split_geometry():
     trigger = {'trigger': 1, 'reaction': 6, 'confidence': .8}
     assert T.choose_layout(track, trigger, False, 16 / 9) == 'gameplay'
     assert T.choose_layout(track, trigger, True, 16 / 9) == 'split'
+    track.spread[:] = .2  # wide but still fits the corner-cam crop (real Windah footage sits near here)
+    assert T.choose_layout(track, trigger, True, 16 / 9) == 'gameplay'
     track.spread[:] = 0
     assert T.choose_layout(track, trigger, True, 16 / 9) == 'gameplay'
     assert T.choose_layout(track, {**trigger, 'confidence': .05}, True, 16 / 9) == 'reaction'
@@ -110,6 +113,24 @@ def test_dynamic_crop_follows_with_facecam_and_split_layout(tmp_path):
     command = build_ffmpeg_command(tmp_path / 's.mp4', tmp_path / 'o.mp4', 0, 5, facecam=split, effects=effects)
     graph = command[command.index('-filter_complex') + 1]
     assert 'crop=1080:1220' in graph and 'pad=1080:1920:0:700' in graph and 'overlay=0:0' in graph
+
+
+def test_split_hides_the_source_facecam_in_the_gameplay_pane(tmp_path):
+    source = tmp_path / 's.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=1280x720:d=1',
+                    '-f', 'lavfi', '-i', 'anullsrc', '-t', '1', '-pix_fmt', 'yuv420p', str(source)], check=True)
+    corner = SourceBox(.8, .7, .2, .3)
+    split = FacecamOverlay(corner, OutputRect(0, 0, 1080, 700))
+    command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=split)
+    graph = command[command.index('-filter_complex') + 1]
+    assert '[mainin]delogo=x=1011:y=496:w=268:h=223,' in graph
+    subprocess.run(command, check=True)
+    corner_overlay = layout_facecam(corner, (1280, 720), 'top-right')
+    command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=corner_overlay)
+    assert 'delogo' not in command[command.index('-filter_complex') + 1]
+    shared = FacecamOverlay(corner, OutputRect(0, 0, 1080, 700), hide_source=False)
+    command = build_ffmpeg_command(source, tmp_path / 'o.mp4', 0, 1, facecam=shared)
+    assert 'delogo' not in command[command.index('-filter_complex') + 1]
 
 
 def test_hold_does_not_drift_before_the_move():
