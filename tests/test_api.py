@@ -340,7 +340,7 @@ def test_restart_and_busy_conflicts(tmp_path, media):
                                    "facecam": {"enabled": True, "position": "auto", "size": 0.42, "box": None},
                                    "director": {"enabled": False, "hook": True, "edits": True, "sfx": True,
                                                 "music": "auto", "story": True, "voiceover": False,
-                                                "hook_text": None, "loop": True}}
+                                                "hook_text": None, "voice": "auto", "delivery": "auto", "loop": True}}
         assert job["clips"][2]["error"] == "old error"
 
 

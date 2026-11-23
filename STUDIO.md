@@ -173,7 +173,7 @@ and lets you download it or change its text; custom text is kept on re-render.
 
 Jobs and re-renders accept `director` (`{"enabled": true, "hook": true, "edits": true,
 "sfx": true, "music": "auto"|"on"|"off", "story": true, "voiceover": false,
-"hook_text": null, "loop": true}`; new jobs default to enabled, clips from older jobs stay off until
+"hook_text": null, "voice": "auto", "delivery": "auto", "loop": true}`; new jobs default to enabled, clips from older jobs stay off until
 re-rendered with it). Before the final MP4 it plans the edit locally from Whisper word
 timings, audio loudness and the chat peak:
 
@@ -192,8 +192,19 @@ timings, audio loudness and the chat peak:
   as `hook_text` on re-render. Set `CLIPPER_LLM_API_KEY` (plus optional
   `CLIPPER_LLM_BASE_URL`, `CLIPPER_LLM_MODEL`, default `gpt-4o-mini`) to have an
   OpenAI-compatible model write the hooks from the transcript; any error falls back to
-  the offline writer. `voiceover` reads the hook with an offline Piper voice
-  (downloaded once into `<data dir>/voices`).
+  the offline writer. `voiceover` has a creator read the hook: a short reaction
+  first ("Wait, what?", "Guys, dengerin."), then the line in the scene's delivery
+  (`excited`, `surprise`, `suspense` with a held-back payoff, `humor`, `warm`), with pitch,
+  pace and pauses to match. `voice` picks the persona: `hype` (Hype Streamer), `bestie`
+  (Bubbly Bestie), `trailer` (Movie Trailer), `chill` (Chill Commentator), `anchor`
+  (Breaking News) or `classic` (the offline Piper voice); `auto` matches it to the scene,
+  and `delivery: "auto"` reads the mood off the event type. Neural voices come from
+  Microsoft Edge read-aloud (edge-tts, no key); if it is unreachable the offline Piper voice
+  (downloaded once into `<data dir>/voices`) reads the same script. `GET /api/voices` lists
+  the personas and `POST /api/voices/preview` (`{"voice", "delivery", "text", "language",
+  "category"}`) returns a WAV to audition before rendering; the start form and every clip
+  card have a Preview voice button. `edits.hook.narration` records the voice, mood, engine
+  and spoken script.
 - **Teaser hook** (`story: false`): copies the strongest 1.5–3 s moment (loud reaction, excited words, near the
   chat peak) to the front, with a punch-in zoom, the thumbnail hook text as a title,
   a whoosh and a flash transition into the clip.

@@ -17,8 +17,32 @@ const renderedOffset = (clip, offset) => {
   const shot=timeline.find(([start,end])=>offset<end) || timeline[timeline.length-1];
   return shot[2] + Math.min(shot[1]-shot[0], Math.max(0, offset-shot[0]));
 };
-const directorDefaults = value => ({enabled:true,hook:true,edits:true,sfx:true,music:'auto',story:true,voiceover:false,hook_text:null,loop:true,...value});
-const directorKeys = ['enabled','hook','edits','sfx','music','story','voiceover','hook_text','loop'];
+const directorDefaults = value => ({enabled:true,hook:true,edits:true,sfx:true,music:'auto',story:true,voiceover:false,hook_text:null,voice:'auto',delivery:'auto',loop:true,...value});
+const directorKeys = ['enabled','hook','edits','sfx','music','story','voiceover','hook_text','voice','delivery','loop'];
+let voiceCatalog = {voices:[],deliveries:['excited','surprise','suspense','humor','warm']};
+const deliveryLabels = {excited:'Excited',surprise:'Surprised',suspense:'Suspense',humor:'Funny',warm:'Warm'};
+const voiceOptions = selected => `<option value="auto">Auto (match the scene)</option>${voiceCatalog.voices.map(v=>`<option value="${escapeHtml(v.id)}" title="${escapeHtml(v.description)}" ${selected===v.id?'selected':''}>${escapeHtml(v.name)}</option>`).join('')}`;
+const deliveryOptions = selected => `<option value="auto">Auto (from the scene)</option>${voiceCatalog.deliveries.map(m=>`<option value="${m}" ${selected===m?'selected':''}>${deliveryLabels[m]||m}</option>`).join('')}`;
+const speechLanguage = (root, hook) => {
+  const chosen=$('[data-caption=language]',root)?.value;
+  if(chosen && chosen!=='auto') return ['id','ms','jw','su'].includes(chosen) ? 'id' : 'en';
+  return hook?.language==='id' ? 'id' : 'en';
+};
+async function previewVoice(body, button, status) {
+  const audio=new Audio();
+  audio.play().catch(()=>{}); // unlocks playback inside the tap, before the fetch (iOS Safari)
+  button.disabled=true; status.textContent='Generating preview…';
+  try {
+    const response=await fetch('./api/voices/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!response.ok) throw new Error((await response.json().catch(()=>({}))).detail || 'Voice preview failed');
+    audio.src=URL.createObjectURL(await response.blob());
+    status.textContent=`${response.headers.get('X-Voice-Name')} · ${deliveryLabels[response.headers.get('X-Voice-Mood')]||''}${response.headers.get('X-Voice-Engine')==='offline'?' · offline voice':''}`;
+    audio.controls=true; audio.className='voice-audio';
+    status.append(audio);
+    await audio.play().catch(()=>{});
+  } catch(error) { status.textContent=error.message; }
+  finally { button.disabled=false; }
+}
 const directorLabels = {hook:'Hook',pacing:'Pacing',emotion:'Emotion',dialogue:'Dialogue',chat:'Chat'};
 function directorHtml(clip, draft) {
   const d=directorDefaults(draft.director), r=clip.director_result;
@@ -40,8 +64,13 @@ function directorHtml(clip, draft) {
     <label class="check"><input type="checkbox" data-director="story" ${d.story?'checked':''}> Storytelling hook</label>
     <label class="check"><input type="checkbox" data-director="loop" ${d.loop?'checked':''}> Seamless loop</label>
     <label class="check"><input type="checkbox" data-director="voiceover" ${d.voiceover?'checked':''}> AI voice-over</label>
+    <div class="voice-picker"><label>Voice<select data-director="voice">${voiceOptions(d.voice)}</select></label><label>Delivery<select data-director="delivery">${deliveryOptions(d.delivery)}</select></label><button type="button" data-action="voice-preview">▶ Preview voice</button><span class="hint voice-status" aria-live="polite">${escapeHtml(narrationLabel(clip))}</span></div>
     ${storyHtml(clip,d)}
     ${report}</fieldset>`;
+}
+function narrationLabel(clip) {
+  const n=clip.director_result?.edits?.hook?.narration;
+  return n ? `Last render: ${n.voice_name} · ${deliveryLabels[n.mood]||n.mood}${n.engine==='offline'?' · offline voice':''}` : '';
 }
 function storyHtml(clip, d) {
   const hook=clip.director_result?.edits?.hook, story=hook?.style==='story';
@@ -66,6 +95,15 @@ function facecamHtml(clip, draft) {
 }
 $('#create-caption-style').innerHTML = CaptionControls.html();
 CaptionControls.preview($('#create-caption-style'));
+fetch('./api/voices').then(r=>r.ok?r.json():null).then(catalog=>{
+  if(!catalog) return;
+  voiceCatalog=catalog;
+  $('#director-voice').innerHTML=voiceOptions($('#director-voice').value);
+  $('#director-delivery').innerHTML=deliveryOptions($('#director-delivery').value);
+  document.querySelectorAll('.clip').forEach(node=>{node.dataset.version='';});
+  if(current) drawJob(current);
+}).catch(()=>{});
+$('#create-voice-preview').addEventListener('click',event=>previewVoice({voice:$('#director-voice').value,delivery:$('#director-delivery').value,language:speechLanguage($('#start-form'))},event.currentTarget,$('#create-voice-status')));
 const thumbnailUrl = clip => clip.thumbnail_url ? `.${clip.thumbnail_url}?v=${clip.thumbnail_version || clip.rendered_at || 0}` : '';
 
 function timestamp(value) {
@@ -254,7 +292,7 @@ $('#refresh-jobs').addEventListener('click',()=>refresh());
 $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
-    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked,loop:$('#director-loop').checked},...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked,voice:$('#director-voice').value,delivery:$('#director-delivery').value,loop:$('#director-loop').checked},...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
@@ -337,6 +375,11 @@ $('#clips').addEventListener('click',async event=>{
       try {await api(base,'PATCH',{kept});}catch(error){const latest=current.clips.find(c=>c.id===cid);if(latest)latest.kept=previous;throw error;}
       finally {keeping.delete(cid);drawJob(current);}
       await refresh();
+    } else if(button.dataset.action==='voice-preview') {
+      const clip=current.clips.find(c=>c.id===cid), hook=clip?.director_result?.edits?.hook, field=button.closest('fieldset');
+      const input=$('[data-director=hook_text]',field), language=speechLanguage(node,hook);
+      const text=input?.value.trim() || (hook?.style==='story' && hook.language===language ? hook.text : null);
+      await previewVoice({voice:$('[data-director=voice]',field).value,delivery:$('[data-director=delivery]',field).value,text,language,category:hook?.category||null},button,$('.voice-status',field));
     } else if(button.dataset.action==='facecam-reset') {
       saveDraft(node); drafts.get(cid).facecam.box=null;
       const box=$('.camera-box',node); if(box)box.hidden=true;
