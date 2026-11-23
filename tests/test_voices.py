@@ -145,3 +145,12 @@ def test_hook_records_how_it_was_narrated():
         raise OSError
     intro = _story_intro({"language": "en", "voice": broken}, DirectorOptions(voiceover=True), [], {"event": 5.0}, 20)
     assert not intro["voiceover"] and "narration" not in intro
+
+
+def test_voice_preview_cache_stays_bounded(client, monkeypatch):
+    monkeypatch.setattr("clipper_studio.api.PREVIEW_CACHE", 3)
+    for i in range(6):
+        assert client.post("/api/voices/preview", json={"text": f"Line {i}"}).status_code == 200
+    folder = client.app.state.store.root / "voice-previews"
+    assert len(list(folder.glob("*.wav"))) == 3 and len(list(folder.glob("*.json"))) == 3
+    assert client.post("/api/voices/preview", json={"text": "Line 5"}).status_code == 200 and len(client.calls) == 6

@@ -113,6 +113,7 @@ class VoicePreview(BaseModel):
     category: str | None = Field(default=None, max_length=24)
 
 
+PREVIEW_CACHE = 64
 LEGACY_DIRECTOR = {**DirectorSpec().model_dump(), "enabled": False}
 
 
@@ -656,6 +657,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 raise HTTPException(503, "Voice preview is unavailable right now") from error
             partial.replace(path)
             info.write_text(json.dumps(spoken))
+            previews = sorted(folder.glob("*.wav"), key=lambda p: p.stat().st_mtime)
+            for stale in previews[:-PREVIEW_CACHE]:
+                stale.unlink(missing_ok=True)
+                stale.with_suffix(".json").unlink(missing_ok=True)
         spoken = json.loads(info.read_text())
         return FileResponse(path, media_type="audio/wav", headers={
             "X-Voice-Name": spoken["voice_name"], "X-Voice-Mood": spoken["mood"], "X-Voice-Engine": spoken["engine"],
