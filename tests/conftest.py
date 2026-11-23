@@ -4,7 +4,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def no_director_audio(monkeypatch, request):
     """API tests stub ffmpeg, so AI Director falls back to unedited renders there."""
-    if request.module.__name__.endswith("test_director"):
+    if request.module.__name__.endswith(("test_director", "test_podcast_api")):
         return
 
     def unavailable(*args):
