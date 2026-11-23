@@ -424,9 +424,15 @@ $('#clips').addEventListener('submit',async event=>{
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:draft.tracking,director:draft.director,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),director:draft.director,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
+// A picked target's time is relative to the rendered section; keep it on the same frame when Start moves.
+function retimeTarget(tracking,oldStart,start,end){
+  if(!tracking?.target)return tracking;
+  const t=tracking.target.t+(Number(oldStart)||0)-start;
+  return {...tracking,target:t>=0&&t<=end-start?{...tracking.target,t:Math.round(t*100)/100}:null};
+}
 let cameraDrag=null;
 $('#clips').addEventListener('pointerdown',event=>{
   const editor=event.target.closest('.camera-editor'), node=editor?.closest('.clip');
