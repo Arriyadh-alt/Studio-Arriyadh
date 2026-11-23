@@ -173,7 +173,7 @@ and lets you download it or change its text; custom text is kept on re-render.
 
 Jobs and re-renders accept `director` (`{"enabled": true, "hook": true, "edits": true,
 "sfx": true, "music": "auto"|"on"|"off", "story": true, "voiceover": false,
-"hook_text": null}`; new jobs default to enabled, clips from older jobs stay off until
+"hook_text": null, "voice": "auto", "delivery": "auto", "loop": true}`; new jobs default to enabled, clips from older jobs stay off until
 re-rendered with it). Before the final MP4 it plans the edit locally from Whisper word
 timings, audio loudness and the chat peak:
 
@@ -192,8 +192,19 @@ timings, audio loudness and the chat peak:
   as `hook_text` on re-render. Set `CLIPPER_LLM_API_KEY` (plus optional
   `CLIPPER_LLM_BASE_URL`, `CLIPPER_LLM_MODEL`, default `gpt-4o-mini`) to have an
   OpenAI-compatible model write the hooks from the transcript; any error falls back to
-  the offline writer. `voiceover` reads the hook with an offline Piper voice
-  (downloaded once into `<data dir>/voices`).
+  the offline writer. `voiceover` has a creator read the hook: a short reaction
+  first ("Wait, what?", "Guys, dengerin."), then the line in the scene's delivery
+  (`excited`, `surprise`, `suspense` with a held-back payoff, `humor`, `warm`), with pitch,
+  pace and pauses to match. `voice` picks the persona: `hype` (Hype Streamer), `bestie`
+  (Bubbly Bestie), `trailer` (Movie Trailer), `chill` (Chill Commentator), `anchor`
+  (Breaking News) or `classic` (the offline Piper voice); `auto` matches it to the scene,
+  and `delivery: "auto"` reads the mood off the event type. Neural voices come from
+  Microsoft Edge read-aloud (edge-tts, no key); if it is unreachable the offline Piper voice
+  (downloaded once into `<data dir>/voices`) reads the same script. `GET /api/voices` lists
+  the personas and `POST /api/voices/preview` (`{"voice", "delivery", "text", "language",
+  "category"}`) returns a WAV to audition before rendering; the start form and every clip
+  card have a Preview voice button. `edits.hook.narration` records the voice, mood, engine
+  and spoken script.
 - **Teaser hook** (`story: false`): copies the strongest 1.5–3 s moment (loud reaction, excited words, near the
   chat peak) to the front, with a punch-in zoom, the thumbnail hook text as a title,
   a whoosh and a flash transition into the clip.
@@ -206,6 +217,13 @@ timings, audio loudness and the chat peak:
 - **Sound**: synthesized whoosh/hit/pop effects; a soft music bed (`auto` adds it only
   to quiet clips with little speech) ducked under the voice with a sidechain
   compressor; the mix is normalized to −14 LUFS, −1.5 dBTP.
+- **Seamless loop** (`loop`, on by default): samples the first and last frames of the
+  rendered clip, then blends the ending into the opening picture. The blend is shorter
+  over fast motion or captions. A brief audio ramp avoids clicks without moving or
+  repeating narration. The opening, clip length and edit timeline stay intact.
+  `director_result.edits.loop` records whether the transition was applied or skipped.
+  Applied clips replay automatically in the preview; the transition is also in the
+  downloaded MP4.
 - **Viral score and quality check**: `director_result` has a 0–100 `score` (hook,
   pacing, emotion, dialogue, chat), `edits` counts, `suggestions`, and `quality`
   checks (format 1080×1920 H.264/AAC ≤ 60 s, loudness, caption overlaps/flashes after
