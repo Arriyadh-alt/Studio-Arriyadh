@@ -14,8 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .captions import STOPWORDS, Caption, chunk_words, literal_text, _classic_ass
-from .facecam import BOTTOM_SAFE_EDGE, FacecamOverlay, OutputRect
+from .captions import STOPWORDS, Caption, chunk_words, literal_text, _classic_ass, caption_height as measure_caption_height
 
 STEP = 0.1
 FPS = 30
@@ -450,45 +449,52 @@ def _bands_overlap(a, b, gap=0):
     return a[0] < b[1] + gap and a[1] + gap > b[0]
 
 
-def reserve_facecam_space(overlay, hook=None, caption_height=None):
-    """Fit the camera clear of the rendered text while retaining its corner anchor."""
-    if overlay is None:
-        return overlay
-    r = overlay.rect
-    limit = r.h
-    if r.y != 24 and hook and hook.get("style") == "story":
-        limit = min(limit, BOTTOM_SAFE_EDGE-100-hook_height(hook["text"], STORY_SIZE))
-    limit = max(2, int(limit)//2*2)
-    if r.h <= limit:
-        return overlay
-    w = max(2, round(r.w*limit/r.h/2)*2)
-    x = 24 if r.x == 24 else r.x+r.w-w
-    return FacecamOverlay(overlay.box, OutputRect(x, 24 if r.y == 24 else BOTTOM_SAFE_EDGE-limit, w, limit))
+def hook_layout(hook, rect, style, captions, caption_limit=None):
+    story = hook.get("style") == "story"
+    end = hook["duration"] + (0 if story else .7)
+    active = [c for c in captions if c.start < end and c.end > 0]
+    height = measure_caption_height(active, style, caption_limit) if style is not None else 0
+    band = hook_band(hook["text"], rect, style if active else None, preferred=760 if story else 380,
+                     size=STORY_SIZE if story else HOOK_SIZE, caption_height=height)
+    return band, height, bool(active)
 
 
 def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE, caption_height=None):
     """Vertical band for the hook banner clear of the facecam and the captions."""
-    height = hook_height(text, size)
-    blocked = ([(rect.y, rect.y + rect.h)] if rect is not None else []) + \
-              ([caption_band(style, getattr(style, "size", 80), caption_height)] if style is not None else [])
-    candidates = [preferred, 960 - height / 2] + [b[1] + 40 for b in blocked] + [b[0] - 40 - height for b in blocked]
-    clear = [top for top in candidates if 60 <= top and top + height <= 1860
-             and not any(_bands_overlap((top, top + height), b, 20) for b in blocked)]
-    top = round(min(clear, key=lambda t: abs(t - preferred)) if clear else preferred)
+    regions = [(60,1860)] if rect is None else [(60,min(1860,rect.y-20)), (max(60,rect.y+rect.h+20),1860)]
+    regions = [(a,b) for a,b in regions if b > a]
+    if not regions:
+        raise ValueError("No title space outside the facecam")
+    height = min(hook_height(text, size), max(b-a for a,b in regions))
+    blocked = caption_band(style, getattr(style,"size",80), caption_height) if style is not None else None
+    candidates = []
+    for a,b in regions:
+        if b-a < height:
+            continue
+        targets = [preferred,a,b-height,960-height/2]
+        if blocked:
+            targets += [blocked[0]-20-height,blocked[1]+20]
+        candidates.extend(max(a,min(b-height,t)) for t in targets)
+    clear = [top for top in candidates if blocked is None or not _bands_overlap((top,top+height),blocked,20)]
+    overlap = lambda top: max(0,min(top+height,blocked[1])-max(top,blocked[0])) if blocked else 0
+    top = round(min(clear,key=lambda t:abs(t-preferred)) if clear else min(candidates,key=lambda t:(overlap(t),abs(t-preferred))))
     return top, top + height
 
 
 def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position="bottom", top=None,
-                   story=False, highlight=None) -> str:
+                   story=False, highlight=None, max_height=None) -> str:
     """Add an animated hook banner over the opening seconds of an ASS script.
 
     A storytelling hook is larger, white, and pops in word by word with the streamer's name in yellow."""
     ass_text = ass_text or _classic_ass([])
+    size = STORY_SIZE if story else HOOK_SIZE
+    while max_height is not None and size > 1 and hook_height(text,size) > max_height:
+        size -= 1
     if top is not None:
         alignment, margin = 8, int(top)
     else:
         alignment, margin = (5, 0) if caption_position == "top" else (8, 380)
-    style = (f"Style: Hook,Montserrat Black,{STORY_SIZE if story else HOOK_SIZE},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00101317,-1,0,0,0,100,100,0,0,"
+    style = (f"Style: Hook,Montserrat Black,{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00101317,-1,0,0,0,100,100,0,0,"
              f"3,14,0,{alignment},110,110,{margin},1\n")
     ass_text = ass_text.replace("\n\n[Events]", "\n" + style + "\n[Events]", 1)
     label = literal_text(text.upper())
@@ -503,7 +509,7 @@ def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position
             bare = re.sub(r"(?:['’]S)?[!?.,…]*$", "", token)
             color = r"\1c&H00D7FF&" if bare in named else r"\1c&HFFFFFF&"
             pieces.append("{" + rf"\alpha&HFF&{color}\t({at},{at + 90},\alpha&H00&)" + "}" + literal_text(token))
-        per_line, lines, width = int(860 / (STORY_SIZE * 0.5)), [[]], 0
+        per_line, lines, width = int(860 / (size * 0.5)), [[]], 0
         for token, piece in zip(tokens, pieces):
             if lines[-1] and width + 1 + len(token) > per_line:
                 lines.append([])
@@ -750,12 +756,14 @@ def framing_fix(style, rect, height=None):
     return style, None
 
 
-def framing_conflicts(rect=None, style=None, hook=None, hook_captions_overlap=True, caption_height=None) -> list:
+def framing_conflicts(rect=None, style=None, hook=None, hook_captions_overlap=True, caption_height=None,
+                      hook_caption_height=None) -> list:
     """Overlaps between the facecam, the caption band and the hook banner in the rendered layout."""
     facecam = (rect.y, rect.y + rect.h) if rect is not None else None
     captions = caption_band(style, getattr(style, "size", 80), caption_height) if style is not None else None
+    hook_captions = caption_band(style, getattr(style,"size",80), hook_caption_height) if style is not None and hook_caption_height is not None else captions
     pairs = (("Hook title covers the facecam", hook, facecam), ("Captions cover the facecam", captions, facecam),
-             ("Hook title covers the captions", hook, captions))
+             ("Hook title covers the captions", hook, hook_captions))
     return [label for label, a, b in pairs if a and b and _bands_overlap(a, b)
             and (label != "Hook title covers the captions" or hook_captions_overlap)]
 

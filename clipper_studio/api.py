@@ -32,9 +32,9 @@ from starlette.background import BackgroundTask
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, caption_height, to_ass, transcribe
 from shorts_clipper.downloader import download_section
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.director import (STORY_SIZE, DirectorOptions, cut_source, effects_for, framing_fix, hook_band,
+from shorts_clipper.director import (DirectorOptions, cut_source, effects_for, framing_fix, hook_layout,
                                      hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
-                                     plan_edit, plan_record, quality_check, remap_captions, reserve_facecam_space)
+                                     plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.story import game_name, hook_language, streamer_name
 from shorts_clipper.voices import DELIVERY_CHOICES, MOODS, PERSONAS, SAMPLES, VOICE_CHOICES, narrate
 from shorts_clipper.video import detect_focal_x, make_vertical_clip, video_duration
@@ -376,9 +376,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                 finally:
                                     capture.release()
                                 overlay = layout_facecam(box, size, options.position, options.size)
-                            overlay = reserve_facecam_space(overlay, plan.hook if plan else None)
                             rect = overlay.rect
-                            caption_limit = max(1, rect.y-284 if rect.y != 24 else 1476-rect.y-rect.h)
+                            caption_limit = max(1, rect.y-260-24 if rect.y != 24 else 1500-rect.y-rect.h-24)
                             text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
                             corner = ("top" if rect.y == 24 else "bottom") + ("-left" if rect.x == 24 else "-right")
                             result = {"status": "used", "box": vars(box), "position": corner,
@@ -398,20 +397,18 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     if spec["mode"] == "crop" and overlay is None:
                         plan.focal = [detect_focal_x(render_source, offset, offset + segment.length)
                                       for offset, segment in zip(plan.offsets(), plan.segments)]
-                ass = (to_ass(shown, style, max_height=caption_limit) if caption_limit is not None else to_ass(shown, style)) if spec["captions"] else None
+                ass = None
+                if spec["captions"]:
+                    caption_options = {"max_height": caption_limit} if caption_limit is not None else {}
+                    ass = to_ass(shown, style, **caption_options)
                 layout = {"rect": overlay.rect if overlay else None, "style": style if spec["captions"] else None,
                           "caption_height": text_height}
                 if plan and plan.hook and plan.hook.get("text"):
-                    if plan.hook.get("style") == "story":
-                        layout["hook_captions_overlap"] = any(c.start < plan.hook["duration"] and c.end > 0 for c in shown)
-                        hook_style = layout["style"] if layout["hook_captions_overlap"] else None
-                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], hook_style,
-                                                   preferred=760, size=STORY_SIZE, caption_height=text_height)
-                        ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"], top=layout["hook"][0],
-                                             story=True, highlight=plan.hook.get("streamer"))
-                    else:
-                        layout["hook"] = hook_band(plan.hook["text"], layout["rect"], layout["style"], caption_height=text_height)
-                        ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + 0.7, top=layout["hook"][0])
+                    band, hook_height, overlap = hook_layout(plan.hook, layout["rect"], layout["style"], shown, caption_limit)
+                    layout.update(hook=band,hook_caption_height=hook_height,hook_captions_overlap=overlap)
+                    story = plan.hook.get("style") == "story"
+                    ass = hook_title_ass(ass, plan.hook["text"], plan.hook["duration"] + (0 if story else .7),
+                                         top=band[0],story=story,highlight=plan.hook.get("streamer"),max_height=band[1]-band[0])
                 if ass is not None:
                     subtitles = work / "captions.ass"
                     subtitles.write_text(ass, encoding="utf-8")

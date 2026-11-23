@@ -28,10 +28,12 @@ def test_legacy_defaults(tmp_path):
     assert job['clips'][0]['facecam'] == FacecamSpec().model_dump()
 
 
-@pytest.mark.parametrize('scenario', ['detected','manual','none','failure','render_failure','disabled','still_failure','captioned','bottom_captioned'])
+@pytest.mark.parametrize('scenario', ['detected','manual','none','failure','render_failure','disabled','still_failure','captioned','bottom_captioned','long_captioned'])
 def test_worker(tmp_path, monkeypatch, scenario):
     from shorts_clipper.captions import Caption, Transcript
     monkeypatch.setattr('clipper_studio.api.transcribe', lambda source, **kwargs: Transcript([Caption(0, 1, 'Halo dunia!')], 'id'))
+    if scenario=='long_captioned':
+        monkeypatch.setattr('clipper_studio.api.transcribe', lambda *a,**k: Transcript([Caption(0,1,'amazing reaction hilarious moment amazing reaction hilarious moment')],'id'))
     monkeypatch.setattr('clipper_studio.api.fetch_metadata', lambda *a: {'duration':60})
     monkeypatch.setattr('clipper_studio.api.fetch_chat', lambda *a: ({'duration':60}, []))
     monkeypatch.setattr('clipper_studio.api.detect_spikes', lambda *a,**k: ([{'start':0,'end':10}], []))
@@ -48,7 +50,7 @@ def test_worker(tmp_path, monkeypatch, scenario):
         detection.side_effect=RuntimeError('detection')
     monkeypatch.setattr('clipper_studio.api.detect_facecam', detection)
     overlay=layout_facecam(box,(640,360),'top-right')
-    if scenario=='bottom_captioned':
+    if scenario in ('bottom_captioned','long_captioned'):
         overlay=layout_facecam(SourceBox(.791,.671,.209,.279),(1920,1080),'bottom-right')
         monkeypatch.setattr('clipper_studio.api.layout_facecam', lambda *a: overlay)
     auto=MagicMock(return_value=overlay)
@@ -58,6 +60,9 @@ def test_worker(tmp_path, monkeypatch, scenario):
         calls.append(kwargs.get('facecam'))
         if scenario=='captioned' and kwargs.get('facecam') is not None:
             assert 'Montserrat' in a[3].read_text()
+        if scenario=='long_captioned' and kwargs.get('facecam') is not None:
+            assert kwargs.get('facecam') == overlay and overlay.rect.w >= 410
+            assert r'\fs' in a[3].read_text()
         if scenario=='render_failure' and kwargs:
             raise RuntimeError('overlay filter')
         output.write_bytes(b'video')
@@ -70,16 +75,18 @@ def test_worker(tmp_path, monkeypatch, scenario):
     monkeypatch.setattr('clipper_studio.api.to_ass',subtitles)
     monkeypatch.setattr('clipper_studio.api.subprocess.run', lambda cmd,**k: Path(cmd[-1]).write_bytes(b'thumb'))
     spec={'enabled':scenario!='disabled'}
-    if scenario in ('manual','bottom_captioned'):
+    if scenario in ('manual','bottom_captioned','long_captioned'):
         spec['box']=vars(box)
-    if scenario=='bottom_captioned':
+    if scenario in ('bottom_captioned','long_captioned'):
         spec.update(position='bottom-right',box=vars(overlay.box))
     app=create_app(tmp_path)
     with TestClient(app) as client:
-        request={'url':'https://youtu.be/abcdefghijk','captions':scenario in ('captioned','bottom_captioned'),'facecam':spec,
+        request={'url':'https://youtu.be/abcdefghijk','captions':scenario in ('captioned','bottom_captioned','long_captioned'),'facecam':spec,
                  'language':'id','caption_style':{'preset':'pop'}}
-        if scenario=='bottom_captioned':
+        if scenario in ('bottom_captioned','long_captioned'):
             request['director']={'enabled':False}
+        if scenario=='long_captioned':
+            request['caption_style']['size']=130
         jid=client.post('/api/jobs',json=request).json()['id']
         app.state.pending.join()
         job=client.get(f'/api/jobs/{jid}').json()
@@ -88,10 +95,10 @@ def test_worker(tmp_path, monkeypatch, scenario):
         assert clip['facecam']==job['request']['facecam']
         if scenario=='captioned':
             assert clip['caption_language']=='id' and clip['caption_style']['preset']=='pop'
-        if scenario in ('detected','manual','still_failure','captioned','bottom_captioned'):
+        if scenario in ('detected','manual','still_failure','captioned','bottom_captioned','long_captioned'):
             assert calls==[overlay]
-            assert clip['facecam_result']['position']==('bottom-right' if scenario=='bottom_captioned' else 'top-right')
-            assert clip['facecam_result']['origin']==('manual' if scenario in ('manual','bottom_captioned') else 'detected')
+            assert clip['facecam_result']['position']==('bottom-right' if scenario in ('bottom_captioned','long_captioned') else 'top-right')
+            assert clip['facecam_result']['origin']==('manual' if scenario in ('manual','bottom_captioned','long_captioned') else 'detected')
             if scenario=='bottom_captioned':
                 assert overlay.rect.y+overlay.rect.h == 1600
                 assert styles == ['middle']
@@ -99,7 +106,7 @@ def test_worker(tmp_path, monkeypatch, scenario):
             assert calls==[overlay,None]
         else:
             assert calls==[None]
-        if scenario in ('manual','disabled','bottom_captioned'):
+        if scenario in ('manual','disabled','bottom_captioned','long_captioned'):
             detection.assert_not_called()
         if scenario=='still_failure':
             assert 'source_still_url' not in clip
