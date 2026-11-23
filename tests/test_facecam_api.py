@@ -81,7 +81,7 @@ def test_worker(tmp_path, monkeypatch, scenario):
         spec.update(position='bottom-right',box=vars(overlay.box))
     app=create_app(tmp_path)
     with TestClient(app) as client:
-        request={'url':'https://youtu.be/abcdefghijk','captions':scenario in ('captioned','bottom_captioned','long_captioned'),'facecam':spec,
+        request={'ai_analysis':False,'review':False,'url':'https://youtu.be/abcdefghijk','captions':scenario in ('captioned','bottom_captioned','long_captioned'),'facecam':spec,
                  'language':'id','caption_style':{'preset':'pop'}}
         if scenario in ('bottom_captioned','long_captioned'):
             request['director']={'enabled':False}

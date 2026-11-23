@@ -12,8 +12,10 @@
   <link rel="stylesheet" href="./style.css">
   <link rel="stylesheet" href="./facecam.css">
   <link rel="stylesheet" href="./director.css">
+  <link rel="stylesheet" href="./moments.css">
   <script src="./captions.js" defer></script>
   <script src="./app.js" defer></script>
+  <script src="./moments.js" defer></script>
 </head>
 <body>
   <header class="topbar"><a class="brand" href="#"><span class="brand-icon">✂</span> Clipper Studio</a><span class="tag">From stream to standout</span></header>
@@ -34,14 +36,15 @@
           <label class="check"><input id="director" type="checkbox" checked> AI Director edits</label>
           <label class="check"><input id="director-story" type="checkbox" checked> Storytelling hook</label>
           <label class="check"><input id="director-loop" type="checkbox" checked> Seamless loop</label>
-          <label class="check"><input id="director-voiceover" type="checkbox"> AI voice-over on the hook</label>
+          <label class="check"><input id="director-voiceover" type="checkbox" checked> AI voice-over on the hook</label>
           <label>Voice<select id="director-voice"><option value="auto">Auto (match the scene)</option></select></label>
           <label>Voice delivery<select id="director-delivery"><option value="auto">Auto (from the scene)</option></select></label>
           <div class="voice-picker"><button type="button" id="create-voice-preview">▶ Preview voice</button><span id="create-voice-status" class="hint" aria-live="polite"></span></div>
           <label>Background music<select id="director-music"><option value="auto">Auto (quiet clips)</option><option value="on">Always</option><option value="off">Off</option></select></label>
         </div></details>
         <div id="create-caption-style"></div>
-        <p class="hint">✦ Chat-led detection <span>·</span> AI Director <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
+        <div class="analysis-options"><label class="check"><input id="ai-analysis" type="checkbox" checked> AI video &amp; audio analysis</label><label class="check"><input id="review-moments" type="checkbox" checked> Review moments before rendering</label></div>
+        <p class="hint">✦ AI + chat detection <span>·</span> AI Director <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
       </form>
       <div class="section-heading"><div><span class="eyebrow">Your workspace</span><h2>Recent streams</h2></div><button id="refresh-jobs" class="quiet">Refresh ↻</button></div>
       <div id="jobs" class="jobs"></div>
@@ -49,8 +52,9 @@
     <section id="job-view" hidden>
       <a class="back" href="#">← All streams</a>
       <div id="job-heading"></div>
-      <div class="panel progress-panel"><div class="status-row"><strong id="stage" aria-live="polite"></strong><span id="progress-label"></span></div><progress id="progress" max="1" value="0"></progress><button id="cancel-job" class="quiet" hidden>Cancel job</button><p id="cancel-hint" class="hint" hidden>Stops further clips. An in-flight download or render may finish before stopping.</p><div id="job-error" class="error" hidden></div></div>
+      <div class="panel progress-panel"><div class="status-row"><strong id="stage" aria-live="polite"></strong><span id="progress-label"></span></div><progress id="progress" max="1" value="0"></progress><p id="analysis-detail" class="hint" role="status" hidden></p><button id="cancel-job" class="quiet" hidden>Cancel job</button><p id="cancel-hint" class="hint" hidden>Stops further clips. An in-flight download or render may finish before stopping.</p><div id="job-error" class="error" hidden></div></div>
       <section class="panel activity-panel"><div class="section-heading"><div><span class="eyebrow">The pulse of your stream</span><h2>Chat activity</h2></div><span class="hint">Tap a spike to review ↓</span></div><div id="chart"></div></section>
+      <section id="moments-panel" hidden aria-label="Detected moments"></section>
       <div class="section-heading clips-heading"><div><span class="eyebrow">Made for the moment</span><h2 id="clips-title">Your highlights</h2></div><div class="heading-actions"><a id="download-kept" class="button" hidden>Download kept clips ↓</a><button id="delete-unkept" class="quiet" hidden>Delete unkept</button></div></div>
       <p id="keep-hint" class="hint" hidden>Star ★ Keep on your best clips to download them together</p>
       <div id="clips" class="clips"></div>

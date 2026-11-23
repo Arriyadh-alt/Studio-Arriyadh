@@ -122,7 +122,7 @@ def test_voice_preview_rejects_unknown_voices_and_reports_failures(client):
     assert client.post("/api/voices/preview", json={"voice": "robot"}).status_code == 422
     assert client.post("/api/voices/preview", json={"delivery": "angry"}).status_code == 422
     assert client.post("/api/voices/preview", json={"text": "fail"}).status_code == 503
-    assert client.post("/api/jobs", json={"url": "https://www.youtube.com/watch?v=LIxBN4AHMEE",
+    assert client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=LIxBN4AHMEE",
                                           "director": {"voice": "robot"}}).status_code == 422
 
 

@@ -14,7 +14,7 @@ const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:nul
 const renderedOffset = (clip, offset) => {
   const timeline=clip.director_result?.edits?.timeline;
   if(!timeline?.length) return offset;
-  const shot=timeline.find(([start,end])=>offset<end) || timeline[timeline.length-1];
+  const shot=timeline.find(([,end])=>offset<end) || timeline[timeline.length-1];
   return shot[2] + Math.min(shot[1]-shot[0], Math.max(0, offset-shot[0]));
 };
 const directorDefaults = value => ({enabled:true,hook:true,edits:true,sfx:true,music:'auto',story:true,voiceover:false,hook_text:null,voice:'auto',delivery:'auto',loop:true,...value});
@@ -142,7 +142,7 @@ function jobTitle(job) {
     const url = new URL(job.url);
     const id = url.searchParams.get('v') || url.pathname.split('/').filter(Boolean).pop();
     if (/^[a-zA-Z0-9_-]{11}$/.test(id)) return `YouTube video ${id}`;
-  } catch {}
+  } catch { return 'Untitled stream'; }
   return 'Untitled stream';
 }
 function drawHome(jobs) {
@@ -172,7 +172,7 @@ function chart(job) {
   const marks = job.clips.map((clip,index) => `<g class="chart-mark" tabindex="0" role="button" aria-label="Review highlight ${clip.number ?? index+1} at ${timestamp(clip.peak)}" data-clip="${clip.id}"><title>Highlight ${clip.number ?? index+1} · ${timestamp(clip.peak)}</title><rect x="${clip.peak/duration*width-26}" y="0" width="52" height="138" fill="transparent"/><line x1="${clip.peak/duration*width}" x2="${clip.peak/duration*width}" y1="17" y2="125" stroke="#b8f477" stroke-dasharray="3 4"/><g transform="translate(0 13) scale(1 ${markerScale}) translate(0 -13)"><circle cx="${clip.peak/duration*width}" cy="13" r="11" fill="#b8f477"/><text x="${clip.peak/duration*width}" y="17" text-anchor="middle" fill="#172210" font-size="11" font-weight="bold">${clip.number ?? index+1}</text></g></g>`).join('');
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
-function clipHtml(clip,index,job) {
+function clipHtml(clip,index) {
   const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),director:directorDefaults(clip.director),...CaptionControls.options(clip)};
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
@@ -180,7 +180,7 @@ function clipHtml(clip,index,job) {
   return `<article id="clip-${clip.id}" class="clip" data-id="${clip.id}" data-version="${escapeHtml(clipVersion(clip))}">
     <div class="clip-top"><div><h3>Highlight ${String(number).padStart(2,'0')}</h3>${badge(clip.status, clip.queue_position)}</div><button class="keep" aria-label="Keep highlight ${number}" aria-pressed="${!!clip.kept}" data-action="keep">${clip.kept?'★ Kept':'☆ Keep'}</button></div>
     <div class="preview${clip.status==='ready' ? ' with-thumbnail' : ''}">${clip.status==='ready' ? `<video controls playsinline ${clip.director_result?.edits?.loop?.status==='applied'?'loop':''} preload="metadata" poster="${escapeHtml(thumbnailUrl(clip))}"><source src=".${clip.file_url}?v=${clip.rendered_at || 0}-${clip.start}-${clip.end}-${clip.mode}-${clip.captions}" type="video/mp4"></video><figure class="thumbnail-preview" ${clip.thumbnail_url ? '' : 'hidden'}><img src="${escapeHtml(thumbnailUrl(clip))}" alt="Thumbnail for highlight ${number}" loading="lazy"><figcaption>Thumbnail</figcaption></figure>` : `<div class="placeholder"><span style="font-size:30px">${clip.status==='failed'?'!':'✂'}</span><span>${clip.status==='failed'?'This clip needs another try':clip.status==='cancelled'?'Cancelled — re-render to try again':clip.status==='queued'?escapeHtml(queueLabel(clip.queue_position)):`Creating your highlight…<br>Attempt ${clip.attempt || 1} of 3`}</span></div>`}</div>
-    <div class="clip-body"><div class="clip-meta"><span class="score">↗ ${clip.score.toFixed(2)} spike score</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">Onset ${timestamp(clip.onset)} · Peak ${timestamp(clip.peak)}</p>
+    <div class="clip-body">${clip.title?`<h3>${escapeHtml(clip.title)}</h3>`:''}${clip.sources?.length?`<p class="moment-source">${escapeHtml(clip.sources.length>1?'AI + Chat':clip.sources[0]==='ai'?'AI Analysis':'Chat Analysis')}</p>`:''}<div class="clip-meta"><span class="score">↗ ${clip.sources?.length?`${Math.round(clip.score)} / 100 Viral Potential`:`${clip.score.toFixed(2)} spike score`}</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">${clip.onset!=null?`Onset ${timestamp(clip.onset)} · `:''}Peak ${timestamp(clip.peak)}</p>
     <div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>
     ${clip.error ? `<p class="error">${escapeHtml(clip.error)}${clip.status==='failed'?'<br>Adjust the settings below or try Re-render again.':''}</p>` : ''}
     ${clip.status==='ready' ? `<form class="thumbnail-editor"><label>Thumbnail text<input name="text" maxlength="64" value="${escapeHtml(clip.thumbnail_text)}" placeholder="${escapeHtml(clip.thumbnail_hook || 'Automatic hook')}" autocomplete="off"></label><p class="hint">Leave blank to use the automatic hook.</p><div class="actions"><button type="submit">Regenerate ↻</button><a class="button thumbnail-download">Download JPG ↓</a></div><p class="hint thumbnail-status" role="status" hidden></p></form>` : ''}
@@ -208,6 +208,9 @@ function drawJob(job) {
   $('#cancel-hint').hidden = !cancellable;
   $('#job-error').hidden = !job.error;
   $('#job-error').textContent = job.error || '';
+  $('#analysis-detail').hidden = !busy(job) || !job.analysis_detail;
+  $('#analysis-detail').textContent = job.analysis_detail || '';
+  globalThis.MomentReview?.draw(job);
   chart(job);
   $('#clips-title').textContent = `Your highlights${job.clips.length ? ' · '+job.clips.length : ''}`;
   const kept = job.clips.filter(c=>c.kept && c.status==='ready').length;
@@ -237,7 +240,7 @@ function drawJob(job) {
     if (clip.status==='ready') updateThumbnail(node, clip);
     draftFeedback(node);
   });
-  if (!job.clips.length) container.innerHTML = `<p class="empty">${busy(job)?'Your clips will appear here as they finish.':job.status==='cancelled'?'This job was cancelled. Return to All streams to start another.':job.error?'The stream could not be processed. Return to All streams to try another URL.':'No significant chat spikes found. Try a livelier replay.'}</p>`;
+  if (!job.clips.length) container.innerHTML = `<p class="empty">${busy(job)?'Your clips will appear here as they finish.':job.status==='cancelled'?'This job was cancelled. Return to All streams to start another.':job.error?'The stream could not be processed. Return to All streams to try another URL.':job.moments?.length?'Preview and select moments above, then render your favorites.':job.request.review?'No viral moments found. Try another replay.':'No significant chat spikes found. Try a livelier replay.'}</p>`;
 }
 function updateThumbnail(node, clip) {
   const url = thumbnailUrl(clip);
@@ -279,12 +282,14 @@ function route() {
   const jobPage = /^#jobs\//.test(location.hash);
   $('#home').hidden=jobPage; $('#job-view').hidden=!jobPage;
   $('#clips').innerHTML=''; $('#job-heading').innerHTML='';
+  globalThis.MomentReview?.reset();
+  $('#analysis-detail').hidden=true;
   $('#stage').textContent='Loading job…'; $('#progress-label').textContent='';
   $('#cancel-job').hidden=true; $('#cancel-hint').hidden=true;
   $('#progress').removeAttribute('value'); $('#job-error').hidden=true;
   chartKey=undefined; $('#chart').innerHTML='';
   $('#download-kept').hidden=true; $('#delete-unkept').hidden=true; $('#keep-hint').hidden=true;
-  window.scrollTo(0,0);
+  globalThis.scrollTo(0,0);
   clearInterval(timer); refresh(); timer=setInterval(refresh,2000);
 }
 $('#lead').addEventListener('input',event=>$('#lead-value').textContent=`${event.target.value} seconds`);
@@ -292,7 +297,7 @@ $('#refresh-jobs').addEventListener('click',()=>refresh());
 $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
-    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked,voice:$('#director-voice').value,delivery:$('#director-delivery').value,loop:$('#director-loop').checked},...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{url:$('#url').value.trim(),ai_analysis:$('#ai-analysis').checked,review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked,voice:$('#director-voice').value,delivery:$('#director-delivery').value,loop:$('#director-loop').checked},...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
@@ -458,5 +463,5 @@ function jump(event) {const mark=event.target.closest('[data-clip]');if(mark)doc
 $('#chart').addEventListener('click',jump);
 $('#chart').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();jump(event);}});
 new ResizeObserver(()=>{if(current && !$('#job-view').hidden)chart(current);}).observe($('#chart'));
-window.addEventListener('hashchange',route);
+globalThis.addEventListener('hashchange',route);
 route();

@@ -1,4 +1,4 @@
-const CaptionControls = (() => {
+globalThis.CaptionControls = (() => {
   const defaults = {preset:'pop',font:'Montserrat',size:80,position:'bottom',text_color:'#FFFFFF',highlight_color:'#FFE34D',emphasis_color:'#67F5B5',uppercase:false,emphasis:true};
   const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   function options(clip = {}) {
