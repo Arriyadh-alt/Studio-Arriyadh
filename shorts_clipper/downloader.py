@@ -9,7 +9,7 @@ from .youtube import YouTubeAccessError, blocking_message, cookie_options
 
 
 def download_section(url: str, output_dir: Path, start: float, end: float, max_height: int = 1080,
-                     cookies: Path | None = None) -> Path:
+                     cookies: Path | None = None, proxy: str | None = None) -> Path:
     """Download only `start`..`end` (seconds) of `url` as an MP4 and return its path.
 
     Raises ValueError if the range starts past the end of the video.
@@ -27,7 +27,7 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
         "no_warnings": True,
         "noprogress": True,
     }
-    with cookie_options(cookies) as authentication:
+    with cookie_options(cookies, proxy=proxy) as authentication:
         try:
             with yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -37,7 +37,7 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
                 info = ydl.process_ie_result(info, download=True)
                 files = [Path(d["filepath"]) for d in info.get("requested_downloads", []) if d.get("filepath")]
         except DownloadError as error:
-            message = blocking_message(error, cookies)
+            message = blocking_message(error, cookies, proxy)
             if message:
                 raise YouTubeAccessError(message) from None
             raise

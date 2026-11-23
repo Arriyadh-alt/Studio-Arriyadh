@@ -59,10 +59,12 @@ def test_conflicting_flags():
     assert cli.main(["URL", "0", "10", "--srt", "--no-captions"]) == 1
 
 
-def test_cookies_option_is_forwarded(tmp_path):
+def test_cookies_and_proxy_options_are_forwarded(tmp_path):
     cookies = tmp_path / "cookies.txt"
+    proxy = "http://proxy-user:proxy-password@proxy.invalid:8080"
     with patch.object(cli, "download_section", return_value=tmp_path / "source.mp4") as download, \
          patch.object(cli, "video_duration", return_value=10), \
          patch.object(cli, "make_vertical_clip"):
-        assert cli.main(["URL", "0", "10", "--no-captions", "--cookies", str(cookies)]) == 0
+        assert cli.main(["URL", "0", "10", "--no-captions", "--cookies", str(cookies), "--proxy", proxy]) == 0
         assert download.call_args.kwargs["cookies"] == cookies
+        assert download.call_args.kwargs["proxy"] == proxy
