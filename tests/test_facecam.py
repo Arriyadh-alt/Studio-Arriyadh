@@ -109,6 +109,18 @@ def test_persistent_border_rejects_moving_gameplay(mirror_x, mirror_y):
     assert find_persistent_border([],face) is None
 
 
+def test_persistent_border_finds_edge_cam_with_body_below_face():
+    frames=[]
+    for index in range(8):
+        frame=np.full((360,640,3),30,dtype=np.uint8)
+        cv2.rectangle(frame,(190+index*35,40),(210+index*35,300),(255,255,255),-1)
+        frame[100:212,:100]=180
+        frames.append(frame)
+    box=find_persistent_border(frames,SourceBox(48/640,140/360,30/640,30/360))
+    assert box is not None and box.x==0
+    assert abs(box.y-100/360)<.01 and abs(box.w-100/640)<.01 and abs(box.h-112/360)<.01
+
+
 @pytest.mark.parametrize('intensity', [10, 255])
 @pytest.mark.parametrize('mode', ['crop', 'blur'])
 def test_auto_never_uses_bottom_even_when_top_is_busier(intensity, mode):
