@@ -10,6 +10,10 @@ from yt_dlp.utils import DownloadError, download_range_func
 from .youtube import YouTubeAccessError, blocking_message, cookie_options
 
 
+class _AnalysisSizeError(YouTubeAccessError):
+    pass
+
+
 def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = None,
                             proxy: str | None = None, should_continue=None) -> tuple[Path, Path | None]:
     """Download full-length compact audio and optional low-resolution video."""
@@ -20,7 +24,7 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
 
     def check_size(progress):
         if (progress.get("downloaded_bytes") or 0) > max_bytes:
-            raise YouTubeAccessError(f"AI analysis media exceeds the {max_bytes:,}-byte per-file limit.")
+            raise _AnalysisSizeError(f"AI analysis media exceeds the {max_bytes:,}-byte per-file limit.")
 
     proxy = proxy or os.environ.get("CLIPPER_YTDLP_PROXY")
     if proxy and not proxy.startswith("http://"):
@@ -47,7 +51,7 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
                 if not files or not files[0].exists():
                     raise FileNotFoundError("Download finished but the media file was not found")
                 paths.append(files[0])
-            except (DownloadError, FileNotFoundError) as error:
+            except (_AnalysisSizeError, DownloadError, FileNotFoundError) as error:
                 if isinstance(error, DownloadError):
                     message = blocking_message(error, cookies, proxy)
                     if message:

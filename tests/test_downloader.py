@@ -46,7 +46,7 @@ def test_fractional_windows_do_not_reuse_another_sections_file(monkeypatch, tmp_
     assert len(downloads) == 3
 
 
-@pytest.mark.parametrize("video_failure", [False, True, "missing"])
+@pytest.mark.parametrize("video_failure", [False, True, "missing", "oversized"])
 def test_analysis_download(monkeypatch, tmp_path, video_failure):
     options_seen = []
 
@@ -70,6 +70,8 @@ def test_analysis_download(monkeypatch, tmp_path, video_failure):
                 raise yt_dlp.utils.DownloadError("Requested format is not available")
             if video and video_failure == "missing":
                 return {}
+            if video and video_failure == "oversized":
+                self.options["progress_hooks"][0]({"downloaded_bytes": self.options["max_filesize"] + 1})
             path = tmp_path / ("video.mp4" if video else "audio.m4a")
             path.touch()
             return {"requested_downloads": [{"filepath": str(path)}]}
