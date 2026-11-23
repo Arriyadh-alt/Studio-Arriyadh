@@ -351,6 +351,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 render_duration = plan.duration if plan else duration
                 shown = remap_captions(captions, plan) if plan and spec["captions"] else captions if spec["captions"] else []
                 text_height = None
+                caption_limit = None
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 video = work / "clip.mp4"
                 overlay = None
@@ -375,9 +376,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                 finally:
                                     capture.release()
                                 overlay = layout_facecam(box, size, options.position, options.size)
-                            text_height = caption_height(shown, style) if spec["captions"] else None
-                            overlay = reserve_facecam_space(overlay, plan.hook if plan else None, text_height)
+                            overlay = reserve_facecam_space(overlay, plan.hook if plan else None)
                             rect = overlay.rect
+                            caption_limit = max(1, rect.y-284 if rect.y != 24 else 1476-rect.y-rect.h)
+                            text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
                             corner = ("top" if rect.y == 24 else "bottom") + ("-left" if rect.x == 24 else "-right")
                             result = {"status": "used", "box": vars(box), "position": corner,
                                       "size": rect.w / 1080, "origin": "manual" if options.box else "detected"}
@@ -396,7 +398,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     if spec["mode"] == "crop" and overlay is None:
                         plan.focal = [detect_focal_x(render_source, offset, offset + segment.length)
                                       for offset, segment in zip(plan.offsets(), plan.segments)]
-                ass = to_ass(shown, style) if spec["captions"] else None
+                ass = (to_ass(shown, style, max_height=caption_limit) if caption_limit is not None else to_ass(shown, style)) if spec["captions"] else None
                 layout = {"rect": overlay.rect if overlay else None, "style": style if spec["captions"] else None,
                           "caption_height": text_height}
                 if plan and plan.hook and plan.hook.get("text"):

@@ -64,9 +64,9 @@ def test_worker(tmp_path, monkeypatch, scenario):
     monkeypatch.setattr('clipper_studio.api.make_vertical_clip', render)
     from shorts_clipper.captions import to_ass
     styles=[]
-    def subtitles(captions, style):
+    def subtitles(captions, style, **kwargs):
         styles.append(style.position)
-        return to_ass(captions,style)
+        return to_ass(captions,style,**kwargs)
     monkeypatch.setattr('clipper_studio.api.to_ass',subtitles)
     monkeypatch.setattr('clipper_studio.api.subprocess.run', lambda cmd,**k: Path(cmd[-1]).write_bytes(b'thumb'))
     spec={'enabled':scenario!='disabled'}

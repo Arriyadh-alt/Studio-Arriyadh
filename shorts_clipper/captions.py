@@ -285,15 +285,31 @@ def styled_lines(text, style):
     return lines
 
 
-def caption_height(captions, style):
-    if not captions:
-        return 0
+def _effective_style(style):
     size = 76 if style.preset == "classic" and style.size == 80 else style.size
     if style.preset == "minimal":
         size = round(size*.8)
-    effective = CaptionStyle(**{**vars(style), "size": size})
-    font = style_font(effective.font, size)
-    line_height = sum(font.getmetrics()) if font else size*1.3
+    return CaptionStyle(**{**vars(style), "size": size})
+
+
+def fit_caption_style(caption, style, max_height):
+    if max_height is None:
+        return style
+    for size in range(style.size, 0, -1):
+        fitted = CaptionStyle(**{**vars(style), "size": size})
+        if caption_height([caption], fitted) <= max_height:
+            return fitted
+    return fitted
+
+
+def caption_height(captions, style, max_height=None):
+    if not captions:
+        return 0
+    if max_height is not None:
+        return max(caption_height([c], fit_caption_style(c, style, max_height)) for c in captions)
+    effective = _effective_style(style)
+    font = style_font(effective.font, effective.size)
+    line_height = sum(font.getmetrics()) if font else effective.size*1.3
     heights = []
     for caption in captions:
         text = literal_text(caption.text)
@@ -304,17 +320,15 @@ def caption_height(captions, style):
     return math.ceil(max(heights))
 
 
-def to_ass(captions: list[Caption], style: CaptionStyle | dict | None = None) -> str:
+def to_ass(captions: list[Caption], style: CaptionStyle | dict | None = None, max_height=None) -> str:
     # Preserve the historical serializer for callers supplying only static chunks.
-    if style is None and not any(c.words for c in captions):
+    if style is None and not any(c.words for c in captions) and max_height is None:
         return _classic_ass(captions)
     style = style if isinstance(style, CaptionStyle) else CaptionStyle.from_dict(style)
-    if style == CaptionStyle(preset="classic"):
+    if style == CaptionStyle(preset="classic") and max_height is None:
         return _classic_ass(captions)
-    size = 76 if style.preset == "classic" and style.size == 80 else style.size
-    if style.preset == "minimal":
-        size = round(size * .8)
-    effective = CaptionStyle(**{**style.__dict__, "size": size})
+    effective = _effective_style(style)
+    size = effective.size
     alignment = {"bottom": 2, "middle": 5, "top": 8}[style.position]
     margin = {"bottom": MARGIN_BOTTOM, "middle": 0, "top": 260}[style.position]
     family = "Montserrat Black" if style.font == "Montserrat" else style.font
@@ -327,7 +341,9 @@ def to_ass(captions: list[Caption], style: CaptionStyle | dict | None = None) ->
     for caption in captions:
         text = literal_text(caption.text)
         display = text.upper() if style.uppercase else text
-        lines = styled_lines(display, effective)
+        fitted = _effective_style(fit_caption_style(caption, style, max_height))
+        lines = styled_lines(display, fitted)
+        size_override = rf"{{\fs{fitted.size}}}" if fitted.size != size else ""
         if style.preset != "pop" or not caption.words:
             rendered = r"\N".join(lines)
             if style.preset == "minimal":
@@ -380,5 +396,5 @@ def to_ass(captions: list[Caption], style: CaptionStyle | dict | None = None) ->
                 windows.append((start, end, entrance + r"\N".join(rendered_lines)))
         for start, end, rendered in windows:
             if round(end * 100) > round(start * 100):
-                events.append(f"Dialogue: 0,{timestamp(start, True)},{timestamp(end, True)},Default,,0,0,0,,{rendered}\n")
+                events.append(f"Dialogue: 0,{timestamp(start, True)},{timestamp(end, True)},Default,,0,0,0,,{size_override}{rendered}\n")
     return header + "".join(events)

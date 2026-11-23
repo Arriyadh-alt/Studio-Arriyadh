@@ -458,8 +458,6 @@ def reserve_facecam_space(overlay, hook=None, caption_height=None):
     limit = r.h
     if r.y != 24 and hook and hook.get("style") == "story":
         limit = min(limit, BOTTOM_SAFE_EDGE-100-hook_height(hook["text"], STORY_SIZE))
-    if caption_height:
-        limit = min(limit, 1500-caption_height-48 if r.y == 24 else BOTTOM_SAFE_EDGE-260-caption_height-24)
     limit = max(2, int(limit)//2*2)
     if r.h <= limit:
         return overlay

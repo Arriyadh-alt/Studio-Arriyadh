@@ -156,13 +156,12 @@ def test_wrapped_captions_stay_above_tall_bottom_camera():
     overlay = layout_facecam(SourceBox(.1,.1,.1,.8),(1920,1080),'bottom-right')
     style = CaptionStyle(size=130)
     caption = Caption(0,1,'amazing reaction hilarious moment')
-    height = caption_height([caption],style)
+    height = caption_height([caption],style,overlay.rect.y-284)
     overlay = reserve_facecam_space(overlay,caption_height=height)
     style, _ = framing_fix(style,overlay.rect,height)
     lines = styled_lines(caption.text,style)
     assert len(lines) >= 4
     assert caption_band(style,height=height)[1] <= overlay.rect.y
-    assert 260+len(lines)*style.size*1.3 <= overlay.rect.y
     assert not framing_conflicts(overlay.rect,style,caption_height=height)
 
 
@@ -178,10 +177,11 @@ def test_rendered_text_leaves_tall_bottom_camera_visible(tmp_path, story):
     style = CaptionStyle(size=130)
     captions = [Caption(2,3,'amazing reaction hilarious moment')]
     hook = {'style':'story','text':'Windah takes one wrong turn and instantly regrets it'} if story else None
-    height = caption_height(captions,style)
-    overlay = reserve_facecam_space(layout_facecam(SourceBox(.1,.1,.1,.8),(1920,1080),'bottom-right'),hook,height)
+    overlay = reserve_facecam_space(layout_facecam(SourceBox(.1,.1,.1,.8),(1920,1080),'bottom-right'),hook)
+    limit = overlay.rect.y-284
+    height = caption_height(captions,style,limit)
     style, _ = framing_fix(style,overlay.rect,height)
-    ass = to_ass(captions,style)
+    ass = to_ass(captions,style,max_height=limit)
     if hook:
         band = hook_band(hook['text'],overlay.rect,None,preferred=760,size=STORY_SIZE)
         ass = hook_title_ass(ass,hook['text'],2,top=band[0],story=True)
@@ -208,6 +208,27 @@ def test_caption_height_handles_empty_minimal_and_font_fallback(monkeypatch):
     assert caption_height(captions,CaptionStyle(preset='minimal')) < caption_height(captions,CaptionStyle())
     monkeypatch.setattr('shorts_clipper.captions.style_font',lambda *a: None)
     assert caption_height(captions,CaptionStyle()) > 0
+
+
+def test_one_eight_line_caption_does_not_shrink_camera():
+    from shorts_clipper.captions import caption_height, styled_lines
+    from shorts_clipper.director import reserve_facecam_space
+    from shorts_clipper.facecam import SourceBox, layout_facecam
+    style = CaptionStyle(size=130)
+    caption = Caption(15,16,'amazing reaction hilarious moment amazing reaction hilarious moment')
+    assert len(styled_lines(caption.text,style)) == 8
+    overlay = layout_facecam(SourceBox(0,0,.2,.25),(1920,1080),'bottom-right')
+    adjusted = reserve_facecam_space(overlay,caption_height=caption_height([caption],style))
+    assert adjusted.rect.w >= min(overlay.rect.w,410)
+    assert adjusted == overlay
+    limit = overlay.rect.y-284
+    assert caption_height([caption],style,limit) <= limit
+    short = Caption(0,1,'Hello')
+    ass = to_ass([short,caption],style,max_height=limit)
+    events = [line for line in ass.splitlines() if line.startswith('Dialogue:')]
+    assert r'\fs' not in events[0]
+    assert r'\fs' in events[1]
+    assert style.size == 130
 
 
 def test_framing_check_flags_overlaps():
