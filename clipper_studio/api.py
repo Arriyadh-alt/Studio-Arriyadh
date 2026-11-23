@@ -439,7 +439,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                     capture.release()
                                 overlay = layout_facecam(box, size, options.position, options.size)
                             rect = overlay.rect
-                            caption_limit = max(1, rect.y-260-24 if rect.y != 24 else 1500-rect.y-rect.h-24)
+                            caption_limit = max(1, rect.y-260-24 if rect.y > 24 else 1500-rect.y-rect.h-24)
                             text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
                             corner = ("top" if rect.y == 24 else "bottom") + ("-left" if rect.x == 24 else "-right")
                             result = {"status": "used", "box": vars(box), "position": corner,
@@ -460,7 +460,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         if reframe["overlay"] is not overlay:
                             overlay = reframe["overlay"]
                             rect = overlay.rect
-                            caption_limit = max(1, rect.y-260-24 if rect.y != 24 else 1500-rect.y-rect.h-24)
+                            caption_limit = max(1, rect.y-260-24 if rect.y > 24 else 1500-rect.y-rect.h-24)
                             text_height = caption_height(shown, style, caption_limit) if spec["captions"] else None
                             result.update(size=round(rect.w / 1080, 3),
                                           position="split" if reframe["layout"] == "split" else result.get("position"))
