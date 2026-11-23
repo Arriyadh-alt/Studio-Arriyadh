@@ -649,9 +649,13 @@ def framing_fix(style, rect):
         return style, None
     top, bottom = caption_band(style, getattr(style, "size", 80))
     if rect.y < bottom and rect.y + rect.h > top:
-        new = "middle" if style.position != "middle" else ("bottom" if rect.y < 960 else "top")
-        style.position = new
-        return style, f"Moved captions to {new} so they don't cover the facecam"
+        preferred = ["middle", "bottom", "top"] if rect.y < 960 else ["middle", "top", "bottom"]
+        for new in preferred:
+            candidate = type(style).from_dict({**vars(style), "position": new})
+            top, bottom = caption_band(candidate, getattr(style, "size", 80))
+            if rect.y >= bottom or rect.y + rect.h <= top:
+                style.position = new
+                return style, f"Moved captions to {new} so they don't cover the facecam"
     return style, None
 
 

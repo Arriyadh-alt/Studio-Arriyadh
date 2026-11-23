@@ -355,11 +355,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     result = {"status": "unavailable", "box": None}
                     logger.debug("Facecam unavailable; rendering without overlay", exc_info=True)
                 shown, fixes = captions, []
+                if spec["captions"]:
+                    style, note = framing_fix(style, overlay.rect if overlay else None)
+                    if note:
+                        fixes.append(note)
                 if plan:
                     shown = remap_captions(captions, plan) if spec["captions"] else []
-                    if spec["captions"]:
-                        style, note = framing_fix(style, overlay.rect if overlay else None)
-                        fixes.append(note)
                     if spec["mode"] == "crop" and overlay is None:
                         plan.focal = [detect_focal_x(render_source, offset, offset + segment.length)
                                       for offset, segment in zip(plan.offsets(), plan.segments)]

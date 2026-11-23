@@ -114,6 +114,17 @@ def test_hook_band_clears_a_top_corner_facecam():
     assert hook_band("Thank you", OutputRect(24, 1400, 450, 450), CaptionStyle(position="middle"))[0] == 380
 
 
+@pytest.mark.parametrize('height', [340, 978])
+@pytest.mark.parametrize('size', [80, 130])
+def test_manual_bottom_caption_band_moves_above_camera(height, size):
+    from shorts_clipper.director import caption_band
+    rect = OutputRect(412,1600-height,454,height)
+    style, note = framing_fix(CaptionStyle(position='bottom',size=size), rect)
+    assert note
+    assert caption_band(style,size)[1] <= rect.y
+    assert not framing_conflicts(rect,style)
+
+
 def test_framing_check_flags_overlaps():
     facecam = OutputRect(414, 24, 450, 520)
     assert framing_conflicts(facecam, CaptionStyle(), (380, 530)) == ["Hook title covers the facecam"]
