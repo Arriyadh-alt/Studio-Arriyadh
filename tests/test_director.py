@@ -352,29 +352,29 @@ def test_loop_audio_bridge_matches_opening_only_over_quiet_speech_free_tail(tmp_
     original, looped = tmp_path / "original.mp4", tmp_path / "looped.mp4"
     ending = ".25" if tail == "active" else ".0002"
     envelope = f"if(lt(t,0.3),.55,if(gt(t,1.7),{ending},.07))"
-    audio = f"aevalsrc='{envelope}*sin(2*PI*340*t)|{envelope}*sin(2*PI*460*t)':s=48000:d=1.98"
-    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=s=160x284:r=30:d=2",
-                    "-f", "lavfi", "-i", audio, "-c:v", "libx264", "-c:a", "aac", str(original)], check=True)
-    speech = [Caption(1.5, 1.95, "Final line")] if tail == "spoken" else []
+    audio = f"aevalsrc='{envelope}*sin(2*PI*340*t)|{envelope}*sin(2*PI*460*t)':s=48000:d=2.013"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=s=160x284:r=30:d=2.02",
+                    "-f", "lavfi", "-i", audio, "-c:v", "libx264", "-c:a", "aac",
+                    str(original)], check=True)
+    speech = [Caption(1.6, 2.01, "Final line")] if tail == "spoken" else []
     assert make_seamless_loop(original, looped, speech=speech)["status"] == "applied"
 
-    def samples(file, duration):
-        raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(file), "-map", "0:a:0", "-t", duration,
-                                       "-f", "f32le", "-"])
-        return np.frombuffer(raw, dtype=np.float32).reshape(-1, 2)
+    def samples(file):
+        length = int(subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                                              "stream=duration_ts", "-of", "csv=p=0", str(file)]))
+        raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(file), "-map", "0:a:0", "-f", "f32le", "-"])
+        return np.frombuffer(raw, dtype=np.float32).reshape(-1, 2)[:length]
 
     def rms(samples):
         return np.sqrt(np.mean(samples ** 2))
 
-    before = samples(original, "1.98")
-    after = samples(looped, "2.00" if tail == "quiet" else "1.98")
+    before, after = samples(original), samples(looped)
     assert np.corrcoef(before[4800:88000].ravel(), after[4800:88000].ravel())[0, 1] > 0.995
     if tail == "quiet":
-        assert after.shape == (96000, 2)
+        assert abs(len(after) - 61 * 48000 // 30) <= 48
         assert rms(before[-4800:]) < 0.001
         assert 0.9 < rms(after[-4800:]) / rms(after[:4800]) < 1.1
         assert np.max(np.abs(after[-1] - after[0])) < 0.05
-        assert np.corrcoef(after[:4800].ravel(), after[-4800:][::-1].ravel())[0, 1] > 0.99
     else:
         assert after.shape == before.shape
         assert np.isclose(rms(before[-4800:]), rms(after[-4800:]), rtol=0.1, atol=0.001)

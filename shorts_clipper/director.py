@@ -845,11 +845,14 @@ def _loop_audio_bridge(video, audio, video_end, speech):
 
     # Let a short reverse swell resolve into the exact opening waveform, only over a quiet ending.
     start = end - span
+    # A 1 ms guard keeps the seam quiet even when the MP4 edit list rounds the endpoint.
+    guard, ramp = round(rate * 0.001), round(rate * 0.002)
     return (f"[0:a:0]atrim=end_sample={length},apad=whole_len={end},asplit[base][lead];"
             f"[base]afade=t=out:ss={start}:ns={2 * window}:c=hsin[body];"
             f"[lead]atrim=end_sample={span},areverse,asetpts=N/SR/TB,afade=ns={2 * window}:c=hsin,"
             f"adelay={start}S:all=1[reversed];"
-            "[body][reversed]amix=inputs=2:duration=first:normalize=0[loop_audio]")
+            "[body][reversed]amix=inputs=2:duration=first:normalize=0,"
+            f"afade=ss={guard}:ns={ramp}:c=hsin,afade=t=out:ss={end - guard - ramp}:ns={ramp}:c=hsin[loop_audio]")
 
 
 def make_seamless_loop(video: Path, output: Path, captions=(), *, speech=None) -> dict:
