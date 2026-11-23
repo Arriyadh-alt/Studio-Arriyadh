@@ -350,10 +350,7 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     while over > 0 and segments:
         last = segments[-1]
         if last.length - over >= 0.6:
-            limit = last.end - over
-            inside = [w for w in words if last.start + 0.6 <= w.end <= limit]
-            sentences = [w.end for w in inside if w.word.strip().endswith((".", "!", "?"))]
-            last.end = max(sentences or [w.end for w in inside] or [limit])
+            last.end -= over
             over = 0
         else:
             over -= last.length
@@ -474,7 +471,10 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
     while over > 0 and segments:
         last = segments[-1]
         if last.length - over >= 0.6:
-            last.end -= over
+            limit = last.end - over
+            inside = [w for w in words if max(last.start + 0.6, limit - 8.0) <= w.end <= limit]
+            sentences = [w.end for w in inside if w.word.strip().endswith((".", "!", "?"))]
+            last.end = max(sentences or [w.end for w in inside] or [limit])
             over = 0
         else:
             over -= last.length
