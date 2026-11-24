@@ -192,6 +192,26 @@ def test_retry_chat_only_preserves_existing_reviews_and_clips(monkeypatch, tmp_p
         assert app.state.store.get(key)["moments"] == job["moments"]
 
 
+def test_chat_retry_updates_an_untouched_suggestion(monkeypatch, tmp_path, analysis):
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "ai_analysis": False}).json()["id"]
+        app.state.pending.join()
+        original, = app.state.store.get(jid)["moments"]
+        monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
+            {**proposal(90), "start": 110, "end": 150, "peak": 128, "message_sample": ["WOW"]},
+            {**proposal(6), "start": 105, "end": 145, "peak": 125, "message_sample": ["hi"]},
+        ], []))
+        assert client.post(f"/api/jobs/{jid}/chat/retry").status_code == 202
+        app.state.pending.join()
+        moment, = app.state.store.get(jid)["moments"]
+        assert moment["id"] == original["id"]
+        assert moment["rank"] == original["rank"]
+        assert (moment["start"], moment["end"], moment["peak"]) == (110, 150, 128)
+        assert moment["score"] > original["score"]
+        assert moment["message_sample"] == ["WOW"]
+
+
 def test_autorender_and_old_jobs(tmp_path, analysis, media):
     app = create_app(tmp_path)
     app.state.store.save(saved_job("old"))

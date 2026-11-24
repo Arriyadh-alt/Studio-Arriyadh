@@ -25,6 +25,8 @@ def _matches(a, c):
 
 def add_chat_moments(existing, chat, duration, lead):
     result = list(existing)
+    replaceable = {m["id"] for m in existing if m["sources"] == ["chat"] and
+                   m["status"] == "suggested" and not m.get("reviewed")}
     for candidate in merge_moments([], chat, duration, lead):
         match = min((m for m in result if _matches(m, candidate)),
                     key=lambda m: abs(m["peak"] - candidate["peak"]), default=None)
@@ -36,6 +38,9 @@ def add_chat_moments(existing, chat, duration, lead):
                          alternatives={"ai": {k: match[k] for k in ("start", "end")},
                                        "chat": {k: candidate[k] for k in ("start", "end")}},
                          message_sample=candidate["message_sample"])
+        elif match["id"] in replaceable:
+            match.update(candidate, id=match["id"], rank=match["rank"])
+            replaceable.remove(match["id"])
     return result
 
 
