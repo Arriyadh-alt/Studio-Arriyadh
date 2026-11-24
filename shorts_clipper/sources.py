@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from .video import hdr_to_sdr
+
 UPLOAD_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
 UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -23,11 +25,13 @@ def probe_source(path: Path) -> dict:
     return {"duration": duration}
 
 
-def local_section(source: Path, output_dir: Path, start: float, end: float) -> Path:
+def local_section(source: Path, output_dir: Path, start: float, end: float, *, professional=False) -> Path:
     """Cut `start`..`end` of a local file into an MP4, re-encoding so cuts are frame accurate."""
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"section_{float(start)!r}-{float(end)!r}.mp4"
+    tone_map = hdr_to_sdr(source) if professional else ""
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{end - start:.3f}",
+                    *(["-vf", tone_map] if tone_map else []),
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-b:a", "160k", str(output)], check=True, capture_output=True)
     return output

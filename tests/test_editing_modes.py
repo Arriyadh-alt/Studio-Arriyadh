@@ -8,6 +8,7 @@ from clipper_studio.api import DirectorSpec, create_app, director_config
 from shorts_clipper.captions import Caption
 from shorts_clipper.director import DirectorOptions, Plan, Segment, cut_source, loudness, plan_record, probe, remap_captions
 from shorts_clipper.editing import authenticity_report, plan_source_edit, record_operations
+from shorts_clipper.sources import local_section
 from shorts_clipper.video import hdr_to_sdr, make_vertical_clip
 from test_api import REPLAY_URL
 
@@ -142,7 +143,8 @@ def test_professional_exports_tone_map_hdr_before_cuts_or_captions(tmp_path, tra
                      fps="10/1", professional=True)
     direct = make_vertical_clip(hdr, tmp_path / "vertical.mp4", 0., .4, "blur",
                                 export_fps="10/1", silent_audio=True)
-    for video in (cut, direct):
+    upload_section = local_section(hdr, tmp_path, 0., .4, professional=True)
+    for video in (cut, direct, upload_section):
         info = next(s for s in probe(video, export_details=True)["streams"] if s["codec_type"] == "video")
         assert [info[k] for k in ("color_space", "color_transfer", "color_primaries")] == ["bt709"] * 3
         assert not hdr_to_sdr(video)

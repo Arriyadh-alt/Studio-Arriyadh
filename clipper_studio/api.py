@@ -461,13 +461,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 work = Path(temporary)
                 update(jid, generation, stage=f"{clip_label} · Downloading")
                 upload = upload_path(job)
-                source = (local_section(upload, work, spec["start"], spec["end"]) if upload else
+                editing_mode = spec.get("editing_mode", "full")
+                professional = editing_mode != "full"
+                source = (local_section(upload, work, spec["start"], spec["end"], professional=professional) if upload else
                           download_section(job["url"], work, spec["start"], spec["end"]))
                 duration = min(video_duration(source), spec["end"] - spec["start"])
                 subtitles, captions = None, []
                 caption_language = None
-                editing_mode = spec.get("editing_mode", "full")
-                professional = editing_mode != "full"
                 fps = (source_frame_rate(source) or "30/1") if professional else None
                 director = DirectorOptions.from_dict(spec.get("director") or LEGACY_DIRECTOR)
                 podcast = is_podcast(job)
