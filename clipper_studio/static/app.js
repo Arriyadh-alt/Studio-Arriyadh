@@ -285,6 +285,14 @@ function drawJob(job) {
   $('#job-error').textContent = job.error || '';
   $('#analysis-detail').hidden = !busy(job) || !job.analysis_detail;
   $('#analysis-detail').textContent = job.analysis_detail || '';
+  const retry = !PodcastControls.isPodcast(job) && job.url && job.metadata &&
+    (job.chat_error || job.status==='failed') && ['completed','completed_with_errors','failed'].includes(job.status);
+  $('#chat-status').hidden = !(retry || job.chat_retrying || job.chat_warning || job.chat_error);
+  $('#chat-warning').hidden = !job.chat_warning;
+  $('#chat-warning').textContent = job.chat_warning || '';
+  $('#chat-detail').hidden = !(job.chat_retrying || job.chat_error);
+  $('#chat-detail').textContent = job.chat_retrying ? 'Retrying chat analysis…' : job.chat_error || '';
+  $('#retry-chat').hidden = !retry || !!job.chat_retrying;
   globalThis.MomentReview?.draw(job);
   PodcastControls.drawRights(job);
   $('.activity-panel').hidden = PodcastControls.isPodcast(job) || !!job.upload;
@@ -364,6 +372,7 @@ function route() {
   $('#stage').textContent='Loading job…'; $('#progress-label').textContent='';
   $('#cancel-job').hidden=true; $('#cancel-hint').hidden=true;
   $('#progress').removeAttribute('value'); $('#job-error').hidden=true;
+  $('#chat-status').hidden=true; $('#retry-chat-error').hidden=true;
   chartKey=undefined; $('#chart').innerHTML='';
   $('#download-kept').hidden=true; $('#delete-unkept').hidden=true; $('#keep-hint').hidden=true;
   globalThis.scrollTo(0,0);
@@ -371,6 +380,18 @@ function route() {
 }
 $('#lead').addEventListener('input',event=>$('#lead-value').textContent=`${event.target.value} seconds`);
 $('#refresh-jobs').addEventListener('click',()=>refresh());
+$('#retry-chat').addEventListener('click',async event=>{
+  const job=current, button=event.currentTarget, errorNode=$('#retry-chat-error');
+  button.disabled=true; errorNode.hidden=true;
+  try {
+    await api(`./api/jobs/${job.id}/chat/retry`,'POST');
+    if(current?.id===job.id) await refresh();
+  } catch(error) {
+    if(current?.id===job.id) {
+      errorNode.textContent=error.message; errorNode.hidden=false;
+    }
+  } finally { button.disabled=false; }
+});
 $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {

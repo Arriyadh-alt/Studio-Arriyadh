@@ -1,8 +1,10 @@
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 
-from clipper_studio.api import JobRequest, Store, create_app
-from clipper_studio.chat import ChatReplayError
+from clipper_studio.api import CHAT_FALLBACK_WARNING, JobRequest, Store, create_app
+from clipper_studio.chat import ChatReplayError, REPLAY_LIMIT_MESSAGE
 from shorts_clipper.youtube import YouTubeAccessError
 from test_api import REPLAY_URL, media, metadata, saved_job
 
@@ -92,6 +94,104 @@ def test_source_fallbacks(monkeypatch, tmp_path, analysis, source):
             assert job["chat_error" if source == "ai" else "ai_error"]
 
 
+@pytest.mark.parametrize("source", ["oversized", "disabled", "regular_video", "unexpected"])
+def test_ai_off_still_falls_back_when_chat_is_unavailable(monkeypatch, tmp_path, analysis, source):
+    def chat(*args):
+        if source == "unexpected":
+            raise RuntimeError("bad chat parser")
+        if source in ("disabled", "regular_video"):
+            from clipper_studio.chat import validate_metadata
+
+            validate_metadata({"live_status": "not_live" if source == "regular_video" else "was_live",
+                               "duration": 600})
+        raise ChatReplayError(REPLAY_LIMIT_MESSAGE)
+
+    def download(*args, **kwargs):
+        assert kwargs["should_continue"]() is None
+        job = app.state.store.jobs()[0]
+        assert job["chat_warning"] == CHAT_FALLBACK_WARNING
+        return None, None
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", download)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "ai_analysis": False}).json()["id"]
+        app.state.pending.join()
+        job = client.get(f"/api/jobs/{jid}").json()
+        assert job["status"] == "completed" and not job["error"]
+        assert job["chat_error"] and job["chat_warning"] == CHAT_FALLBACK_WARNING
+        assert job["moments"][0]["sources"] == ["ai"]
+
+
+def test_ai_starts_without_waiting_for_chat(monkeypatch, tmp_path, analysis):
+    ai_started = threading.Event()
+
+    def chat(*args):
+        assert ai_started.wait(3)
+        raise ChatReplayError("Chat replay unavailable")
+
+    def download(*args, **kwargs):
+        ai_started.set()
+        return None, None
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", download)
+    app = create_app(tmp_path, analysis_workers=1)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        app.state.pending.join()
+        job = client.get(f"/api/jobs/{jid}").json()
+        assert job["status"] == "completed" and job["chat_error"] == "Chat replay unavailable"
+
+
+def test_retry_chat_only_preserves_existing_reviews_and_clips(monkeypatch, tmp_path, analysis):
+    entered, release = threading.Event(), threading.Event()
+
+    def chat(url, directory, info, should_continue):
+        if info is not None:
+            raise ChatReplayError(REPLAY_LIMIT_MESSAGE)
+        entered.set()
+        assert release.wait(5)
+        return {"duration": 600}, []
+
+    def spikes(*args, **kwargs):
+        return [proposal(4), {**proposal(4), "start": 300, "end": 340, "peak": 315}], []
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", spikes)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        key = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        base = f"/api/jobs/{key}"
+        app.state.pending.join()
+        old = app.state.store.get(key)
+        moment = old["moments"][0]
+        moment.update(start=103, duration=37, status="rendered", clip_id="oldclip")
+        old["clips"] = [{**saved_job("old")["clips"][0], "id": "oldclip", "moment_id": moment["id"],
+                         "number": 1, "status": "ready"}]
+        app.state.store.save(old)
+        old = app.state.store.get(key)
+        monkeypatch.setattr("clipper_studio.api.download_analysis_media",
+                            lambda *a, **k: pytest.fail("chat retry must not download AI media"))
+        try:
+            assert client.post(base + "/chat/retry").status_code == 202
+            assert entered.wait(5)
+            job = client.get(base).json()
+            assert job["chat_retrying"] and job["status"] == "completed"
+            assert client.post(base + "/chat/retry").status_code == 409
+        finally:
+            release.set()
+        app.state.pending.join()
+        job = app.state.store.get(key)
+        assert job["moments"][0] == moment and job["clips"] == old["clips"]
+        assert len(job["moments"]) == 2 and job["moments"][1]["sources"] == ["chat"]
+        assert job["chat_error"] is None and not job["chat_retrying"]
+        assert client.post(base + "/chat/retry").status_code == 202
+        app.state.pending.join()
+        assert app.state.store.get(key)["moments"] == job["moments"]
+
+
 def test_autorender_and_old_jobs(tmp_path, analysis, media):
     app = create_app(tmp_path)
     app.state.store.save(saved_job("old"))
@@ -111,9 +211,9 @@ def test_chat_disabled_preflight_and_batch(monkeypatch, tmp_path, analysis):
     info = {"duration": 600, "was_live": True, "subtitles": {}}
     calls = []
 
-    def preflight(url, require_chat=True):
+    def preflight(url, require_chat=True, require_live=True):
         calls.append(require_chat)
-        validate_metadata(info, require_chat)
+        validate_metadata(info, require_chat, require_live)
         return info
 
     def chat(*args):

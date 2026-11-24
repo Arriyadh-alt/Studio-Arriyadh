@@ -94,10 +94,14 @@ def test_cookie_blocking_is_a_friendly_job_error(monkeypatch, tmp_path, phase, c
         error = YouTubeAccessError if phase == "section" else ChatReplayError
         raise error(blocking_message("HTTP Error 429: Too Many Requests"))
 
+    def fail_ai(*args, **kwargs):
+        raise YouTubeAccessError(blocking_message("HTTP Error 429: Too Many Requests"))
+
     if phase == "metadata":
         monkeypatch.setattr("clipper_studio.api.fetch_metadata", fail)
     elif phase == "chat":
         monkeypatch.setattr("clipper_studio.api.fetch_chat", fail)
+        monkeypatch.setattr("clipper_studio.api.download_analysis_media", fail_ai)
     else:
         monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 600}, []))
         monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: (
@@ -374,7 +378,7 @@ def test_queued_job_survives_new_client_and_worker_continues(monkeypatch, tmp_pa
     started, release = threading.Event(), threading.Event()
     calls = []
 
-    def fetch(url, directory, info):
+    def fetch(url, directory, info, should_continue):
         calls.append(url)
         if url == REPLAY_URL:
             started.set()
@@ -383,6 +387,9 @@ def test_queued_job_survives_new_client_and_worker_continues(monkeypatch, tmp_pa
         return {"duration": 11949, "title": "Long stream"}, [Message(11940, "user", "W")]
 
     monkeypatch.setattr("clipper_studio.api.fetch_chat", fetch)
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media",
+                        lambda *a, **k: (None, None))
+    monkeypatch.setattr("clipper_studio.api.analyze_media", lambda *a, **k: [])
     app = create_app(tmp_path, analysis_workers=1)
     with TestClient(app) as client:
         try:
@@ -402,7 +409,9 @@ def test_queued_job_survives_new_client_and_worker_continues(monkeypatch, tmp_pa
         finally:
             release.set()
         app.state.pending.join()
-        assert client.get(f"/api/jobs/{first}").json()["error"] == "This livestream has no live-chat replay."
+        first_job = client.get(f"/api/jobs/{first}").json()
+        assert first_job["status"] == "completed" and first_job["error"] is None
+        assert first_job["chat_error"] == "This livestream has no live-chat replay."
         job = client.get(f"/api/jobs/{second}").json()
         assert job["status"] == "completed"
         assert job["activity"][-1]["time"] == 11945
@@ -489,7 +498,7 @@ def test_analysis_does_not_block_rerender_or_no_chat(monkeypatch, tmp_path, meta
             raise ChatReplayError("Late download error after cancellation")
         return {"duration": 600}, []
 
-    def preflight(url):
+    def preflight(url, *_):
         if url.endswith("bbbbbbbbbbb"):
             raise ChatReplayError("This video has no live-chat replay (disabled, unavailable, or not a livestream VOD).")
         return metadata(url)
@@ -705,6 +714,7 @@ def test_unexpected_analysis_failure_is_friendly_and_pool_continues(monkeypatch,
         raise RuntimeError("internal detector detail")
 
     monkeypatch.setattr("clipper_studio.api.detect_spikes", broken)
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", broken)
     app = create_app(tmp_path, analysis_workers=1)
     with TestClient(app) as client:
         jid = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": REPLAY_URL}).json()["id"]

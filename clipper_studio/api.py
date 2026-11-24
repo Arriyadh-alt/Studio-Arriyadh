@@ -14,6 +14,7 @@ import time
 import uuid
 import unicodedata
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -55,12 +56,13 @@ from shorts_clipper.youtube import YouTubeAccessError
 from .chat import METADATA_KEYS, ChatReplayError, fetch_chat, fetch_metadata
 from .scheduler import Scheduler
 from .spikes import detect_spikes
-from .ranking import chat_moment, merge_moments
+from .ranking import add_chat_moments, chat_moment, merge_moments
 
 
 logger = logging.getLogger(__name__)
 YOUTUBE_URL_ERROR = "Paste a YouTube video link for a finished livestream (watch, live, or youtu.be)."
 ACTIVE_STATUSES = ("queued", "running")
+CHAT_FALLBACK_WARNING = "Chat analysis is temporarily unavailable. AI Video Analysis will continue automatically."
 
 
 class WorkCancelled(Exception):
@@ -438,7 +440,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         if not job.get("url") or "channel" in metadata or "uploader" in metadata:
             return job
         try:
-            info = fetch_metadata(job["url"])
+            info = fetch_metadata(job["url"], False, False)
         except Exception:
             logger.debug("Channel lookup for the storytelling hook failed", exc_info=True)
             return job
@@ -872,7 +874,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         try:
             with store.lock:
                 job = active_job(jid, generation)
-                job.update(status="failed", stage="Failed", error=message, generation=generation + 1)
+                job.update(status="failed", stage="Failed", error=message, generation=generation + 1,
+                           chat_retrying=False)
                 for clip in job["clips"]:
                     if clip["status"] in ("queued", "rendering"):
                         clip.update(status="failed", error=message)
@@ -895,13 +898,11 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         "duration": probe_source(path)["duration"], "thumbnail": None, "channel": None,
                         "uploader": None}
             else:
-                info = (fetch_metadata(job["url"], False, require_live=False) if is_podcast(job)
-                        else fetch_metadata(job["url"], False) if job["request"].get("ai_analysis", False)
-                        else fetch_metadata(job["url"]))
+                info = fetch_metadata(job["url"], False, False)
             with store.lock:
                 job = active_job(jid, generation)
                 metadata_cache[jid, generation] = info
-                job.update(status="queued", stage="Queued for chat analysis",
+                job.update(status="queued", stage="Queued for analysis",
                            metadata={key: info.get(key) for key in METADATA_KEYS})
                 store.save(job)
                 pending.put((jid, None, generation))
@@ -927,79 +928,120 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         moment.update(status="rendered", clip_id=clip["id"])
         return clip
 
+    def check_job(jid, generation):
+        with store.lock:
+            active_job(jid, generation)
+
+    def analyze_chat(jid, generation, job, info, retry=False):
+        started = time.monotonic()
+        try:
+            metadata, messages = fetch_chat(job["url"], store.root / jid / "chat", info,
+                                            lambda: check_job(jid, generation))
+            count, lead = job["request"]["clips"], job["request"]["lead"]
+            spikes, activity = detect_spikes(messages, metadata["duration"], clips=count, lead=lead)
+            moments = [chat_moment(s) for s in sorted(spikes, key=lambda s: -s.get("score", 0))[:count]]
+            error = getattr(messages, "warning", None)
+            fields = dict(metadata=metadata, activity=activity, message_count=len(messages))
+        except WorkCancelled:
+            raise
+        except Exception as failure:
+            error = str(failure) if isinstance(failure, ChatReplayError) else "Chat analysis was unavailable."
+            if not isinstance(failure, ChatReplayError):
+                logger.warning("Chat analysis failed for job %s", jid, exc_info=True)
+            moments, fields = [], {}
+        fields.update(chat_error=error, chat_warning=CHAT_FALLBACK_WARNING if error else None,
+                      chat_seconds=round(time.monotonic() - started, 2))
+        if not retry:
+            update(jid, generation, **fields)
+        return moments, fields
+
+    def analyze_ai(jid, generation, job, duration, podcast, upload):
+        count, lead = job["request"]["clips"], job["request"]["lead"]
+        directory = store.root / jid / "analysis"
+        try:
+            update(jid, generation, stage="Preparing the source for AI analysis" if upload
+                   else "Downloading audio for AI analysis", progress=.15)
+            audio, video = (local_analysis_media(upload, directory) if upload else
+                            download_analysis_media(job["url"], directory,
+                                                    should_continue=lambda: check_job(jid, generation)))
+            stage = "AI understanding the conversation" if podcast else "AI analyzing video, audio & speech"
+            update(jid, generation, stage=stage)
+            language = job["request"].get("language")
+            language = None if language == "auto" else language
+
+            def progress(fraction, text):
+                update(jid, generation, stage=stage,
+                       progress=.2 + .65 * max(0, min(1, fraction)), analysis_detail=text)
+
+            if podcast:
+                return analyze_podcast(audio, video, duration, clips=count, language=language, progress=progress,
+                                       speakers=(job["request"].get("podcast") or {}).get("speakers"))[:count], None
+            return analyze_media(audio, video, duration, clips=count, lead=lead,
+                                 language=language, progress=progress)[:count], None
+        except WorkCancelled:
+            raise
+        except Exception as error:
+            update(jid, generation, ai_error=str(error) if isinstance(error, YouTubeAccessError)
+                   else "AI analysis was unavailable. Try this replay again.")
+            return [], error
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    def retry_chat(jid, generation, job):
+        chat, fields = analyze_chat(jid, generation, job, None, retry=True)
+        with store.lock:
+            job = active_job(jid, generation)
+            if "activity" in fields:
+                duration = job["metadata"]["duration"]
+                job["moments"] = add_chat_moments(job["moments"], chat, duration, job["request"]["lead"])
+                if (chat or not fields["chat_error"]) and job["status"] == "failed" and not job.get("analysis_complete"):
+                    job.update(analysis_complete=True, status="completed", progress=1, error=None,
+                               stage=f"{len(job['moments'])} moments ready for review" if job["moments"]
+                               else "No viral moments found")
+            job.update(fields, chat_retrying=False)
+            store.save(job)
+
     def analyze(jid, generation):
         try:
-            started = time.monotonic()
             with store.lock:
                 job = active_job(jid, generation)
-                info = metadata_cache.pop((jid, generation))
-            podcast, upload = is_podcast(job), upload_path(job)
-            chat_error = None
-            if podcast or upload:
-                metadata, messages = {key: info.get(key) for key in METADATA_KEYS}, []
-            else:
-                update(jid, generation, status="running", stage="Fetching chat replay")
+                retrying = job.get("chat_retrying", False)
+                info = None if retrying else metadata_cache.pop((jid, generation))
+            if retrying:
                 try:
-                    metadata, messages = fetch_chat(job["url"], store.root / jid / "chat", info)
-                except ChatReplayError as error:
-                    if not job["request"].get("ai_analysis", False):
-                        raise
-                    chat_error = error
-                    metadata, messages = {key: info.get(key) for key in METADATA_KEYS}, []
-                    update(jid, generation, chat_error=str(error))
-            update(jid, generation, metadata=metadata, stage="Detecting chat spikes", progress=0.15,
-                   chat_seconds=round(time.monotonic() - started, 2), message_count=len(messages))
-            spikes, activity = detect_spikes(messages, metadata["duration"],
-                                            clips=job["request"]["clips"], lead=job["request"]["lead"])
-            count, lead = job["request"]["clips"], job["request"]["lead"]
-            chat = [chat_moment(s) for s in sorted(spikes, key=lambda s: -s.get("score", 0))[:count]]
-            ai, ai_error = [], None
-            if job["request"].get("ai_analysis", False):
-                directory = store.root / jid / "analysis"
-                try:
-                    update(jid, generation, status="running", stage="Preparing the source for AI analysis" if upload
-                           else "Downloading audio for AI analysis")
-
-                    def should_continue():
-                        with store.lock:
-                            active_job(jid, generation)
-
-                    audio, video = (local_analysis_media(upload, directory) if upload else
-                                    download_analysis_media(job["url"], directory, should_continue=should_continue))
-                    stage = "AI understanding the conversation" if podcast else "AI analyzing video, audio & speech"
-                    update(jid, generation, stage=stage)
-                    language = job["request"].get("language")
-                    language = None if language == "auto" else language
-
-                    def progress(fraction, text):
-                        update(jid, generation, stage=stage,
-                               progress=.2 + .65 * max(0, min(1, fraction)), analysis_detail=text)
-
-                    if podcast:
-                        ai = analyze_podcast(audio, video, metadata["duration"], clips=count, language=language,
-                                             progress=progress,
-                                             speakers=(job["request"].get("podcast") or {}).get("speakers"))[:count]
-                    else:
-                        ai = analyze_media(audio, video, metadata["duration"], clips=count, lead=lead,
-                                           language=language, progress=progress)[:count]
+                    retry_chat(jid, generation, job)
                 except WorkCancelled:
                     raise
-                except Exception as error:
-                    ai_error = error
-                    update(jid, generation, ai_error=str(error) if isinstance(error, YouTubeAccessError)
-                           else "AI analysis was unavailable. Try this replay again.")
-                finally:
-                    shutil.rmtree(directory, ignore_errors=True)
-            if ai_error and (podcast or upload):
+                except Exception:
+                    logger.warning("Could not save chat retry for job %s", jid, exc_info=True)
+                    update(jid, generation, chat_retrying=False, chat_error="Could not save the chat retry.")
+                return
+            podcast, upload = is_podcast(job), upload_path(job)
+            count, lead = job["request"]["clips"], job["request"]["lead"]
+            duration = info["duration"]
+            chat, ai, fields, ai_error = [], [], {}, None
+            update(jid, generation, status="running", stage="Fetching chat replay" if not (podcast or upload)
+                   else "Preparing AI analysis")
+            if podcast or upload:
+                ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
+            elif job["request"].get("ai_analysis", False):
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-replay") as worker:
+                    chat_task = worker.submit(analyze_chat, jid, generation, job, info)
+                    ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
+                    chat, fields = chat_task.result()
+            else:
+                chat, fields = analyze_chat(jid, generation, job, info)
+                if fields["chat_error"]:
+                    ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
+            if ai_error and (podcast or upload or (fields.get("chat_error") and not chat)):
                 raise ai_error
-            if chat_error and (ai_error or not job["request"].get("ai_analysis", False)):
-                raise ai_error or chat_error
-            moments = merge_moments(ai, chat, metadata["duration"], lead)
+            duration = fields.get("metadata", {}).get("duration", duration)
+            moments = merge_moments(ai, chat, duration, lead)
             with store.lock:
                 job = active_job(jid, generation)
                 clips = [] if job["request"].get("review", False) else [
                     moment_clip(job, m, i) for i, m in enumerate(moments[:count], 1)]
-                job.update(clips=clips, moments=moments, activity=activity, analysis_complete=True, stage="Queued for rendering")
+                job.update(clips=clips, moments=moments, analysis_complete=True, stage="Queued for rendering")
                 store.save(job)
                 for clip in clips:
                     pending.put((jid, clip["id"], generation))
@@ -1028,7 +1070,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         analyses, renders = pending.positions()
         for clip in job["clips"]:
             clip["queue_position"] = renders.get((job["id"], clip["id"])) if clip["status"] == "queued" else None
-        position = analyses.get(job["id"])
+        position = None if job.get("chat_retrying") else analyses.get(job["id"])
         waiting = [clip["queue_position"] for clip in job["clips"] if clip["queue_position"] is not None]
         if position is None and waiting and not any(c["status"] == "rendering" for c in job["clips"]):
             position = min(waiting)
@@ -1045,6 +1087,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     for number, clip in enumerate(job["clips"], 1):
                         clip.setdefault("number", number)
                     store.save(job)
+                if job.get("chat_retrying"):
+                    pending.put((job["id"], None, job.get("generation", 0)))
                 if job["status"] in ACTIVE_STATUSES:
                     generation = job.get("generation", 0)
                     job.update(status="queued", stage="Resuming after restart", error=None,
@@ -1230,6 +1274,18 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         with store.lock:
             return queued_job(store.get(jid))
 
+    @app.post("/api/jobs/{jid}/chat/retry", status_code=202)
+    def queue_chat_retry(jid: str):
+        with store.lock:
+            job = store.get(jid)
+            if (job["status"] not in ("completed", "completed_with_errors", "failed") or
+                    job.get("chat_retrying") or is_podcast(job) or not job.get("url") or not job.get("metadata")):
+                raise HTTPException(409, "Chat analysis can only be retried for a finished YouTube job.")
+            job["chat_retrying"] = True
+            store.save(job)
+            pending.put((jid, None, job.get("generation", 0)))
+        return {"id": jid}
+
     @app.post("/api/jobs/{jid}/cancel")
     def cancel_job(jid: str):
         with store.lock:
@@ -1237,7 +1293,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if job["status"] not in ("queued", "running", "cancelled"):
                 raise HTTPException(409, "This job has already finished")
             job.update(status="cancelled", stage="Cancelled. In-flight work stops at the next stage boundary.",
-                       generation=job.get("generation", 0) + 1)
+                       generation=job.get("generation", 0) + 1, chat_retrying=False)
             for clip in job["clips"]:
                 if clip["status"] in ("queued", "rendering"):
                     previous = clip.pop("previous_render", None)
@@ -1311,6 +1367,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if not is_podcast(job):
                     raise HTTPException(422, "Podcast options apply to podcast jobs only")
                 moment["edits"] = request.podcast.model_dump()
+            if request.start is not None or request.end is not None or request.status is not None:
+                moment["reviewed"] = True
             store.save(job)
         return moment
 

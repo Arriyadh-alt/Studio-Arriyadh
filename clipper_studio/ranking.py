@@ -17,6 +17,28 @@ def chat_moment(spike):
                       (f"; viewers saying '{phrase[:80]}'" if phrase else "")}
 
 
+def _matches(a, c):
+    shorter = min(a["duration"], c["duration"])
+    overlap = max(0, min(a["end"], c["end"]) - max(a["start"], c["start"]))
+    return (shorter > 0 and overlap >= .4 * shorter) or abs(a["peak"] - c["peak"]) <= 25
+
+
+def add_chat_moments(existing, chat, duration, lead):
+    result = list(existing)
+    for candidate in merge_moments([], chat, duration, lead):
+        match = min((m for m in result if _matches(m, candidate)),
+                    key=lambda m: abs(m["peak"] - candidate["peak"]), default=None)
+        if match is None:
+            candidate["rank"] = max((m["rank"] for m in result), default=0) + 1
+            result.append(candidate)
+        elif match["sources"] == ["ai"] and match["status"] == "suggested" and not match.get("reviewed"):
+            match.update(sources=["ai", "chat"], chat_score=candidate["score"],
+                         alternatives={"ai": {k: match[k] for k in ("start", "end")},
+                                       "chat": {k: candidate[k] for k in ("start", "end")}},
+                         message_sample=candidate["message_sample"])
+    return result
+
+
 def merge_moments(ai, chat, duration, lead):
     """Match overlap or nearby peaks, retaining source proposals and AI timing."""
     def normalize(item, source):
@@ -40,9 +62,7 @@ def merge_moments(ai, chat, duration, lead):
         for a in result:
             if a["sources"] != ["ai"]:
                 continue
-            shorter = min(a["duration"], c["duration"])
-            overlap = max(0, min(a["end"], c["end"]) - max(a["start"], c["start"]))
-            if (shorter > 0 and overlap >= .4 * shorter) or abs(a["peak"] - c["peak"]) <= 25:
+            if _matches(a, c):
                 matches.append(a)
         if not matches:
             result.append(c)

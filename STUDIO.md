@@ -28,16 +28,17 @@ first caption render downloads faster-whisper's `base` model; subsequent renders
 use its cache. Caption generation runs on CPU. `/docs` serves OpenAPI docs.
 
 `CLIPPER_DATA_DIR` defaults to `~/clipper-data` and must be outside this repo.
-Each job has an atomically replaced `job.json`, downloaded chat, and clip folders
+Each job has an atomically replaced `job.json`, disk-backed chat buckets, and clip folders
 with `clip.mp4` and `thumbnail.jpg`. Intermediate section downloads are removed.
 Use **one uvicorn process, without reload**. Independent bounded thread pools run
-metadata preflight (default 3), chat fetch/analysis (3), and rendering (2).
+metadata preflight (default 3), highlight analysis (3), and rendering (2).
 Configure `CLIPPER_METADATA_WORKERS`, `CLIPPER_ANALYSIS_WORKERS`, and
 `CLIPPER_RENDER_WORKERS` with integer counts from 1 to 32. Reduce render workers
 to 1 on smaller laptops: transcription and ffmpeg are CPU/memory intensive.
-Metadata preflight checks for a finished VOD and live-chat replay before any
-replay download, independently of busy analysis/render pools. Preflight metadata
-is reused rather than fetched again. Actual network latency still varies.
+Metadata preflight checks that the source is playable and has a duration,
+independently of busy analysis/render pools. Preflight metadata is reused.
+AI and chat run independently when requested together; chat failure automatically
+starts AI for chat-first jobs. Actual network latency still varies.
 
 Re-renders have priority over waiting automatic clips; automatic renders are
 round-robin across jobs. In-flight renders are not preempted. JSON reads, writes
@@ -83,10 +84,14 @@ and use only media you are authorized to access.
 - `POST /api/jobs` → 202 `{id}`. Body:
   `{url, clips:8, lead:18, ai_analysis:true, review:true, mode:"crop", editing_mode:"full", captions:true, language:"auto", caption_style:null}`. Use an HTTPS YouTube
   video link (`watch`, `live`, or `youtu.be`, including mobile) for a finished
-  livestream; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
-  AI analysis works without chat replay. Jobs include ranked `moments`, optional
-  `chat_error`/`ai_error`, and `analysis_complete`. Review mode completes without
+  livestream or regular video; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
+  `ai_analysis:false` prefers chat but still uses AI when chat is unavailable.
+  Jobs include ranked `moments`, optional `chat_error`/`chat_warning`/`ai_error`, and
+  `analysis_complete`. Review mode completes without
   creating clips; set `review:false` for automatic rendering of the best moments.
+- `POST /api/jobs/{id}/chat/retry` → 202 `{id}` for a finished YouTube job
+  that uses chat. Retries chat without re-running AI or changing rendered clips,
+  and exposes `chat_retrying` while queued or running.
 - `PATCH /api/jobs/{id}/moments/{mid}` accepts `{status?,start?,end?}`; status is
   `suggested`, `selected`, or `rejected`. Boundaries must fit the replay and be at
   most 60 seconds (422 otherwise); rendered status cannot be reverted (409).
@@ -329,10 +334,12 @@ edits and checks, and per-clip toggles that apply on Re-render.
 Validation errors: 422; missing job/clip: 404; unavailable file or attempting
 edits while that clip is queued/rendering or deletion while it is rendering: 409.
 Ready clips can be re-rendered while Autopilot runs; queued clips may be deleted
-and are skipped by the worker. Regular videos, unavailable videos and streams
-without chat replay fail with an explanation. Long replays are supported;
-replay downloads are checked against a five-minute time budget and a 128 MiB
-size budget. Each pool queues in submission order, with re-render priority and
+and are skipped by the worker. Unavailable sources fail with an explanation;
+regular videos and streams without usable chat replay fall back to AI.
+Studio ingests chat fragments into five-second buckets with adaptive batches
+and deduplicates replay delivery by message ID. Transient download errors retry
+with backoff, and resource safeguards keep usable partial chat.
+Each pool queues in submission order, with re-render priority and
 round-robin automatic clips as described above; refreshing the job page reconnects
 to the existing job. Fewer than the requested N highlights (including zero)
 are valid when there are insufficient separated spikes.
