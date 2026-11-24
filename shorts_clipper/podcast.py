@@ -545,7 +545,7 @@ def refine(moments, outline):
 
 
 def analyze_podcast(audio: Path, video: Path | None, duration: float, clips=8, language=None, progress=None,
-                    transcribe_fn=None, speakers=None) -> list[dict]:
+                    transcribe_fn=None, speakers=None, features_fn=None, audio_fn=None) -> list[dict]:
     """Transcribe the whole episode, then rank complete, self-contained conversation moments."""
     if not math.isfinite(duration) or duration <= 0 or not 1 <= clips <= 50:
         raise ValueError("Positive duration and 1-50 clips are required")
@@ -557,14 +557,17 @@ def analyze_podcast(audio: Path, video: Path | None, duration: float, clips=8, l
         notify(1, "No speech found")
         return []
     notify(0.6, "Identifying speakers")
-    features = voice_features(audio, duration)
+    try:
+        features = (features_fn or voice_features)(audio, duration)
+    except (OSError, RuntimeError, ValueError):
+        features = np.zeros((0, BANDS + 1))
     groups = utterances(words)
     labels = diarize(groups, features, speakers)
     items = sentences(words, groups, labels)
     notify(0.7, "Mapping topics, questions and answers")
     topics_ = topics(items)
     try:
-        levels, excitement, laugh = _audio(audio, duration)
+        levels, excitement, laugh = (audio_fn or _audio)(audio, duration)
     except Exception:
         levels = excitement = laugh = np.zeros(int(duration) + 1)
     sentence_signals(items, levels, excitement, laugh)

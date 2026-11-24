@@ -137,7 +137,7 @@ def _refine(moment):
 
 
 def analyze_media(audio: Path, video: Path | None, duration: float, clips=8, lead=18,
-                  language=None, transcribe_fn=None, progress=None) -> list[dict]:
+                  language=None, transcribe_fn=None, progress=None, checkpoint=None, expect=None) -> list[dict]:
     """Find reaction peaks without chat. Injected transcripts use source-relative times.
 
     Decode failures in required audio propagate; unavailable video or speech degrade to
@@ -146,8 +146,10 @@ def analyze_media(audio: Path, video: Path | None, duration: float, clips=8, lea
     if not math.isfinite(duration) or duration <= 0 or not 1 <= clips <= 50 or not 12 <= lead <= 20:
         raise ValueError("Positive duration, 1-50 clips and lead within 12-20 seconds are required")
     notify = progress or (lambda fraction, text: None)
+    cached = checkpoint or (lambda stage, key, work: work())
     notify(0, "Analyzing audio")
-    levels, audio_signal, laughter = _audio(audio, duration)
+    levels, audio_signal, laughter = [np.asarray(array) for array in cached(
+        "audio_analysis", "scan", lambda: [array.tolist() for array in _audio(audio, duration)])]
     if not len(levels) or duration < 20:
         notify(1, "Analysis complete")
         return []
@@ -156,9 +158,21 @@ def analyze_media(audio: Path, video: Path | None, duration: float, clips=8, lea
     if video is not None:
         notify(.35, "Analyzing visual changes")
         try:
-            visual = _visual(video, duration, len(levels))
+            visual = np.asarray(cached(
+                "video_analysis", "scan", lambda: _visual(video, duration, len(levels)).tolist()))
         except (OSError, RuntimeError):
             pass
+    def words(lo, hi):
+        return cached("transcript_generation", f"speech-{lo:g}-{hi:g}",
+                      lambda: _words((transcribe_fn or _transcribe)(audio, lo, hi, language)))
+
+    return analyze_signals((levels, audio_signal, laughter), visual, duration, clips, lead, words, notify, expect)
+
+
+def analyze_signals(audio, visual, duration, clips, lead, transcribe_window, progress, expect=None):
+    levels, audio_signal, laughter = audio
+    if len(levels) < 20 or duration < 20:
+        return []
     curve = audio_signal.copy()
     if visual is not None:
         nearby = np.array([max(audio_signal[max(0, i - 3):i + 4]) for i in range(len(levels))])
@@ -172,11 +186,13 @@ def analyze_media(audio: Path, video: Path | None, duration: float, clips=8, lea
         if len(peaks) >= clips * 3:
             break
     moments = []
+    if expect is not None:
+        expect("transcript_generation", len(peaks))
     for index, peak in enumerate(peaks):
-        notify(.55 + .4 * index / len(peaks), "Transcribing candidate moments")
+        progress(.55 + .4 * index / len(peaks), "Transcribing candidate moments")
         lo, hi = max(0, peak - lead - 5), min(duration, peak + 42)
         try:
-            words = _words((transcribe_fn or _transcribe)(audio, lo, hi, language))
+            words = transcribe_window(lo, hi)
         except Exception:
             words = []
         target = max(0, peak - lead)
@@ -251,5 +267,5 @@ def analyze_media(audio: Path, video: Path | None, duration: float, clips=8, lea
             result.append(moment)
         if len(result) >= clips:
             break
-    notify(1, "Analysis complete")
+    progress(1, "Analysis complete")
     return result

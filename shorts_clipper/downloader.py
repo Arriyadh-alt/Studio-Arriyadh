@@ -15,7 +15,8 @@ class _AnalysisSizeError(YouTubeAccessError):
 
 
 def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = None,
-                            proxy: str | None = None, should_continue=None) -> tuple[Path, Path | None]:
+                            proxy: str | None = None, should_continue=None, *,
+                            prior_audio: Path | None = None) -> tuple[Path, Path | None]:
     """Download full-length compact audio and optional low-resolution video."""
     max_bytes = int(os.environ.get("CLIPPER_ANALYSIS_MAX_BYTES", "1500000000"))
     max_hours = float(os.environ.get("CLIPPER_ANALYSIS_MAX_HOURS", "12"))
@@ -31,10 +32,12 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
         raise YouTubeAccessError("YouTube section downloads require an http:// proxy. "
                                  "Use an http:// proxy so ffmpeg cannot bypass the proxy setting.")
     output_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
+    paths = [prior_audio] if prior_audio else []
     with cookie_options(cookies, proxy=proxy) as authentication:
         for kind, selector in (("audio", "ba[abr<=80]/ba/wa"),
                                ("video", "bv[height<=160]/wv")):
+            if kind == "audio" and prior_audio:
+                continue
             if should_continue is not None:
                 should_continue()
             options = {"format": selector, "outtmpl": str(output_dir / f"%(id)s_analysis_{kind}.%(ext)s"),
@@ -52,7 +55,7 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
                     raise FileNotFoundError("Download finished but the media file was not found")
                 paths.append(files[0])
             except (_AnalysisSizeError, DownloadError, FileNotFoundError) as error:
-                if isinstance(error, DownloadError):
+                if kind == "audio" and isinstance(error, DownloadError):
                     message = blocking_message(error, cookies, proxy)
                     if message:
                         raise YouTubeAccessError(message) from None
@@ -63,8 +66,8 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
 
 
 def download_section(url: str, output_dir: Path, start: float, end: float, max_height: int = 1080,
-                     cookies: Path | None = None, proxy: str | None = None) -> Path:
-    """Download only `start`..`end` (seconds) of `url` as an MP4 and return its path.
+                     cookies: Path | None = None, proxy: str | None = None, *, analysis=False) -> Path:
+    """Download a frame-accurate range, using compact formats for analysis.
 
     Raises ValueError if the range starts past the end of the video.
     """
@@ -75,8 +78,10 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
     output_dir.mkdir(parents=True, exist_ok=True)
     window = f"{float(start)!r}-{float(end)!r}"
     options = {
-        "format": f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
-        "merge_output_format": "mp4",
+        "format": (f"bv[height<={max_height}]+ba[abr<=96]/bv[height<={max_height}]+ba/"
+                   f"b[height<={max_height}]/ba[abr<=96]/ba" if analysis
+                   else f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b"),
+        "merge_output_format": "mkv" if analysis else "mp4",
         "outtmpl": str(output_dir / f"%(id)s_{window}.%(ext)s"),
         "download_ranges": download_range_func(None, [(start, end)]),
         "force_keyframes_at_cuts": True,
@@ -85,6 +90,9 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
         "no_warnings": True,
         "noprogress": True,
     }
+    if analysis:
+        options.update(socket_timeout=25, retries=2, fragment_retries=2,
+                       external_downloader_args={"ffmpeg_i": ["-rw_timeout", "25000000"]})
     with cookie_options(cookies, proxy=proxy) as authentication:
         try:
             with yt_dlp.YoutubeDL({**options, **authentication}) as ydl:

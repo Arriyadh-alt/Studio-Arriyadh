@@ -270,6 +270,42 @@ function clipHtml(clip,index) {
       <div class="actions"><button type="submit" class="primary" ${disabled}>Re-render ↻</button>${clip.status==='ready'?(PodcastControls.exportable(current)?`<a class="button" href=".${clip.download_url}">Download ↓</a>`:'<span class="hint">Confirm rights above to download</span>'):''}<button class="delete" type="button" data-action="delete" aria-label="Delete highlight ${number}" ${disabled}>Delete</button></div>
     </form></div></article>`;
 }
+const stageLabels = {
+  source_validation: 'Source validation', video_analysis: 'Video analysis',
+  audio_analysis: 'Audio analysis', transcript_generation: 'Transcript generation',
+  chat_analysis: 'Chat analysis', viral_moment_detection: 'Viral moment detection',
+  ai_director: 'AI Director', final_rendering: 'Final rendering',
+};
+const stageStatusLabels = {
+  pending: 'Pending', processing: 'Processing', completed: 'Completed',
+  partially_completed: 'Partially completed', skipped: 'Skipped', retrying: 'Retrying', failed: 'Failed',
+};
+let stageMarkup, stageAction;
+function drawStages(job) {
+  const idle = !busy(job) && !job.chat_retrying;
+  const resume = idle && !job.analysis_complete && ['failed', 'cancelled'].includes(job.status);
+  $('#analysis-stages').hidden = !job.stages;
+  $('#resume-analysis').hidden = !resume;
+  $('#resume-analysis').disabled = !!stageAction;
+  const markup = Object.entries(stageLabels).map(([name, label])=>{
+    const stage = job.stages?.[name];
+    if (!stage) return '';
+    const retry = idle && job.status !== 'cancelled' && ['failed', 'partially_completed'].includes(stage.status);
+    const color = {processing:'running', retrying:'queued', partially_completed:'completed_with_errors'}[stage.status] || stage.status;
+    const percent = Math.round(stage.progress);
+    return `<li class="stage-item">
+      <div class="stage-info"><strong>${label}</strong><small class="hint">${stage.attempts ? `Attempts: ${stage.attempts}` : ''}</small></div>
+      <span class="badge ${escapeHtml(color)}">${stageStatusLabels[stage.status] || 'Pending'}</span>
+      <div class="stage-meter"><progress max="100" value="${percent}" aria-label="${label} progress"></progress><span>${percent}%</span></div>
+      ${retry ? `<button class="quiet stage-retry" type="button" data-stage="${name}" aria-label="Retry Failed Stage: ${label}" ${stageAction ? 'disabled' : ''}>Retry Failed Stage</button>` : ''}
+      ${stage.error ? `<small class="stage-error">${escapeHtml(stage.error)}</small>` : ''}
+    </li>`;
+  }).join('');
+  if (markup !== stageMarkup) {
+    $('#stage-list').innerHTML = markup;
+    stageMarkup = markup;
+  }
+}
 function drawJob(job) {
   job.clips.forEach(c=>{if(keeping.has(c.id))c.kept=keeping.get(c.id);});
   current = job;
@@ -285,6 +321,7 @@ function drawJob(job) {
   $('#job-error').textContent = job.error || '';
   $('#analysis-detail').hidden = !busy(job) || !job.analysis_detail;
   $('#analysis-detail').textContent = job.analysis_detail || '';
+  drawStages(job);
   const retry = !PodcastControls.isPodcast(job) && job.url && job.metadata &&
     (job.chat_error || job.status==='failed') && ['completed','completed_with_errors','failed'].includes(job.status);
   $('#chat-status').hidden = !(retry || job.chat_retrying || job.chat_warning || job.chat_error);
@@ -373,6 +410,7 @@ function route() {
   $('#cancel-job').hidden=true; $('#cancel-hint').hidden=true;
   $('#progress').removeAttribute('value'); $('#job-error').hidden=true;
   $('#chat-status').hidden=true; $('#retry-chat-error').hidden=true;
+  $('#analysis-stages').hidden=true; $('#stage-action-error').hidden=true;
   chartKey=undefined; $('#chart').innerHTML='';
   $('#download-kept').hidden=true; $('#delete-unkept').hidden=true; $('#keep-hint').hidden=true;
   globalThis.scrollTo(0,0);
@@ -380,6 +418,30 @@ function route() {
 }
 $('#lead').addEventListener('input',event=>$('#lead-value').textContent=`${event.target.value} seconds`);
 $('#refresh-jobs').addEventListener('click',()=>refresh());
+async function runStageAction(path) {
+  const job = current, errorNode = $('#stage-action-error');
+  if (!job || stageAction) return;
+  const action = stageAction = {};
+  drawStages(job);
+  errorNode.hidden = true;
+  try {
+    await api(`./api/jobs/${job.id}/${path}`, 'POST');
+    if (current?.id === job.id) await refresh();
+  } catch (error) {
+    if (current?.id === job.id) {
+      errorNode.textContent = error.message;
+      errorNode.hidden = false;
+    }
+  } finally {
+    if (stageAction === action) stageAction = null;
+    if (current) drawStages(current);
+  }
+}
+$('#resume-analysis').addEventListener('click',()=>runStageAction('resume'));
+$('#stage-list').addEventListener('click',event=>{
+  const button = event.target.closest('[data-stage]');
+  if (button) runStageAction(`stages/${button.dataset.stage}/retry`);
+});
 $('#retry-chat').addEventListener('click',async event=>{
   const job=current, button=event.currentTarget, errorNode=$('#retry-chat-error');
   button.disabled=true; errorNode.hidden=true;
