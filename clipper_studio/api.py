@@ -25,12 +25,14 @@ import cv2
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from cv2 import error as ImageProcessingError
+from PIL import Image
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
+from shorts_clipper.branding import BrandingSettings, LOGO_LIMIT, normalize_logo, prepare_watermark, read_logo
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, apply_caption_edits, caption_height, to_ass, transcribe
 from shorts_clipper.downloader import download_analysis_media, download_section
 from shorts_clipper.moments import analyze_media
@@ -38,7 +40,7 @@ from shorts_clipper.podcast import analyze_podcast
 from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source
 from shorts_clipper.speakers import frame_conversation
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
-from shorts_clipper.director import (STEP, DirectorOptions, plan_podcast_edit, Effects, cut_source, effects_for, framing_fix, has_audio, hook_layout,
+from shorts_clipper.director import (STEP, DirectorOptions, plan_podcast_edit, Effects, caption_band, cut_source, effects_for, framing_fix, has_audio, hook_layout,
                                      hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
                                      plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.editing import MODE_DEFAULTS, authenticity_report, plan_source_edit, record_operations
@@ -356,6 +358,12 @@ class Store:
         with self.lock:
             return [self.get(path.parent.name) for path in sorted(self.root.glob("*/job.json"), reverse=True)]
 
+    def save_branding(self, filename, data):
+        with self.lock:
+            temporary = self.root / f"{filename}.tmp"
+            temporary.write_bytes(data)
+            temporary.replace(self.root / filename)
+
 
 COMMENTARY_SECONDS = 10.0
 
@@ -459,6 +467,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             output_dir.mkdir(exist_ok=True)
             with tempfile.TemporaryDirectory(dir=output_dir) as temporary:
                 work = Path(temporary)
+                with store.lock:
+                    branding, logo = BrandingSettings.read(store.root), read_logo(store.root)
                 update(jid, generation, stage=f"{clip_label} · Downloading")
                 upload = upload_path(job)
                 editing_mode = spec.get("editing_mode", "full")
@@ -716,15 +726,24 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 update(jid, generation, stage=f"{clip_label} · Checking authenticity")
                 authenticity = authenticity_report(job, spec, plan, transcript, shown, duration, style=adaptive_style,
                                                    hook=spec.get("thumbnail_text") or hook, tracking=tracking_result)
+
+                def render_vertical(camera=None):
+                    bands = (caption_band(style, style.size, text_height) if shown else None, layout.get("hook"))
+                    watermark = prepare_watermark(work / "branding.png", branding, logo, render_source, 0,
+                                                  render_duration, spec["mode"], facecam=camera, bands=bands)
+                    options = {"facecam": camera} if camera is not None else {}
+                    make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles,
+                                       watermark=watermark, **options, **effects)
+
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 if overlay is None:
-                    make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles, **effects)
+                    render_vertical()
                 else:
                     try:
-                        make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles, facecam=overlay, **effects)
+                        render_vertical(overlay)
                     except Exception:
                         result = {"status": "unavailable", "box": None}
-                        make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles, **effects)
+                        render_vertical()
                 mixed_audio = False
                 if plan and (not professional or plan.voiceover or plan.music or plan.sfx or plan.voice_clarity):
                     update(jid, generation, stage=f"{clip_label} · AI Director mixing audio")
@@ -1047,6 +1066,45 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     app = FastAPI(title="Clipper Studio", lifespan=lifespan)
     app.state.store = store
     app.state.pending = pending
+
+    @app.get("/api/branding")
+    def get_branding():
+        with store.lock:
+            return {**BrandingSettings.read(store.root).model_dump(),
+                    "has_logo": (store.root / "branding-logo.png").is_file()}
+
+    @app.put("/api/branding")
+    def put_branding(settings: BrandingSettings):
+        with store.lock:
+            store.save_branding("branding.json", settings.model_dump_json().encode())
+            return get_branding()
+
+    @app.get("/api/branding/logo")
+    def get_branding_logo():
+        logo = read_logo(store.root)
+        if logo is None:
+            raise HTTPException(404, "No branding logo has been uploaded.")
+        return Response(logo, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/branding/logo")
+    async def upload_branding_logo(request: Request):
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > LOGO_LIMIT:
+                raise HTTPException(413, "Use a PNG file no larger than 2 MB.")
+            data.extend(chunk)
+        try:
+            logo = await run_in_threadpool(normalize_logo, data)
+        except (OSError, ValueError, Image.DecompressionBombError):
+            raise HTTPException(422, "Upload a visible, static PNG up to 2048 × 2048 pixels.") from None
+        await run_in_threadpool(store.save_branding, "branding-logo.png", logo)
+        return {"has_logo": True}
+
+    @app.delete("/api/branding/logo")
+    def remove_branding_logo():
+        with store.lock:
+            (store.root / "branding-logo.png").unlink(missing_ok=True)
+        return {"has_logo": False}
 
     @app.get("/api/voices")
     def list_voices():

@@ -7,7 +7,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .captions import CaptionStyle, FONTS, to_ass, to_srt, transcribe
+from .branding import BrandingSettings, prepare_watermark, read_logo
+from .captions import CaptionStyle, FONTS, caption_height, to_ass, to_srt, transcribe
+from .director import caption_band
 from .downloader import download_section
 from .timeutils import format_timestamp, parse_timestamp
 from .video import FILTERS, make_vertical_clip, video_duration
@@ -62,6 +64,7 @@ def main(argv=None) -> int:
                                            cookies=args.cookies, proxy=args.proxy)
 
             subtitles = None
+            bands = ()
             if not args.no_captions:
                 print(f"Transcribing locally ({args.model}) ...", flush=True)
                 captions = transcribe(section, args.model, args.language, clip_end=video_duration(section))
@@ -71,12 +74,19 @@ def main(argv=None) -> int:
                 style = CaptionStyle.from_dict({"preset": args.caption_preset, "position": args.caption_position,
                                                 "size": args.caption_size, "font": args.caption_font})
                 subtitles.write_text(to_ass(captions, style), encoding="utf-8")
+                if captions:
+                    bands = (caption_band(style, style.size, caption_height(captions, style)),)
                 if args.srt:
                     args.output.parent.mkdir(parents=True, exist_ok=True)
                     args.output.with_suffix(".srt").write_text(to_srt(captions), encoding="utf-8")
 
             print(f"Converting to 9:16 ({args.mode} mode) ...", flush=True)
-            make_vertical_clip(section, args.output, 0, video_duration(section), args.mode, subtitles)
+            root = Path(os.environ.get("CLIPPER_DATA_DIR") or "~/clipper-data").expanduser()
+            branding = BrandingSettings.read(root)
+            duration = video_duration(section)
+            watermark = prepare_watermark(Path(tmp) / "branding.png", branding, read_logo(root), section, 0, duration,
+                                          args.mode, bands=bands)
+            make_vertical_clip(section, args.output, 0, duration, args.mode, subtitles, watermark=watermark)
     except (ValueError, RuntimeError, FileNotFoundError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

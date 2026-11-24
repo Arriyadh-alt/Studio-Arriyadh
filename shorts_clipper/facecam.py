@@ -247,12 +247,7 @@ def auto_layout_facecam(source: Path, start: float, end: float, box: SourceBox,
     if not frames:
         raise ValueError('No readable source frames')
     size = (frames[0].shape[1], frames[0].shape[0])
-    previews = [cv2.cvtColor(_main_preview(f, mode), cv2.COLOR_BGR2GRAY) for f in frames]
-    importance = []
-    for index, preview in enumerate(previews):
-        motion = cv2.absdiff(preview, previews[index-1])/255 if index else np.zeros_like(preview)
-        importance.append(cv2.Canny(preview, 60, 160)/255 + motion
-                          + .35*_saliency_map(preview) + .8*_hud_mask(preview))
+    importance = _preview_importance(frames, mode)
     candidates = []
     for corner in ('top-left', 'top-right'):
         spec = layout_facecam(box, size, corner, width)
@@ -264,6 +259,20 @@ def auto_layout_facecam(source: Path, start: float, end: float, box: SourceBox,
     if score > .20 and width > .38:
         return layout_facecam(box, size, corner, max(.38, width*.92))
     return spec
+
+
+def picture_importance(source, start, end, mode):
+    return _preview_importance(_sample_frames(source, start, end), mode)
+
+
+def _preview_importance(frames, mode):
+    previews = [cv2.cvtColor(_main_preview(f, mode), cv2.COLOR_BGR2GRAY) for f in frames]
+    importance = []
+    for index, preview in enumerate(previews):
+        motion = cv2.absdiff(preview, previews[index-1])/255 if index else np.zeros_like(preview)
+        importance.append(cv2.Canny(preview, 60, 160)/255 + motion
+                          + .35*_saliency_map(preview) + .8*_hud_mask(preview))
+    return importance
 
 
 def _saliency_map(gray):

@@ -135,7 +135,7 @@ def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
     return f"split[hidemain][hidecam];[hidecam]{fill}[hidden];[hidemain][hidden]overlay={x0}:{y0},"
 
 
-def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False) -> list:
+def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False, watermark=None) -> list:
     if mode not in FILTERS:
         raise ValueError(f"Unknown mode {mode!r}; choose from {', '.join(FILTERS)}")
     if end <= start:
@@ -191,6 +191,10 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
         fonts = "".join("\\" + char if char in "\\': " else char for char in fonts)
         fonts = "".join("\\" + char if char in "\\'[],; " else char for char in fonts)
         filters += f",ass=filename={path}:fontsdir={fonts}"
+    watermark_input = []
+    if watermark is not None:
+        watermark_input = ["-i", str(watermark.path)]
+        filters += f"[composed];[composed][1:v]overlay={watermark.x}:{watermark.y}:eof_action=repeat"
     if export_fps:
         filters += ",scale=iw:ih:out_color_matrix=bt709:out_range=tv,format=yuv420p"
     silent_input = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"] if silent_audio else []
@@ -198,7 +202,7 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
     audio = ["-b:a", "192k", "-ar", "48000"] if export_fps else ["-b:a", "128k"]
     return [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{start:.3f}", "-i", str(source), *silent_input, "-t", f"{end - start:.3f}",
+        "-ss", f"{start:.3f}", "-i", str(source), *watermark_input, *silent_input, "-t", f"{end - start:.3f}",
         "-filter_complex", filters,
         "-c:v", "libx264", "-preset", "medium", *quality, "-pix_fmt", "yuv420p",
         "-c:a", "aac", *audio,
@@ -207,11 +211,14 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
     ]
 
 
-def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False) -> Path:
+def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False, watermark=None) -> Path:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not found on PATH; install it first")
     output.parent.mkdir(parents=True, exist_ok=True)
-    if export_fps:
+    if watermark is not None:
+        command = build_ffmpeg_command(source, output, start, end, mode, captions, facecam, effects,
+                                       export_fps=export_fps, silent_audio=silent_audio, watermark=watermark)
+    elif export_fps:
         command = build_ffmpeg_command(source, output, start, end, mode, captions, facecam, effects,
                                        export_fps=export_fps, silent_audio=silent_audio)
     elif effects is not None:

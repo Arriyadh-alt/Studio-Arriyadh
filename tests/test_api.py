@@ -131,7 +131,7 @@ def media(monkeypatch):
     monkeypatch.setattr("clipper_studio.api.download_section", lambda url, directory, *a: directory / "source.mp4")
     monkeypatch.setattr("clipper_studio.api.video_duration", lambda p: 30)
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p: [])
-    monkeypatch.setattr("clipper_studio.api.make_vertical_clip", lambda source, output, *a: output.write_bytes(b"video"))
+    monkeypatch.setattr("clipper_studio.api.make_vertical_clip", lambda source, output, *a, **kw: output.write_bytes(b"video"))
     monkeypatch.setattr("clipper_studio.api.subprocess.run", lambda command, **k: Path(command[-1]).write_bytes(b"jpg"))
 
 
@@ -176,7 +176,8 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr("clipper_studio.api.video_duration", lambda p: 40)
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **kwargs: [])
     render_attempts = []
-    def convert(source, output, *args):
+    def convert(source, output, *args, watermark):
+        assert watermark.path.is_file()
         render_attempts.append(output)
         if len(render_attempts) == 1:
             raise RuntimeError("Transient render failure")
@@ -224,7 +225,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
         assert client.post(base + "/render", json={"start":10,"end":40,"mode":"blur","captions":False}).status_code == 202
         app.state.pending.join()
         assert client.get(f"/api/jobs/{jid}").json()["clips"][0]["start"] == 10
-        def render_fail(*args):
+        def render_fail(*args, **kwargs):
             raise RuntimeError("ffmpeg failed")
         monkeypatch.setattr("clipper_studio.api.make_vertical_clip", render_fail)
         assert client.post(base + "/render", json={"start":10,"end":40}).status_code == 202
@@ -421,7 +422,7 @@ def test_delete_queued_during_autopilot(monkeypatch, tmp_path):
         return args[1] / "source.mp4"
     monkeypatch.setattr("clipper_studio.api.download_section", section)
     monkeypatch.setattr("clipper_studio.api.video_duration", lambda p: 30)
-    monkeypatch.setattr("clipper_studio.api.make_vertical_clip", lambda source, output, *a: output.write_bytes(b"video"))
+    monkeypatch.setattr("clipper_studio.api.make_vertical_clip", lambda source, output, *a, **kw: output.write_bytes(b"video"))
     monkeypatch.setattr("clipper_studio.api.subprocess.run", lambda command, **k: Path(command[-1]).write_bytes(b"jpg"))
     app = create_app(tmp_path, render_workers=1)
     with TestClient(app) as client:
@@ -535,7 +536,7 @@ def test_cancel_render_and_rerender_ignores_stale_work(monkeypatch, tmp_path, me
             assert release.wait(5)
         return directory / "source.mp4"
 
-    def convert(source, output, *args):
+    def convert(source, output, *args, **kwargs):
         conversions.append(source)
         output.write_bytes(b"new video")
 
