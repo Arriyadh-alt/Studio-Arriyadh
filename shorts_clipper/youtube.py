@@ -109,7 +109,7 @@ def _save_cookies(source, private):
 
 
 @contextmanager
-def cookie_options(cookies=None, proxy=None):
+def cookie_options(cookies=None, proxy=None, *, writeback=True):
     proxy = proxy or os.environ.get("CLIPPER_YTDLP_PROXY")
     options = {"proxy": proxy, "logger": _ProxyLogger(proxy)} if proxy else {}
     source = cookies or os.environ.get("CLIPPER_YTDLP_COOKIES")
@@ -127,7 +127,7 @@ def cookie_options(cookies=None, proxy=None):
         data_dir = Path(os.environ.get("CLIPPER_DATA_DIR", "~/clipper-data")).expanduser()
         data_dir.mkdir(parents=True, exist_ok=True)
     source = Path(source).expanduser().resolve() if source else None
-    with (_cookie_lock(source) if source else nullcontext()), tempfile.TemporaryDirectory(
+    with (_cookie_lock(source) if source and writeback else nullcontext()), tempfile.TemporaryDirectory(
             prefix="clipper-cookies-", dir=data_dir) as temporary:
         private = Path(temporary) / "cookies.txt"
         private.touch(mode=0o600)
@@ -141,7 +141,7 @@ def cookie_options(cookies=None, proxy=None):
                 "CLIPPER_YTDLP_COOKIES/--cookies or set YOUTUBE_COOKIES (see README).") from None
         try:
             yield {**options, "cookiefile": str(private)}
-            if source:
+            if source and writeback:
                 _save_cookies(source, private)
         except Exception as error:
             if proxy:

@@ -1,3 +1,4 @@
+import fcntl
 import json
 import tracemalloc
 from pathlib import Path
@@ -109,6 +110,28 @@ def test_long_replay_download(stub_yt_dlp, tmp_path):
     with messages.reader() as (group, count):
         assert group(2) == (Message(12.5, "Alice", "WOW :fire:"),)
         assert count(3) == 1
+
+
+def test_chat_download_releases_shared_cookie_lock(stub_yt_dlp, tmp_path, monkeypatch):
+    cookies = tmp_path / "cookies.txt"
+    initial = "# Netscape HTTP Cookie File\n"
+    cookies.write_text(initial)
+    cookies.with_suffix(".txt.lock").touch(mode=0o600)
+    monkeypatch.setenv("CLIPPER_YTDLP_COOKIES", str(cookies))
+
+    def download(self, output, hook):
+        private = Path(self.options["cookiefile"])
+        assert private != cookies and private.read_text() == initial
+        assert private.stat().st_mode & 0o777 == 0o600
+        with cookies.with_suffix(".txt.lock").open("r+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        private.write_text(initial + "# chat changes\n")
+        output.write_bytes(FIXTURE.read_bytes())
+
+    stub_yt_dlp.download = download
+    _, messages = fetch_chat(REPLAY_URL, tmp_path / "chat", REPLAY_INFO)
+    assert len(messages) == 3
+    assert cookies.read_text() == initial
 
 
 def test_disk_guard_retains_partial_download(stub_yt_dlp, tmp_path, monkeypatch, caplog):

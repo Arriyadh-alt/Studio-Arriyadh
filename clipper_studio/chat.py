@@ -161,7 +161,7 @@ def _ingest_attempt(info, work, writer, should_continue):
                "socket_timeout": 20, "progress_hooks": [progress]}
     try:
         progress({})
-        with cookie_options() as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
+        with cookie_options(writeback=False) as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
             ydl.process_ie_result(info, download=True)
     finally:
         consume(path if path.is_file() else partial, final=path.is_file())
