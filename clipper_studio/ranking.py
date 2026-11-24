@@ -66,12 +66,8 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
             chat_range = moment.get("original_chat_range", moment)
         if chat_range is not None:
             claimed.add((chat_range["start"], chat_range["end"]))
-    merged = _merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead,
-                               conflicts=conflicts, claimed=claimed)
-    fresh = []
-    for candidate in _rank(merged):
-        if not any(_overlaps(candidate, m) for m in fresh):
-            fresh.append(candidate)
+    fresh = _rank(_merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead,
+                                    conflicts=conflicts, claimed=claimed, disjoint=True))
     unmatched = []
     for candidate in fresh:
         match = next((m for m in remaining if (m["start"], m["end"]) == (candidate["start"], candidate["end"])), None)
@@ -98,7 +94,7 @@ def merge_moments(ai, chat, duration, lead):
     return _rank(_merge_candidates(ai, chat, duration, lead))
 
 
-def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: False, claimed=None):
+def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: False, claimed=None, disjoint=False):
     def normalize(item, source):
         start = max(0., min(float(item["start"]), duration))
         end = max(start, min(float(item["end"]), duration, start + 60))
@@ -114,27 +110,41 @@ def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: Fals
                 **({"podcast": item["podcast"]} if item.get("podcast") else {})}
 
     result = [normalize(a, "ai") for a in ai]
-    result = [a for a in result if not conflicts(a)]
+    ai_moments = [a for a in result if not conflicts(a)]
+    if disjoint:
+        result = []
+        for a in sorted(ai_moments, key=lambda m: -m["score"]):
+            if not any(_overlaps(a, placed) for placed in result):
+                result.append(a)
+        ai_moments = result
+    standalone = []
     for original in chat:
         c = normalize(original, "chat")
         signature = (c["start"], c["end"])
         if claimed is not None and signature in claimed:
             continue
-        matches = [a for a in result if a["sources"] == ["ai"] and _matches(a, c)]
+        matches = [a for a in ai_moments if a["sources"] == ["ai"] and _matches(a, c)]
         for a in sorted(matches, key=lambda a: abs(a["peak"] - c["peak"])):
             combined = _corroborate(a, c, duration, lead)
-            if not conflicts(combined):
+            if not conflicts(combined) and not (
+                    disjoint and any(other is not a and _overlaps(combined, other) for other in ai_moments)):
                 a.update(combined)
                 if claimed is not None:
                     claimed.add(signature)
                 break
         else:
             if (not conflicts(c) and not any(_overlaps(a, c) for a in matches)
-                    and not any(m["sources"] == ["chat"] and _matches(m, c) for m in result)):
-                result.append(c)
+                    and not any(_matches(m, c) for m in standalone)):
+                standalone.append(c)
                 if claimed is not None:
                     claimed.add(signature)
-    return result
+    if not disjoint:
+        return ai_moments + standalone
+    placed = list(ai_moments)
+    for candidate in sorted(standalone, key=lambda m: -m["score"]):
+        if not any(_overlaps(candidate, other) for other in placed):
+            placed.append(candidate)
+    return placed
 
 
 def _corroborate(a, c, duration, lead):

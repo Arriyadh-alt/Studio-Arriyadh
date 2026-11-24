@@ -53,6 +53,14 @@ def test_retry_does_not_match_a_spike_attributed_to_an_edited_moment():
     assert result == [touched, {**untouched, "rank": 2}]
 
 
+def test_retry_preserves_both_ai_ranges_when_chat_extension_would_overlap():
+    ai = [moment(), moment(141, 180, 160, 55)]
+    chat = [moment(110, 153, 128, 90)]
+    existing = merge_moments(ai, [], 600, 18)
+    assert merge_moments(ai, chat, 600, 18)[0]["end"] == 153
+    assert add_chat_moments(existing, chat, 600, 18, ai=ai) == existing
+
+
 def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
     rng = Random(314159)
 
@@ -64,6 +72,10 @@ def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
 
     def overlaps(left, right):
         return max(left["start"], right["start"]) < min(left["end"], right["end"])
+
+    def ai_key(m):
+        source = m.get("alternatives", {}).get("ai", m)
+        return (source["start"], source["end"], m["peak"])
 
     for _ in range(100):
         ai = list(candidates(6))
@@ -78,7 +90,7 @@ def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
                 if original_range is None:
                     original_range = {k: original[k] for k in ("start", "end")}
                     original["original_ai_range"] = original_range
-                protected_ranges.append(original_range)
+                protected_ranges.append({**original_range, "peak": original["peak"]})
             if original["sources"] == ["chat"]:
                 original["original_chat_range"] = {k: original[k] for k in ("start", "end")}
             chat_range = original.get("alternatives", {}).get("chat") or original.get("original_chat_range")
@@ -96,6 +108,15 @@ def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
         assert protected.keys() <= {m["id"] for m in result}
         assert not any(overlaps(a, b) for a, b in combinations(untouched, 2))
         assert not any(overlaps(a, b) for a in untouched for b in protected_ranges)
+        represented_ai = [m for m in untouched if "ai" in m["sources"]]
+        for proposal in ai:
+            if any(overlaps(proposal, m) or abs(proposal["peak"] - m["peak"]) <= 25 for m in protected_ranges):
+                continue
+            if any(ai_key(proposal) != ai_key(m) and (
+                    overlaps(proposal, m) or overlaps(proposal, m.get("alternatives", {}).get("ai", m)))
+                   for m in represented_ai):
+                continue
+            assert ai_key(proposal) in {ai_key(m) for m in represented_ai}
         for m in untouched:
             chat_range = m.get("alternatives", {}).get("chat") or (m if m["sources"] == ["chat"] else None)
             if chat_range:
