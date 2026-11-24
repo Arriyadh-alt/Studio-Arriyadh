@@ -94,8 +94,8 @@ def fetch_metadata(url: str, require_chat=True, require_live=True):
     return info
 
 
-def _backoff(attempt):
-    return min(8, 2 ** max(0, attempt - 1) + random.uniform(0, .5))
+def _backoff(n):
+    return min(8, 2 ** n + random.uniform(0, .5))
 
 
 def _transient(error):
@@ -195,7 +195,7 @@ def fetch_chat(url: str, directory: Path, info=None, should_continue=None):
                     failure = blocking_message(error) or REPLAY_DOWNLOAD_ERROR
                     if attempt == 3 or not _transient(error):
                         break
-                    time.sleep(_backoff(attempt))
+                    time.sleep(_backoff(n=attempt - 1))
                 except ChatReplayError as error:
                     failure = str(error)
                     break
