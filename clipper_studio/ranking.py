@@ -51,9 +51,19 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
             legacy_ai.append(original)
 
     protected_ranges = [*protected, *(original for original in map(_original_ai, protected) if original)]
-    fresh = [candidate for candidate in merge_moments(legacy_ai if ai is None else ai, chat, duration, lead)
-             if not any(_matches(m, candidate) or max(m["start"], candidate["start"]) < min(m["end"], candidate["end"])
-                        for m in protected_ranges)]
+
+    def conflicts(candidate):
+        return any(_matches(m, candidate) or max(m["start"], candidate["start"]) < min(m["end"], candidate["end"])
+                   for m in protected_ranges)
+
+    merged, ai_only = _merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead)
+    fresh = []
+    for candidate in _rank(merged):
+        if conflicts(candidate):
+            candidate = ai_only.get(candidate["id"])
+            if candidate is None or conflicts(candidate):
+                continue
+        fresh.append(candidate)
     unmatched = []
     for candidate in fresh:
         match = next((m for m in remaining if (m["start"], m["end"]) == (candidate["start"], candidate["end"])), None)
@@ -69,11 +79,19 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
         if match is not None:
             candidate["id"] = match["id"]
             remaining.remove(match)
-    return sorted([*protected, *fresh], key=lambda m: m["rank"])
+    previous_order = {moment["id"]: i for i, moment in enumerate(existing)}
+    result = [*fresh, *(dict(moment) for moment in protected)]
+    result.sort(key=lambda m: previous_order.get(m["id"], len(existing)))
+    return _rank(result)
 
 
 def merge_moments(ai, chat, duration, lead):
     """Match overlap or nearby peaks, retaining source proposals and AI timing."""
+    moments, _ = _merge_candidates(ai, chat, duration, lead)
+    return _rank(moments)
+
+
+def _merge_candidates(ai, chat, duration, lead):
     def normalize(item, source):
         start = max(0., min(float(item["start"]), duration))
         end = max(start, min(float(item["end"]), duration, start + 60))
@@ -89,6 +107,7 @@ def merge_moments(ai, chat, duration, lead):
                 **({"podcast": item["podcast"]} if item.get("podcast") else {})}
 
     result = [normalize(a, "ai") for a in ai]
+    ai_only = {}
     for original in chat:
         c = normalize(original, "chat")
         matches = []
@@ -102,6 +121,7 @@ def merge_moments(ai, chat, duration, lead):
                 result.append(c)
             continue
         a = min(matches, key=lambda a: abs(a["peak"] - c["peak"]))
+        ai_only[a["id"]] = dict(a)
         a["alternatives"] = {"ai": {k: a[k] for k in ("start", "end")},
                              "chat": {k: c[k] for k in ("start", "end")}}
         # Chat peak is delayed engagement; the AI proposal anchors the true event.
@@ -114,7 +134,11 @@ def merge_moments(ai, chat, duration, lead):
                  chat_score=c["score"], score=min(100, max(a["score"], c["score"]) + 10),
                  reason=a["reason"] + "; corroborated by chat: " + c["reason"],
                  message_sample=c["message_sample"])
-    result.sort(key=lambda m: -m["score"])
-    for rank, moment in enumerate(result, 1):
+    return result, ai_only
+
+
+def _rank(moments):
+    moments.sort(key=lambda m: -m["score"])
+    for rank, moment in enumerate(moments, 1):
         moment["rank"] = rank
-    return result
+    return moments

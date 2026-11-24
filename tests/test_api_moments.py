@@ -226,7 +226,7 @@ def test_retry_peak_does_not_replace_or_overlap_protected_moment(sources, status
         **proposal(4), "start": 143, "end": 178, "peak": 145,
     }], 600, 18)
     protected.update(sources=sources, status=status, reviewed=reviewed)
-    snapshot = dict(protected)
+    snapshot = dict(protected, rank=1)
     candidate = {**proposal(90), "start": 110, "end": 150, "peak": 128}
     result = add_chat_moments([original, protected], [candidate], 600, 18)
     assert result == [snapshot]
@@ -262,6 +262,34 @@ def test_retry_drops_proposals_overlapping_either_range_of_reviewed_ai_moment():
         {**proposal(60), "start": 320, "end": 345, "peak": 335},
     ]
     assert add_chat_moments([reviewed], fresh, 600, 18) == [reviewed]
+
+
+def test_retry_keeps_ai_only_when_chat_extension_overlaps_reviewed_moment():
+    from clipper_studio.ranking import add_chat_moments, merge_moments
+
+    ai = [proposal(80)]
+    touched = {**proposal(70), "start": 150, "end": 180, "peak": 167}
+    original, reviewed = merge_moments(ai, [touched], 600, 18)
+    reviewed["reviewed"] = True
+    chat = [{**proposal(90), "start": 110, "end": 158, "peak": 128}]
+    assert merge_moments(ai, chat, 600, 18)[0]["end"] == 158
+    assert add_chat_moments([original, reviewed], chat, 600, 18, ai=ai) == [original, reviewed]
+
+
+def test_retry_ranks_all_moments_by_score_without_putting_reviewed_ties_first():
+    from clipper_studio.ranking import add_chat_moments, merge_moments
+
+    ai = [proposal(80)]
+    reviewed_spike = {**proposal(80), "start": 200, "end": 240, "peak": 218}
+    fresh_spike = {**proposal(95), "start": 300, "end": 340, "peak": 318}
+    original, reviewed = merge_moments(ai, [reviewed_spike], 600, 18)
+    reviewed["reviewed"] = True
+
+    result = add_chat_moments([original, reviewed], [fresh_spike], 600, 18, ai=ai)
+    assert [(m["rank"], m["score"], m["peak"]) for m in result] == [
+        (1, 95, 318), (2, 80, 118), (3, 80, 218),
+    ]
+    assert result[2] == {**reviewed, "rank": 3}
 
 
 def test_retry_rebuilds_untouched_ai_and_chat_from_current_results(monkeypatch, tmp_path, analysis):
