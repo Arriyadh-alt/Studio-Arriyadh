@@ -244,6 +244,49 @@ def test_autopilot_stage_retry_renders_new_moments_without_replacing_ready_clip(
         assert added["status"] == "ready" and added["number"] == 2 and added["peak"] == 175
 
 
+@pytest.mark.parametrize("case", ["range", "merged", "shared_spike"])
+def test_autopilot_stage_retry_does_not_render_a_touched_event_twice(tmp_path, monkeypatch, media, case):
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": 240})
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 240}, []))
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", lambda *a, **k: (None, None))
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
+        dict(start=100, end=140, peak=120, score=10),
+    ], []))
+    start, end, peak = (70, 107, 88) if case == "range" else (80, 118, 94)
+    attempts = []
+
+    def analyze(audio, video, duration, checkpoint, **kwargs):
+        def speech():
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise RuntimeError("Transcription unavailable")
+            return "Recovered speech"
+
+        try:
+            title = checkpoint("transcript_generation", "speech", speech)
+        except RuntimeError:
+            return []
+        return [dict(start=start, end=end, peak=peak, score=90, title=title)]
+
+    monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": False, "clips": 2, "captions": False}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        app.state.pending.join()
+        original = client.get(base).json()
+        first, = original["clips"]
+        kept, = original["moments"]
+        assert first["status"] == "ready" and kept["sources"] == ["chat"]
+        if case == "shared_spike":
+            kept = client.patch(f"{base}/moments/{kept['id']}", json={"start": 190, "end": 220}).json()
+        assert client.post(f"{base}/stages/transcript_generation/retry").status_code == 202
+        app.state.pending.join()
+        latest = client.get(base).json()
+        assert latest["moments"] == [kept]
+        assert latest["clips"] == [first]
+
+
 def test_resume_waits_for_inflight_upload_conversion_without_blocking_other_jobs(tmp_path, monkeypatch):
     entered, release, other_job = threading.Event(), threading.Event(), threading.Event()
     conversions = []

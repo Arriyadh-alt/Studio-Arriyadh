@@ -58,7 +58,7 @@ from .chat import DISK_RESERVE_BYTES, METADATA_KEYS, ChatReplayError, fetch_chat
 from .media_analysis import SEGMENTED_MIN_SECONDS, analyze_ranges
 from .scheduler import Scheduler
 from .spikes import detect_spikes
-from .ranking import add_chat_moments, chat_moment, merge_moments
+from .ranking import add_chat_moments, chat_moment, merge_moments, refresh_suggestions
 from .stages import ANALYSIS_STAGES, RENDER_STAGES, RETRYABLE, AnalysisTracker, Checkpoints, Stage, mark_stage, stage_states
 
 
@@ -997,28 +997,6 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     def check_job(jid, generation):
         with store.lock:
             active_job(jid, generation)
-
-    def refresh_suggestions(existing, fresh):
-        result = list(existing)
-        remaining = {i for i, moment in enumerate(existing)
-                     if moment["status"] == "suggested" and not moment.get("reviewed")
-                     and not moment.get("clip_id") and not moment.get("edits")}
-        rank = max((moment["rank"] for moment in existing), default=0)
-        for candidate in fresh:
-            nearby = {i for i, moment in enumerate(result) if abs(moment["peak"] - candidate["peak"]) <= 25}
-            if nearby - remaining:
-                continue
-            if nearby:
-                match = min(nearby, key=lambda i: (abs(result[i]["peak"] - candidate["peak"]), i))
-                previous = result[match]
-                if "ai" in previous["sources"] and "ai" not in candidate["sources"]:
-                    continue
-                remaining.remove(match)
-                result[match] = dict(candidate, id=previous["id"], rank=previous["rank"])
-            else:
-                rank += 1
-                result.append(dict(candidate, rank=rank))
-        return result
 
     def analyze_chat(jid, generation, job, info, retry_dir=None):
         name = "chat_analysis/result.json"
