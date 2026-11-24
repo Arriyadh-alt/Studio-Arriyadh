@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from clipper_studio.api import DirectorSpec, create_app, director_config
 from shorts_clipper.captions import Caption
-from shorts_clipper.director import DirectorOptions, Plan, Segment, cut_source, loudness, probe, remap_captions
+from shorts_clipper.director import DirectorOptions, Plan, Segment, cut_source, loudness, plan_record, probe, remap_captions
 from shorts_clipper.editing import authenticity_report, plan_source_edit, record_operations
 from shorts_clipper.video import hdr_to_sdr, make_vertical_clip
 from test_api import REPLAY_URL
@@ -105,6 +105,17 @@ def test_enhanced_commentary_can_use_a_longer_intro_without_truncation():
                                DirectorOptions(preset="podcast", voiceover=True, commentary=commentary),
                                mode="enhanced", category="podcast", title_voice=voice)
     assert plan.commentary["voiced"] and plan.map_time(0.) > 8.15
+
+
+@pytest.mark.parametrize("mode", ["natural", "enhanced"])
+def test_full_length_source_edit_explains_why_requested_narration_was_skipped(mode):
+    options = DirectorOptions(voiceover=True)
+    synthesize = pytest.fail
+    plan, _ = plan_source_edit(np.full(600, -20.), SPEECH, 60., options,
+                               mode=mode, category="podcast", title_voice=synthesize)
+    assert plan.duration == 60. and plan.voiceover is None
+    assert any("AI voice-over was skipped" in note and "Shorten the clip" in note
+               for note in plan_record(plan, options, [])["suggestions"])
 
 
 @pytest.fixture(scope="module")

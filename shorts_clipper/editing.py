@@ -89,6 +89,7 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
                 removed += b - a
     segments.append(Segment(cursor, duration))
     plan = Plan(segments, removed=removed)
+    narration_lacks_time = False
     if options.hook:
         text = options.hook_text or (f'“{quote[0]}”' if options.story and quote else None)
         if options.commentary:
@@ -99,6 +100,7 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
             plan.hook = {"style": "source", "text": text, "duration": min(duration, display_time)}
             available = MAX_OUTPUT - plan.duration - .45
             voice_limit = available if plan.commentary else min(3., available)
+            narration_lacks_time = options.voiceover and voice_limit < .5
             if title_voice and options.voiceover and voice_limit >= .5:
                 try:
                     limits = {"allow_truncate": False} if plan.commentary else {}
@@ -127,6 +129,8 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
     plan.score, plan.suggestions = score_clip(levels, words, duration, peak, .65 if plan.hook else .4,
                                               spike_score, removed)
     plan.suggestions = [s for s in plan.suggestions if not s.startswith(("Opening is calm", "Pacing is slow", "Little speech"))]
+    if narration_lacks_time:
+        plan.suggestions.append("AI voice-over was skipped to keep the source edit within 60 seconds. Shorten the clip to make room for narration.")
     return plan, tone
 
 
