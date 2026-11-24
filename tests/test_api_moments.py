@@ -193,11 +193,15 @@ def test_retry_chat_only_preserves_existing_reviews_and_clips(monkeypatch, tmp_p
 
 
 def test_chat_retry_updates_an_untouched_suggestion(monkeypatch, tmp_path, analysis):
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
+        proposal(8), {**proposal(4), "start": 143, "end": 178, "peak": 145},
+    ], []))
     app = create_app(tmp_path)
     with TestClient(app) as client:
         jid = client.post("/api/jobs", json={"url": REPLAY_URL, "ai_analysis": False}).json()["id"]
         app.state.pending.join()
-        original, = app.state.store.get(jid)["moments"]
+        original, neighboring = app.state.store.get(jid)["moments"]
+        assert original["end"] < neighboring["start"]
         monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
             {**proposal(90), "start": 110, "end": 150, "peak": 128, "message_sample": ["WOW"]},
             {**proposal(6), "start": 105, "end": 145, "peak": 125, "message_sample": ["hi"]},
@@ -210,6 +214,21 @@ def test_chat_retry_updates_an_untouched_suggestion(monkeypatch, tmp_path, analy
         assert (moment["start"], moment["end"], moment["peak"]) == (110, 150, 128)
         assert moment["score"] > original["score"]
         assert moment["message_sample"] == ["WOW"]
+
+
+@pytest.mark.parametrize("sources,reviewed", [(["chat"], True), (["ai"], False)])
+def test_retry_peak_does_not_replace_or_overlap_protected_moment(sources, reviewed):
+    from clipper_studio.ranking import add_chat_moments, merge_moments
+
+    original, protected = merge_moments([], [proposal(8), {
+        **proposal(4), "start": 143, "end": 178, "peak": 145,
+    }], 600, 18)
+    protected.update(sources=sources, reviewed=reviewed)
+    candidate = {**proposal(90), "start": 110, "end": 150, "peak": 128}
+    result = add_chat_moments([original, protected], [candidate], 600, 18)
+    assert [(m["id"], m["start"], m["end"]) for m in result] == [
+        (original["id"], 100, 140), (protected["id"], 143, 178),
+    ]
 
 
 def test_autorender_and_old_jobs(tmp_path, analysis, media):
