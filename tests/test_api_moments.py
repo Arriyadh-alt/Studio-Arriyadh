@@ -216,14 +216,16 @@ def test_chat_retry_updates_an_untouched_suggestion(monkeypatch, tmp_path, analy
         assert moment["message_sample"] == ["WOW"]
 
 
-@pytest.mark.parametrize("sources,reviewed", [(["chat"], True), (["ai"], False)])
-def test_retry_peak_does_not_replace_or_overlap_protected_moment(sources, reviewed):
+@pytest.mark.parametrize("sources,status,reviewed", [
+    (["chat"], "suggested", True), (["ai"], "rejected", False), (["ai"], "selected", False),
+])
+def test_retry_peak_does_not_replace_or_overlap_protected_moment(sources, status, reviewed):
     from clipper_studio.ranking import add_chat_moments, merge_moments
 
     original, protected = merge_moments([], [proposal(8), {
         **proposal(4), "start": 143, "end": 178, "peak": 145,
     }], 600, 18)
-    protected.update(sources=sources, reviewed=reviewed)
+    protected.update(sources=sources, status=status, reviewed=reviewed)
     snapshot = dict(protected)
     candidate = {**proposal(90), "start": 110, "end": 150, "peak": 128}
     result = add_chat_moments([original, protected], [candidate], 600, 18)
@@ -246,6 +248,62 @@ def test_retry_chat_matches_initial_merge_and_preserves_reviewed_moments():
 
     existing = [*first_run, reviewed, rendered]
     assert add_chat_moments(existing, chat, 600, 18) == existing
+
+
+def test_retry_drops_proposals_overlapping_either_range_of_reviewed_ai_moment():
+    from clipper_studio.ranking import add_chat_moments, merge_moments
+
+    raw_ai = [proposal(80)]
+    reviewed, = merge_moments(raw_ai, [proposal(90)], 600, 18)
+    reviewed.update(reviewed=True, start=300, end=330, duration=30)
+    fresh = [
+        proposal(90),
+        {**proposal(70), "start": 120, "end": 160, "peak": 143},
+        {**proposal(60), "start": 320, "end": 345, "peak": 335},
+    ]
+    assert add_chat_moments([reviewed], fresh, 600, 18) == [reviewed]
+
+
+def test_retry_rebuilds_untouched_ai_and_chat_from_current_results(monkeypatch, tmp_path, analysis):
+    from clipper_studio.ranking import chat_moment, merge_moments
+
+    stale_spike = {**proposal(9), "start": 250, "end": 280, "peak": 265}
+    new_spike = {**proposal(20), "start": 101, "end": 143, "peak": 119, "message_sample": ["Wow"]}
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([stale_spike], []))
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        app.state.pending.join()
+        original = app.state.store.get(jid)["moments"]
+        assert [m["sources"] for m in original] == [["ai"], ["chat"]]
+        monkeypatch.setattr("clipper_studio.api.analyze_media",
+                            lambda *a, **k: pytest.fail("chat retry must not rerun AI"))
+        monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([new_spike], []))
+        assert client.post(f"/api/jobs/{jid}/chat/retry").status_code == 202
+        app.state.pending.join()
+        moment, = app.state.store.get(jid)["moments"]
+        expected, = merge_moments([proposal()], [chat_moment(new_spike)], 600, 18)
+        assert moment == {**expected, "id": original[0]["id"]}
+        assert app.state.store.get(jid)["ai_candidates"] == [proposal()]
+
+
+def test_retry_preserves_edited_ai_only_moment_and_blocks_its_original_range(monkeypatch, tmp_path, analysis):
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([], []))
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        app.state.pending.join()
+        original, = app.state.store.get(jid)["moments"]
+        base = f"/api/jobs/{jid}"
+        edited = client.patch(f"{base}/moments/{original['id']}", json={"start": 300, "end": 330})
+        assert edited.status_code == 200
+        monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
+            proposal(90),
+            {**proposal(70), "start": 120, "end": 160, "peak": 143},
+        ], []))
+        assert client.post(f"{base}/chat/retry").status_code == 202
+        app.state.pending.join()
+        assert app.state.store.get(jid)["moments"] == [edited.json()]
 
 
 def test_autorender_and_old_jobs(tmp_path, analysis, media):

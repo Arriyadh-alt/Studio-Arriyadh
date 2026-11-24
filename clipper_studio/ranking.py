@@ -23,32 +23,53 @@ def _matches(a, c):
     return (shorter > 0 and overlap >= .4 * shorter) or abs(a["peak"] - c["peak"]) <= 25
 
 
-def add_chat_moments(existing, chat, duration, lead):
-    protected, remaining, ai = [], [], []
+def _original_ai(moment):
+    if "ai" not in moment["sources"]:
+        return None
+    original = moment.get("alternatives", {}).get("ai") or moment.get("original_ai_range", {})
+    start, end = original.get("start", moment["start"]), original.get("end", moment["end"])
+    return {**moment, "start": start, "end": end, "duration": end - start}
+
+
+def add_chat_moments(existing, chat, duration, lead, *, ai=None):
+    protected, remaining, legacy_ai = [], [], []
     for moment in existing:
-        untouched = moment["status"] == "suggested" and not moment.get("reviewed")
-        (remaining if untouched and moment["sources"] == ["chat"] else protected).append(moment)
-        if "ai" in moment["sources"]:
-            original = moment.get("alternatives", {}).get("ai", {})
-            ai.append({**moment, **original, "score": moment.get("ai_score") or moment["score"]})
-    result = list(protected)
-    rank = max((m["rank"] for m in existing), default=0)
-    for candidate in merge_moments(ai, chat, duration, lead):
-        if candidate["sources"] != ["chat"]:
-            continue
-        if any(m["sources"] == ["chat"] and _matches(m, candidate) for m in protected):
-            continue
-        match = min((m for m in remaining if _matches(m, candidate)),
-                    key=lambda m: ((m["start"], m["end"]) != (candidate["start"], candidate["end"]),
-                                   abs(m["peak"] - candidate["peak"])), default=None)
+        original = _original_ai(moment)
+        untouched = (moment["status"] == "suggested" and not moment.get("reviewed")
+                     and not moment.get("edits") and not moment.get("clip_id"))
+        if untouched:
+            remaining.append(moment)
+        else:
+            protected.append(moment)
+        if ai is None and original is not None:
+            original["score"] = moment.get("ai_score")
+            if original["score"] is None:
+                original["score"] = moment["score"]
+            if "chat" in moment["sources"]:
+                original["reason"] = moment["reason"].partition("; corroborated by chat: ")[0]
+                original["message_sample"] = []
+            legacy_ai.append(original)
+
+    protected_ranges = [*protected, *(original for original in map(_original_ai, protected) if original)]
+    fresh = [candidate for candidate in merge_moments(legacy_ai if ai is None else ai, chat, duration, lead)
+             if not any(_matches(m, candidate) or max(m["start"], candidate["start"]) < min(m["end"], candidate["end"])
+                        for m in protected_ranges)]
+    unmatched = []
+    for candidate in fresh:
+        match = next((m for m in remaining if (m["start"], m["end"]) == (candidate["start"], candidate["end"])), None)
         if match is not None:
-            candidate.update(id=match["id"], rank=match["rank"])
+            candidate["id"] = match["id"]
             remaining.remove(match)
         else:
-            rank += 1
-            candidate["rank"] = rank
-        result.append(candidate)
-    return sorted(result, key=lambda m: m["rank"])
+            unmatched.append(candidate)
+    for candidate in unmatched:
+        match = min((m for m in remaining if _matches(m, candidate)),
+                    key=lambda m: (("ai" in m["sources"]) != ("ai" in candidate["sources"]),
+                                   abs(m["peak"] - candidate["peak"])), default=None)
+        if match is not None:
+            candidate["id"] = match["id"]
+            remaining.remove(match)
+    return sorted([*protected, *fresh], key=lambda m: m["rank"])
 
 
 def merge_moments(ai, chat, duration, lead):

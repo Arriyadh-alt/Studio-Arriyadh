@@ -1008,7 +1008,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         return
                 if "activity" in fields:
                     duration = job["metadata"]["duration"]
-                    job["moments"] = add_chat_moments(job["moments"], chat, duration, job["request"]["lead"])
+                    job["moments"] = add_chat_moments(job["moments"], chat, duration, job["request"]["lead"],
+                                                      ai=job.get("ai_candidates"))
                     buckets = candidate / "buckets.sqlite"
                     if buckets.is_file():
                         buckets.replace(directory / buckets.name)
@@ -1059,7 +1060,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 job = active_job(jid, generation)
                 clips = [] if job["request"].get("review", False) else [
                     moment_clip(job, m, i) for i, m in enumerate(moments[:count], 1)]
-                job.update(clips=clips, moments=moments, analysis_complete=True, stage="Queued for rendering")
+                job.update(clips=clips, moments=moments, ai_candidates=ai, analysis_complete=True,
+                           stage="Queued for rendering")
                 store.save(job)
                 for clip in clips:
                     pending.put((jid, clip["id"], generation))
@@ -1085,6 +1087,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         metadata_workers=metadata_workers if metadata_workers is not None else int(os.environ.get("CLIPPER_METADATA_WORKERS", "3")))
 
     def queued_job(job):
+        job.pop("ai_candidates", None)
         analyses, renders = pending.positions()
         for clip in job["clips"]:
             clip["queue_position"] = renders.get((job["id"], clip["id"])) if clip["status"] == "queued" else None
@@ -1378,6 +1381,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if request.start is not None or request.end is not None:
                 if not 0 <= start < end <= job["metadata"]["duration"] or end - start > 60 + 1e-6:
                     raise HTTPException(422, "Moment must be within the video and at most 60 seconds long")
+                if moment.get("sources") == ["ai"]:
+                    moment.setdefault("original_ai_range", {k: moment[k] for k in ("start", "end")})
                 moment.update(start=start, end=end, duration=end - start)
             if request.status is not None:
                 moment["status"] = request.status
@@ -1551,7 +1556,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             job["clips"] = [clip for clip in job["clips"] if clip["id"] != cid]
             for moment in job["moments"]:
                 if moment.get("clip_id") == cid:
-                    moment.update(status="suggested", clip_id=None)
+                    moment.update(status="suggested", clip_id=None, reviewed=True)
             store.save(job)
             pending.cancel(jid, cid)
             shutil.rmtree(store.root / jid / cid, ignore_errors=True)
