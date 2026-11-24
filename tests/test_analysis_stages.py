@@ -1,3 +1,4 @@
+import json
 import threading
 
 import numpy as np
@@ -50,6 +51,7 @@ def test_restart_during_segment_scan_resumes_from_disk(tmp_path, monkeypatch):
     monkeypatch.setattr("clipper_studio.api.fetch_metadata", metadata)
     monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
     monkeypatch.setattr("clipper_studio.api.download_section", download)
+    monkeypatch.setattr("clipper_studio.api.source_track_kinds", lambda path: {"audio", "video"})
     monkeypatch.setattr("clipper_studio.media_analysis._audio", scan)
     monkeypatch.setattr("clipper_studio.media_analysis._visual", lambda p, d, n: np.zeros(n))
     monkeypatch.setattr("clipper_studio.media_analysis._transcribe", lambda path, lo, hi, lang: [
@@ -324,6 +326,50 @@ def test_short_podcast_transcript_retry_computes_audio_prerequisites(tmp_path, m
         assert audio_steps == ["voices", "signals"] and len(downloads) == 1
         assert job["status"] == "completed"
         assert job["stages"]["audio_analysis"]["status"] == "completed"
+
+
+def test_segmented_video_retry_redownloads_only_audio_only_segments(tmp_path, monkeypatch):
+    duration = 3800
+    downloads, audio_scans = [], []
+
+    def download(url, folder, start, end, **kwargs):
+        downloads.append(start)
+        source = folder / "source.mkv"
+        source.write_bytes(b"audio" if start == 0 and downloads.count(0) == 1 else b"video")
+        return source
+
+    def audio(path, duration):
+        audio_scans.append(path)
+        return (np.zeros(round(duration)),) * 3
+
+    def visual(path, duration, size):
+        if path.read_bytes() == b"audio":
+            raise RuntimeError("No video track")
+        return np.zeros(size)
+
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": duration})
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": duration}, []))
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([], []))
+    monkeypatch.setattr("clipper_studio.api.download_section", download)
+    monkeypatch.setattr("clipper_studio.api.source_track_kinds",
+                        lambda path: {"audio", "video"} if path.read_bytes() == b"video" else {"audio"})
+    monkeypatch.setattr("clipper_studio.media_analysis._audio", audio)
+    monkeypatch.setattr("clipper_studio.media_analysis._visual", visual)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        app.state.pending.join()
+        assert client.get(base).json()["stages"]["video_analysis"]["status"] == "partially_completed"
+        assert client.post(f"{base}/stages/video_analysis/retry").status_code == 202
+        app.state.pending.join()
+        job = client.get(base).json()
+        ranges = media_ranges(duration)
+        assert downloads == [segment.start for segment in ranges] + [0]
+        assert len(audio_scans) == len(ranges)
+        assert job["stages"]["video_analysis"]["status"] == "completed"
+        manifest = tmp_path / jid / "checkpoints" / "media" / f"{ranges[0].key}.json"
+        assert json.loads(manifest.read_text())["tracks"] == ["audio", "video"]
 
 
 def test_segmented_podcast_keeps_question_and_answer_in_one_conversation(monkeypatch):

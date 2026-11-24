@@ -39,7 +39,7 @@ from shorts_clipper.captions import FONT_DIR, CaptionStyle, apply_caption_edits,
 from shorts_clipper.downloader import download_analysis_media, download_section
 from shorts_clipper.moments import _audio, analyze_media
 from shorts_clipper.podcast import analyze_podcast, transcribe_all, voice_features
-from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source
+from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source, source_track_kinds
 from shorts_clipper.speakers import frame_conversation
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.director import (STEP, DirectorOptions, plan_podcast_edit, Effects, caption_band, cut_source, effects_for, framing_fix, has_audio, hook_layout,
@@ -1100,15 +1100,16 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                               analysis_detail=detail)
                 store.save(latest)
 
-        def media(name, fetch, *, refresh=False):
+        def media(name, fetch, *, refresh=False, track_kinds=None, required_tracks=()):
             def download():
-                owner = "video_analysis" if refresh else "audio_analysis"
+                owner = "video_analysis" if refresh or required_tracks else "audio_analysis"
                 if owner not in tracking.started:
                     publish(owner, "processing")
                     tracking.started.add(owner)
                 return fetch()
 
-            paths = cache.media(name, download, refresh=refresh)
+            paths = cache.media(name, download, refresh=refresh, track_kinds=track_kinds,
+                                required_tracks=required_tracks)
             artifacts = [f"checkpoints/{path.relative_to(cache.root)}" for path in paths if path and
                          path.is_relative_to(cache.root)]
             if artifacts:
@@ -1123,6 +1124,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if duration >= SEGMENTED_MIN_SECONDS and not upload:
                 def fetch(segment):
                     folder = cache.file(f"media/{segment.key}")
+                    required = ("video",) if target == "video_analysis" else ()
+                    if required:
+                        folder = folder / f"video-{uuid.uuid4().hex}"
+
                     def download():
                         if shutil.disk_usage(store.root).free < DISK_RESERVE_BYTES:
                             raise YouTubeAccessError("Analysis paused to preserve available disk space.")
@@ -1130,8 +1135,16 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         return (download_section(job["url"], folder, segment.start, segment.end,
                                                  max_height=240, analysis=True),)
 
-                    source, = media(f"media/{segment.key}.json", download)
-                    return source
+                    try:
+                        source, = media(f"media/{segment.key}.json", download, track_kinds=source_track_kinds,
+                                        required_tracks=required)
+                        return source
+                    except WorkCancelled:
+                        raise
+                    except Exception:
+                        if required:
+                            shutil.rmtree(folder, ignore_errors=True)
+                        raise
 
                 moments = analyze_ranges(duration, count, lead, language, fetch=fetch, checkpoint=tracking.run,
                                          expect=tracking.expect, progress=progress, check=check,

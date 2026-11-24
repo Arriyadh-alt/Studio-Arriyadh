@@ -11,6 +11,12 @@ UPLOAD_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
 UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
+def source_track_kinds(path: Path) -> set[str]:
+    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+                             "-of", "json", str(path)], check=True, capture_output=True, text=True)
+    return {stream["codec_type"] for stream in json.loads(result.stdout).get("streams", [])}
+
+
 def probe_source(path: Path) -> dict:
     """Duration and title for an uploaded file; raises ValueError for files without audio and video."""
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type",

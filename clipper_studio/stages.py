@@ -59,17 +59,27 @@ class Checkpoints:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def media(self, name, fetch, *, refresh=False):
+    def media(self, name, fetch, *, refresh=False, track_kinds=None, required_tracks=()):
         value = None if refresh else self.read(name)
+        required = set(required_tracks)
         if value is not None:
-            paths = tuple(self.file(item) if item else None for item in value)
+            local = value["paths"] if isinstance(value, dict) else value
+            paths = tuple(self.file(item) if item else None for item in local)
             if all(path is None or path.is_file() for path in paths):
-                return paths
+                tracks = set(value["tracks"]) if isinstance(value, dict) else set()
+                if track_kinds is not None and not isinstance(value, dict):
+                    tracks = {kind for path in paths if path for kind in track_kinds(path)}
+                    self.write(name, dict(paths=local, tracks=sorted(tracks)))
+                if required <= tracks:
+                    return paths
         paths = tuple(fetch())
+        tracks = {kind for path in paths if path for kind in track_kinds(path)} if track_kinds else set()
+        if not required <= tracks:
+            raise ValueError("Downloaded segment is missing a required media track")
         if all(path is None or (path.is_file() and path.is_relative_to(self.root)) for path in paths):
             local = [str(path.relative_to(self.root)) if path else None for path in paths]
             if any(local):
-                self.write(name, local)
+                self.write(name, dict(paths=local, tracks=sorted(tracks)) if track_kinds else local)
         return paths
 
 
