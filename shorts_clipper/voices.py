@@ -187,7 +187,7 @@ def _decode_raw(path: Path, rate: int, extra: str) -> np.ndarray:
 
 def narrate(text: str, language: str, output: Path, cache: Path, voice: str = "auto",
             category: str | None = None, seed: str = "", delivery: str = "auto",
-            max_seconds: float = MAX_SECONDS) -> dict:
+            max_seconds: float = MAX_SECONDS, *, allow_truncate=True) -> dict:
     """Speak the hook to a WAV at `output`; returns its length and how it was voiced."""
     language = language if language in LEAD_INS else "en"
     mood = mood_for(category, delivery)
@@ -213,6 +213,8 @@ def narrate(text: str, language: str, output: Path, cache: Path, voice: str = "a
         audio = np.concatenate([np.concatenate([c, np.zeros(int(l.pause * RATE), dtype="<f4")])
                                 for c, l in keep] or [np.zeros(RATE // 4, dtype="<f4")])
         tempo = min(1.35, max(1.0, len(audio) / RATE / max_seconds))
+        if not allow_truncate and len(audio) / RATE / tempo > max_seconds + .001:
+            raise ValueError("Narration does not fit without truncation")
         raw = work / "voice.f32"
         raw.write_bytes(audio.astype("<f4").tobytes())
         seconds = min(max_seconds, len(audio) / RATE / tempo)  # the hook card never outlasts this

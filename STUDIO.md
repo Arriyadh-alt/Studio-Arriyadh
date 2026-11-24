@@ -81,7 +81,7 @@ and use only media you are authorized to access.
 ## API
 
 - `POST /api/jobs` → 202 `{id}`. Body:
-  `{url, clips:8, lead:18, ai_analysis:true, review:true, mode:"crop", captions:true, language:"auto", caption_style:null}`. Use an HTTPS YouTube
+  `{url, clips:8, lead:18, ai_analysis:true, review:true, mode:"crop", editing_mode:"full", captions:true, language:"auto", caption_style:null}`. Use an HTTPS YouTube
   video link (`watch`, `live`, or `youtu.be`, including mobile) for a finished
   livestream; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
   AI analysis works without chat replay. Jobs include ranked `moments`, optional
@@ -107,8 +107,9 @@ and use only media you are authorized to access.
   A generation token prevents old work from publishing after cancel/re-render.
   Cancelling a finished job returns 409; repeated cancellation is safe.
 - `POST /api/jobs/{id}/clips/{cid}/render` → 202 `{id:cid,status:"queued"}`.
-  Body `{start,end,mode:"crop",captions:true,language:"auto",caption_style:null}`. Seconds, within the original
-  duration, end after start, maximum 60 seconds. Preserves detection metadata.
+  Body `{start,end,mode:"crop",editing_mode?,captions:true,language:"auto",caption_style:null}`. Seconds, within the
+  original duration, end after start, maximum 60 seconds. Preserves detection metadata and inherits the current
+  editing mode unless a new one is specified.
 - `GET /api/jobs/{id}/clips/{cid}/video` → inline MP4, supports byte ranges (206).
 - `GET /api/jobs/{id}/clips/{cid}/download` → MP4 attachment.
 - `GET /api/jobs/{id}/clips/{cid}/thumbnail` → JPEG; add `?download=true` for an attachment.
@@ -228,10 +229,24 @@ YouTube URL or an uploaded file you are authorized to use.
 
 ### AI Director
 
-Jobs and re-renders accept `director` (`{"enabled": true, "hook": true, "edits": true,
+Jobs and re-renders accept `editing_mode` independently of the crop/blur layout:
+
+- `natural` (**Natural Editor Mode**) keeps the source sequence and original sound by default. It keeps emotional
+  pauses and comedic beats, removes only long quiet gaps outside speech and protected events, and uses subtle
+  zooms and text quotes. Music, sound effects, and looping are disabled; AI voice-over requires explicit opt-in.
+- `enhanced` (**AI Enhanced Mode**) preserves the sequence with tighter pacing, more emphasis, optional music,
+  effects and looping, and light voice cleanup for podcasts. Narration is opt-in, including via Podcast Version B.
+- `full` (**Full AI Director Mode**, the default) retains the existing workflow and export settings described below.
+
+Natural and Enhanced exports are fast-start 1080×1920 MP4s (H.264 at 16 Mbps, BT.709, YUV420P, source-compatible
+frame rate, AAC at 48 kHz). For new renders, the clip's `authenticity` report records context, subtitle, title and hook
+checks before the final encode, and lists the edits that actually applied, disclosure guidance, source attribution
+and time ranges, and manual review flags. The checks are editorial aids, not determinations of copyright or platform compliance.
+
+Jobs and re-renders also accept `director` overrides. Full AI Director defaults to `{"enabled": true, "hook": true, "edits": true,
 "sfx": true, "music": "auto"|"on"|"off", "story": true, "voiceover": false,
 "hook_text": null, "voice": "auto", "delivery": "auto", "loop": true}`; new jobs default to enabled, clips from older jobs stay off until
-re-rendered with it). Before the final MP4 it plans the edit locally from Whisper word
+re-rendered with it. Before the final MP4 it plans the edit locally from Whisper word
 timings, audio loudness and the chat peak:
 
 - **Storytelling hook** (`story`, on by default): the clip opens on a ~3 s card, a dimmed

@@ -117,7 +117,7 @@ globalThis.PodcastControls = (() => {
     const framing = t.mode === 'podcast' ? `${LAYOUTS[t.layout] || t.layout}${t.layout!==t.auto_layout&&t.auto_layout?` (auto picks ${LAYOUTS[t.auto_layout] || t.auto_layout})`:''} · ${t.switches} camera switches · ${t.cutaways} listener reactions` : t.status==='unavailable' ? 'Speaker framing unavailable; rendered centred' : '';
     return `<fieldset class="podcast-clip" ${disabled}><legend>Podcast</legend>
       <label>Speaker framing<select data-podcast="layout">${options(LAYOUTS, p.layout)}</select></label>
-      <label>Editing version<select data-podcast="version">${options(VERSIONS, p.version)}</select></label>
+      <label>Editing version<select data-podcast="version" ${draft.editing_mode==='natural'?'disabled':''}>${options(VERSIONS, p.version)}</select><small class="hint" data-commentary-note ${draft.editing_mode==='natural'?'':'hidden'}>Natural Editor uses the original version.</small></label>
       <label>Opening hook text<input data-podcast="hook_text" maxlength="64" value="${esc(p.hook_text)}" placeholder="${esc(clip.title)}"></label>
       <label>AI commentary <span class="hint">Version B only · labelled “AI commentary”</span><textarea data-podcast="commentary" maxlength="160" placeholder="${esc(a.commentary)}">${esc(p.commentary)}</textarea></label>
       <label>Subtitle fixes <span class="hint">one per line: wrong → right</span><textarea data-podcast="caption_edits" placeholder="clok → clock">${esc(edits(p.caption_edits))}</textarea></label>

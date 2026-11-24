@@ -1,8 +1,10 @@
 """Cut a time range and convert it to 9:16 vertical video with ffmpeg."""
 
+import json
 import math
 import shutil
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 from statistics import median
 
@@ -33,6 +35,37 @@ FILTERS = {
 
 def crop_left(source_width: float, crop_width: float, focal_x: float) -> float:
     return max(0, min(source_width - crop_width, source_width * focal_x - crop_width / 2))
+
+
+def source_frame_rate(source: Path) -> str | None:
+    result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                             "stream=avg_frame_rate,r_frame_rate", "-of", "json", str(source)],
+                            check=True, capture_output=True, text=True)
+    video = json.loads(result.stdout)["streams"][0]
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            rate = Fraction(video.get(key, "0"))
+            if rate > 0:
+                return f"{rate.numerator}/{rate.denominator}"
+        except (ValueError, ZeroDivisionError):
+            continue
+    return None
+
+
+def professional_video_options() -> list[str]:
+    return ["-b:v", "16M", "-minrate", "16M", "-maxrate", "16M", "-bufsize", "16M",
+            "-x264-params", "nal-hrd=cbr", "-colorspace", "bt709", "-color_primaries", "bt709",
+            "-color_trc", "bt709", "-color_range", "tv"]
+
+
+def hdr_to_sdr(source: Path) -> str:
+    result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                             "stream=color_transfer", "-of", "csv=p=0", str(source)],
+                            check=True, capture_output=True, text=True)
+    if result.stdout.strip() not in ("smpte2084", "arib-std-b67"):
+        return ""
+    return ("zscale=transfer=linear:npl=100,format=gbrpf32le,tonemap=mobius,"
+            "zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=limited,format=yuv420p")
 
 
 def detect_focal_x(source: Path, start: float, end: float) -> float:
@@ -102,11 +135,12 @@ def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
     return f"split[hidemain][hidecam];[hidecam]{fill}[hidden];[hidemain][hidden]overlay={x0}:{y0},"
 
 
-def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None) -> list:
+def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False) -> list:
     if mode not in FILTERS:
         raise ValueError(f"Unknown mode {mode!r}; choose from {', '.join(FILTERS)}")
     if end <= start:
         raise ValueError("End time must be after start time")
+    tone_map = hdr_to_sdr(source) if export_fps else ""
     filters = FILTERS[mode]
     split = (facecam is not None and facecam.rect.x == 0 and facecam.rect.y == 0
              and facecam.rect.w == WIDTH and mode == 'crop')
@@ -125,7 +159,7 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
         y = (f"max(0,min(ih-ih/zoom,ih*({effects.focal_y})-ih/zoom/2))"
              if getattr(effects, "focal_y", None) else "ih/2-(ih/zoom/2)")
         filters += (f",zoompan=z='{effects.zoom}':x='iw/2-(iw/zoom/2)+({effects.shake or 0})':"
-                    f"y='{y}':d=1:s={WIDTH}x{main_h}:fps=30,setsar=1")
+                    f"y='{y}':d=1:s={WIDTH}x{main_h}:fps={export_fps or 30},setsar=1")
     if effects is not None and effects.flash:
         filters += f",eq=brightness='{effects.flash}':eval=frame"
     if split:
@@ -138,13 +172,16 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
                f"pad={rect.w}:{rect.h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3")
         filters = (
-            f"[0:v]split[mainin][camin];[mainin]{_hide_facecam(source, box) if facecam.hide_source else ''}{filters}[main];"
+            f"[0:v]{tone_map + ',' if tone_map else ''}split[mainin][camin];"
+            f"[mainin]{_hide_facecam(source, box) if facecam.hide_source else ''}{filters}[main];"
             f"[camin]crop=w='max(2,trunc(iw*{box.w:.8f}/2)*2)':"
             f"h='max(2,trunc(ih*{box.h:.8f}/2)*2)':"
             f"x='iw*{box.x:.8f}':y='ih*{box.y:.8f}',"
             f"setsar=1,{fit}[cam];"
             f"[main][cam]overlay={rect.x}:{rect.y}"
         )
+    elif tone_map:
+        filters = f"{tone_map},{filters}"
     if captions is not None:
         path = str(captions.resolve())
         fonts = str(FONT_DIR.resolve())
@@ -154,22 +191,30 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
         fonts = "".join("\\" + char if char in "\\': " else char for char in fonts)
         fonts = "".join("\\" + char if char in "\\'[],; " else char for char in fonts)
         filters += f",ass=filename={path}:fontsdir={fonts}"
+    if export_fps:
+        filters += ",scale=iw:ih:out_color_matrix=bt709:out_range=tv,format=yuv420p"
+    silent_input = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"] if silent_audio else []
+    quality = [*professional_video_options(), "-r", export_fps] if export_fps else ["-crf", "20"]
+    audio = ["-b:a", "192k", "-ar", "48000"] if export_fps else ["-b:a", "128k"]
     return [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{start:.3f}", "-i", str(source), "-t", f"{end - start:.3f}",
+        "-ss", f"{start:.3f}", "-i", str(source), *silent_input, "-t", f"{end - start:.3f}",
         "-filter_complex", filters,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:v", "libx264", "-preset", "medium", *quality, "-pix_fmt", "yuv420p",
+        "-c:a", "aac", *audio,
         "-movflags", "+faststart",
         str(output),
     ]
 
 
-def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None) -> Path:
+def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False) -> Path:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not found on PATH; install it first")
     output.parent.mkdir(parents=True, exist_ok=True)
-    if effects is not None:
+    if export_fps:
+        command = build_ffmpeg_command(source, output, start, end, mode, captions, facecam, effects,
+                                       export_fps=export_fps, silent_audio=silent_audio)
+    elif effects is not None:
         command = build_ffmpeg_command(source, output, start, end, mode, captions, facecam, effects)
     else:
         command = build_ffmpeg_command(source, output, start, end, mode, captions) if facecam is None else build_ffmpeg_command(source, output, start, end, mode, captions, facecam)

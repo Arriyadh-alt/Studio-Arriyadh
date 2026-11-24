@@ -1,5 +1,8 @@
 .director-options{border:1px solid var(--line);border-radius:9px;margin:16px 0;padding:16px;display:grid;gap:10px;min-width:0}
 .director-options legend{font-weight:600}
+.editing-picker{display:grid;gap:6px;margin:12px 0}
+.authenticity{display:grid;gap:8px;margin:16px 0;border:1px solid var(--line);border-radius:9px;padding:12px;overflow-wrap:anywhere}
+.authenticity h4,.authenticity p{margin:0}
 .director-report{display:grid;gap:10px;border-top:1px solid var(--line);padding-top:12px}
 .director-score{display:flex;align-items:baseline;gap:8px;margin:0}.director-score strong{font-size:2rem;color:#b8f477}
 .director-bars,.quality,.suggestions{list-style:none;margin:0;padding:0;display:grid;gap:6px}

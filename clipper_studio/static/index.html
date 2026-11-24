@@ -40,8 +40,9 @@
         <div id="podcast-options" class="podcast-options" hidden>
           <label>Speakers<select id="podcast-speakers"><option value="auto">Detect automatically</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
           <label>Speaker framing<select id="podcast-layout"><option value="auto">Auto (best for the conversation)</option><option value="speaker">Single speaker focus</option><option value="split">Two-person split screen</option><option value="switch">Dynamic speaker switching</option><option value="wide">Full conversation view</option></select></label>
-          <label>Editing version<select id="podcast-version"><option value="original">A · Original podcast highlight</option><option value="commentary">B · AI-enhanced commentary</option></select></label>
+          <label>Editing version<select id="podcast-version"><option value="original">A · Original podcast highlight</option><option value="commentary">B · AI-enhanced commentary</option></select><small class="hint" data-commentary-note hidden>Natural Editor uses the original version.</small></label>
         </div>
+        <label class="editing-picker">Editing mode<select id="editing-mode"></select><small class="hint" id="editing-mode-hint"></small></label>
         <details><summary>Options <span>Fine-tune your highlights</span></summary><div class="options">
           <label>Number of clips<input id="clip-count" type="number" min="1" max="50" value="8" required></label>
           <label data-gaming-only>Lead-in <output id="lead-value">18 seconds</output><input id="lead" type="range" min="15" max="20" value="18"></label>
@@ -49,9 +50,9 @@
           <label class="check"><input id="captions" type="checkbox" checked> Burn in captions</label>
           <label class="check" data-gaming-only><input id="facecam" type="checkbox" checked> Facecam overlay</label>
           <label class="check"><input id="director" type="checkbox" checked> AI Director edits</label>
-          <label class="check" data-gaming-only><input id="director-story" type="checkbox" checked> Storytelling hook</label>
+          <label class="check"><input id="director-story" type="checkbox" checked> <span id="director-story-label">Storytelling hook</span></label>
           <label class="check"><input id="director-loop" type="checkbox" checked> Seamless loop</label>
-          <label class="check" data-gaming-only><input id="director-voiceover" type="checkbox" checked> AI voice-over on the hook</label>
+          <label class="check"><input id="director-voiceover" type="checkbox" checked> AI voice-over on the hook</label>
           <label>Voice<select id="director-voice"><option value="auto">Auto (match the scene)</option></select></label>
           <label>Voice delivery<select id="director-delivery"><option value="auto">Auto (from the scene)</option></select></label>
           <div class="voice-picker"><button type="button" id="create-voice-preview">▶ Preview voice</button><span id="create-voice-status" class="hint" aria-live="polite"></span></div>
