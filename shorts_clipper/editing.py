@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 
 from .captions import join_tokens
-from .director import (STEP, Plan, Segment, SENTENCE_END, find_silences, remap_captions, score_clip,
+from .director import (MAX_OUTPUT, STEP, Plan, Segment, SENTENCE_END, find_silences, remap_captions, score_clip,
                        transcript_words)
 
 MODE_DEFAULTS = {
@@ -96,11 +96,16 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
             plan.commentary = {"text": options.commentary, "label": "AI commentary", "voiced": False}
         if text:
             plan.hook = {"style": "source", "text": text, "duration": min(duration, 3.0)}
-            if title_voice and options.voiceover and duration >= .5:
+            voice_limit = min(3., MAX_OUTPUT - plan.duration - .45)
+            if title_voice and options.voiceover and voice_limit >= .5:
                 try:
-                    voice, detail = title_voice(options.commentary or text, max_seconds=min(3., duration - .15))
+                    voice, detail = title_voice(options.commentary or text, max_seconds=voice_limit)
+                    intro_duration = max(plan.hook["duration"], detail["seconds"] + .4)
+                    if plan.duration + intro_duration > MAX_OUTPUT:
+                        intro_duration = detail["seconds"] + .4
+                    plan.segments.insert(0, Segment(0., intro_duration, "intro"))
                     plan.voiceover = str(voice)
-                    plan.hook.update(voiceover=True, narration=detail)
+                    plan.hook.update(voiceover=True, narration=detail, duration=intro_duration)
                     if plan.commentary:
                         plan.commentary["voiced"] = True
                 except Exception:

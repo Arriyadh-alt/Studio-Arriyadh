@@ -71,6 +71,18 @@ def test_mode_defaults_are_independent():
     assert director_config("full", DirectorSpec()) == DirectorSpec().model_dump()
 
 
+@pytest.mark.parametrize("mode", ["natural", "enhanced"])
+def test_narration_reserves_time_even_when_source_starts_with_dialogue(mode):
+    speech = [Caption(0., 1., "I just started."), *SPEECH[1:]]
+    plan, _ = plan_source_edit(np.full(100, -20.), speech, 10, DirectorOptions(voiceover=True),
+                               mode=mode, category="gaming",
+                               title_voice=lambda text, **limits: ("voice.wav", {"seconds": 2.4}))
+    assert plan.segments[0].role == "intro"
+    assert plan.hook["duration"] == plan.segments[0].length
+    assert plan.map_time(0.) > 2.4 + .15
+    assert plan.map_time(9.5) is not None
+
+
 @pytest.fixture(scope="module")
 def source(tmp_path_factory):
     path = tmp_path_factory.mktemp("mode-source") / "source.mp4"
