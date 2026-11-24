@@ -24,36 +24,30 @@ def _matches(a, c):
 
 
 def add_chat_moments(existing, chat, duration, lead):
-    protected, remaining = [], []
+    protected, remaining, ai = [], [], []
     for moment in existing:
         untouched = moment["status"] == "suggested" and not moment.get("reviewed")
         (remaining if untouched and moment["sources"] == ["chat"] else protected).append(moment)
+        if "ai" in moment["sources"]:
+            original = moment.get("alternatives", {}).get("ai", {})
+            ai.append({**moment, **original, "score": moment.get("ai_score") or moment["score"]})
     result = list(protected)
     rank = max((m["rank"] for m in existing), default=0)
-    for candidate in merge_moments([], chat, duration, lead):
-        match = min((m for m in protected if _matches(m, candidate)),
-                    key=lambda m: abs(m["peak"] - candidate["peak"]), default=None)
+    for candidate in merge_moments(ai, chat, duration, lead):
+        if candidate["sources"] != ["chat"]:
+            continue
+        if any(m["sources"] == ["chat"] and _matches(m, candidate) for m in protected):
+            continue
+        match = min((m for m in remaining if _matches(m, candidate)),
+                    key=lambda m: ((m["start"], m["end"]) != (candidate["start"], candidate["end"]),
+                                   abs(m["peak"] - candidate["peak"])), default=None)
         if match is not None:
-            if match["sources"] == ["ai"] and match["status"] == "suggested" and not match.get("reviewed"):
-                match.update(sources=["ai", "chat"], chat_score=candidate["score"],
-                             alternatives={"ai": {k: match[k] for k in ("start", "end")},
-                                           "chat": {k: candidate[k] for k in ("start", "end")}},
-                             message_sample=candidate["message_sample"])
-            continue
-        if any(_matches(m, candidate) for m in result):
-            continue
-        overlaps = [m for m in remaining if _matches(m, candidate)]
-        if overlaps:
-            match = min(overlaps, key=lambda m: abs(m["peak"] - candidate["peak"]))
             candidate.update(id=match["id"], rank=match["rank"])
-            remaining = [m for m in remaining if m not in overlaps]
+            remaining.remove(match)
         else:
             rank += 1
             candidate["rank"] = rank
         result.append(candidate)
-    for moment in sorted(remaining, key=lambda m: (-m["score"], m["rank"])):
-        if not any(_matches(m, moment) for m in result):
-            result.append(moment)
     return sorted(result, key=lambda m: m["rank"])
 
 
@@ -83,7 +77,8 @@ def merge_moments(ai, chat, duration, lead):
             if _matches(a, c):
                 matches.append(a)
         if not matches:
-            result.append(c)
+            if not any(m["sources"] == ["chat"] and _matches(m, c) for m in result):
+                result.append(c)
             continue
         a = min(matches, key=lambda a: abs(a["peak"] - c["peak"]))
         a["alternatives"] = {"ai": {k: a[k] for k in ("start", "end")},

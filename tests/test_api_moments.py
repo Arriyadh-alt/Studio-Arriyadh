@@ -224,11 +224,28 @@ def test_retry_peak_does_not_replace_or_overlap_protected_moment(sources, review
         **proposal(4), "start": 143, "end": 178, "peak": 145,
     }], 600, 18)
     protected.update(sources=sources, reviewed=reviewed)
+    snapshot = dict(protected)
     candidate = {**proposal(90), "start": 110, "end": 150, "peak": 128}
     result = add_chat_moments([original, protected], [candidate], 600, 18)
-    assert [(m["id"], m["start"], m["end"]) for m in result] == [
-        (original["id"], 100, 140), (protected["id"], 143, 178),
-    ]
+    assert result == [snapshot]
+
+
+def test_retry_chat_matches_initial_merge_and_preserves_reviewed_moments():
+    from clipper_studio.ranking import add_chat_moments, merge_moments
+
+    ai = [proposal(80)]
+    chat = [proposal(90), {**proposal(70), "start": 120, "end": 160, "peak": 143}]
+    first_run = merge_moments(ai, chat, 600, 18)
+    assert [m["sources"] for m in first_run] == [["ai", "chat"], ["chat"]]
+    reviewed, rendered = merge_moments([], [
+        {**proposal(15), "start": 260, "end": 280, "peak": 271},
+        {**proposal(14), "start": 360, "end": 380, "peak": 371},
+    ], 600, 18)
+    reviewed.update(reviewed=True, rank=3)
+    rendered.update(status="rendered", clip_id="clip", rank=4)
+
+    existing = [*first_run, reviewed, rendered]
+    assert add_chat_moments(existing, chat, 600, 18) == existing
 
 
 def test_autorender_and_old_jobs(tmp_path, analysis, media):
