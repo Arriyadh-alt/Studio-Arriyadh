@@ -1383,6 +1383,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     raise HTTPException(422, "Moment must be within the video and at most 60 seconds long")
                 if moment.get("sources") == ["ai"]:
                     moment.setdefault("original_ai_range", {k: moment[k] for k in ("start", "end")})
+                elif moment.get("sources") == ["chat"]:
+                    moment.setdefault("original_chat_range", {k: moment[k] for k in ("start", "end")})
                 moment.update(start=start, end=end, duration=end - start)
             if request.status is not None:
                 moment["status"] = request.status

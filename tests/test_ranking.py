@@ -43,6 +43,16 @@ def test_retry_matches_second_spike_when_first_extension_crosses_touched_moment(
     assert merged["end"] == 140 and kept == touched
 
 
+def test_retry_does_not_match_a_spike_attributed_to_an_edited_moment():
+    ai = [moment(100, 130, 118, 65), moment(162, 210, 164, 75)]
+    spike = moment(140, 195, 143, 90)
+    touched, = merge_moments(ai[1:], [spike], 600, 18)
+    touched.update(reviewed=True, start=300, end=340, duration=40)
+    untouched, = merge_moments(ai[:1], [], 600, 18)
+    result = add_chat_moments([touched, untouched], [spike], 600, 18, ai=ai)
+    assert result == [touched, {**untouched, "rank": 2}]
+
+
 def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
     rng = Random(314159)
 
@@ -60,6 +70,7 @@ def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
         existing = merge_moments(ai, candidates(10), 600, 18)
         protected = {}
         protected_ranges = []
+        claimed = []
         for original in rng.sample(existing, 3):
             original["reviewed"] = True
             if "ai" in original["sources"]:
@@ -68,6 +79,11 @@ def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
                     original_range = {k: original[k] for k in ("start", "end")}
                     original["original_ai_range"] = original_range
                 protected_ranges.append(original_range)
+            if original["sources"] == ["chat"]:
+                original["original_chat_range"] = {k: original[k] for k in ("start", "end")}
+            chat_range = original.get("alternatives", {}).get("chat") or original.get("original_chat_range")
+            if chat_range:
+                claimed.append((chat_range["start"], chat_range["end"]))
             moved = next(candidates(1))
             original.update(start=moved["start"], end=moved["end"], duration=moved["end"] - moved["start"])
             protected_ranges.append(original)
@@ -80,3 +96,9 @@ def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
         assert protected.keys() <= {m["id"] for m in result}
         assert not any(overlaps(a, b) for a, b in combinations(untouched, 2))
         assert not any(overlaps(a, b) for a in untouched for b in protected_ranges)
+        for m in untouched:
+            chat_range = m.get("alternatives", {}).get("chat") or (m if m["sources"] == ["chat"] else None)
+            if chat_range:
+                signature = (chat_range["start"], chat_range["end"])
+                assert signature not in claimed
+                claimed.append(signature)

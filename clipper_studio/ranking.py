@@ -59,7 +59,15 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
     def conflicts(candidate):
         return any(_matches(m, candidate) or _overlaps(m, candidate) for m in protected_ranges)
 
-    merged = _merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead, conflicts=conflicts)
+    claimed = set()
+    for moment in protected:
+        chat_range = moment.get("alternatives", {}).get("chat")
+        if chat_range is None and moment["sources"] == ["chat"]:
+            chat_range = moment.get("original_chat_range", moment)
+        if chat_range is not None:
+            claimed.add((chat_range["start"], chat_range["end"]))
+    merged = _merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead,
+                               conflicts=conflicts, claimed=claimed)
     fresh = []
     for candidate in _rank(merged):
         if not any(_overlaps(candidate, m) for m in fresh):
@@ -90,7 +98,7 @@ def merge_moments(ai, chat, duration, lead):
     return _rank(_merge_candidates(ai, chat, duration, lead))
 
 
-def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: False):
+def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: False, claimed=None):
     def normalize(item, source):
         start = max(0., min(float(item["start"]), duration))
         end = max(start, min(float(item["end"]), duration, start + 60))
@@ -109,16 +117,23 @@ def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: Fals
     result = [a for a in result if not conflicts(a)]
     for original in chat:
         c = normalize(original, "chat")
+        signature = (c["start"], c["end"])
+        if claimed is not None and signature in claimed:
+            continue
         matches = [a for a in result if a["sources"] == ["ai"] and _matches(a, c)]
         for a in sorted(matches, key=lambda a: abs(a["peak"] - c["peak"])):
             combined = _corroborate(a, c, duration, lead)
             if not conflicts(combined):
                 a.update(combined)
+                if claimed is not None:
+                    claimed.add(signature)
                 break
         else:
             if (not conflicts(c) and not any(_overlaps(a, c) for a in matches)
                     and not any(m["sources"] == ["chat"] and _matches(m, c) for m in result)):
                 result.append(c)
+                if claimed is not None:
+                    claimed.add(signature)
     return result
 
 
