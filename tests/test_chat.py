@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from yt_dlp import YoutubeDL
+from yt_dlp.downloader.common import FileDownloader
 from yt_dlp.utils import DownloadError
 
 from clipper_studio.chat import ChatReplayError, Message, fetch_chat, fetch_metadata, parse_chat
@@ -187,6 +189,27 @@ def test_streams_large_replay_and_dedupes_deliveries_not_reactions(stub_yt_dlp, 
     assert len(buckets) == count and not buckets.warning
     assert sum(point["count"] for point in activity) == count
     assert peak < 12 * 1024 * 1024
+
+
+@pytest.mark.parametrize("retry_options", [{}, {"frag_index": 1}], ids=["http", "fragment"])
+def test_streamed_download_backs_off_through_yt_dlp_retry_callback(
+        stub_yt_dlp, tmp_path, monkeypatch, retry_options):
+    waits = []
+    monkeypatch.setattr("clipper_studio.chat.time.sleep", waits.append)
+    monkeypatch.setattr("clipper_studio.chat.random.uniform", lambda *_: .25)
+
+    def download(self, output, progress):
+        with YoutubeDL(self.options) as ydl:
+            downloader = FileDownloader(ydl, self.options)
+            for attempt in (1, 2):
+                downloader.report_retry(TimeoutError("Network timed out"), attempt, 2, **retry_options)
+        output.write_bytes(FIXTURE.read_bytes())
+
+    stub_yt_dlp.download = download
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, REPLAY_INFO)
+    assert waits == [1.25, 2.25]
+    assert len(buckets) == 3 and not buckets.warning
+    assert stub_yt_dlp.downloads == 1
 
 
 def test_retries_transient_download_and_scores_like_original(stub_yt_dlp, tmp_path, monkeypatch):
