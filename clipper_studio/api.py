@@ -1083,7 +1083,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         def publish(name, status, progress=None, error=None, artifacts=()):
             set_stage(jid, generation, name, status, progress, error, artifacts)
 
-        frozen = {name for name in ANALYSIS_STAGES if name != target and stage_states(job)[name]["status"] in RETRYABLE}
+        needed = {target}
+        if podcast and target == "transcript_generation":
+            needed.add("audio_analysis")
+        frozen = {name for name in ANALYSIS_STAGES if name not in needed and stage_states(job)[name]["status"] in RETRYABLE}
         tracking = AnalysisTracker(cache, publish, check, frozen if target in ANALYSIS_STAGES else ())
         language = job["request"].get("language")
         language = None if language == "auto" else language

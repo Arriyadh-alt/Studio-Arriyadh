@@ -263,6 +263,50 @@ def test_resume_waits_for_inflight_upload_conversion_without_blocking_other_jobs
         assert client.get(f"/api/jobs/{second}").json()["status"] == "completed"
 
 
+def test_short_podcast_transcript_retry_computes_audio_prerequisites(tmp_path, monkeypatch):
+    downloads, transcriptions, audio_steps = [], [], []
+
+    def download(url, folder, **kwargs):
+        downloads.append(folder)
+        folder.mkdir(exist_ok=True)
+        source = folder / "source.mkv"
+        source.touch()
+        return source, source
+
+    def transcribe(*args):
+        transcriptions.append(args)
+        if len(transcriptions) == 1:
+            raise RuntimeError("Temporary transcription failure")
+        return [{"word": "Hello world.", "start": 1, "end": 3}]
+
+    def voices(path, duration):
+        audio_steps.append("voices")
+        return np.zeros((0, 9))
+
+    def audio(path, duration):
+        audio_steps.append("signals")
+        return (np.zeros(int(duration)),) * 3
+
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": 240})
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", download)
+    monkeypatch.setattr("clipper_studio.api.transcribe_all", transcribe)
+    monkeypatch.setattr("clipper_studio.api.voice_features", voices)
+    monkeypatch.setattr("clipper_studio.api._audio", audio)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "content_type": "podcast"}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        app.state.pending.join()
+        assert client.get(base).json()["stages"]["transcript_generation"]["status"] == "failed"
+        assert not audio_steps
+        assert client.post(f"{base}/stages/transcript_generation/retry").status_code == 202
+        app.state.pending.join()
+        job = client.get(base).json()
+        assert audio_steps == ["voices", "signals"] and len(downloads) == 1
+        assert job["status"] == "completed"
+        assert job["stages"]["audio_analysis"]["status"] == "completed"
+
+
 def test_segmented_podcast_keeps_question_and_answer_in_one_conversation(monkeypatch):
     duration = 1000
     first, second = media_ranges(duration)
