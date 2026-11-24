@@ -2,7 +2,8 @@ globalThis.CaptionControls = (() => {
   const defaults = {preset:'pop',font:'Montserrat',size:80,position:'bottom',text_color:'#FFFFFF',highlight_color:'#FFE34D',emphasis_color:'#67F5B5',uppercase:false,emphasis:true};
   const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   function options(clip = {}) {
-    const style = {...defaults,...clip.caption_style};
+    const natural = clip.editing_mode==='natural' ? {preset:'classic',emphasis:false} : {};
+    const style = {...defaults,...natural,...clip.caption_style};
     if(!clip.caption_style?.font && style.preset!=='pop')style.font='DejaVu Sans';
     return {language:clip.language || 'auto',caption_style:style};
   }
@@ -45,11 +46,20 @@ globalThis.CaptionControls = (() => {
     sample.querySelector('.caption-emphasis').style.color=s.emphasis?s.emphasis_color:s.text_color;
     root.querySelector('[data-caption-size]').textContent=`${s.size} px`;
   }
+  function applyProfile(root, mode, previousMode) {
+    const previous = options({editing_mode:previousMode}).caption_style;
+    if(JSON.stringify(read(root).caption_style)!==JSON.stringify(previous))return;
+    const style = options({editing_mode:mode}).caption_style;
+    root.querySelector('[data-caption=preset]').value=style.preset;
+    root.querySelector('[data-caption=font]').value=style.font;
+    root.querySelector('[data-caption=emphasis]').checked=style.emphasis;
+    preview(root);
+  }
   document.addEventListener('input',event=>{
     if(!event.target.matches('[data-caption]'))return;
     const root=event.target.closest('.caption-settings');
     if(event.target.dataset.caption==='preset')root.querySelector('[data-caption=font]').value=event.target.value==='pop'?'Montserrat':'DejaVu Sans';
     preview(root);
   },true);
-  return {options,html,read,preview};
+  return {options,html,read,preview,applyProfile};
 })();

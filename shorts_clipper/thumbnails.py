@@ -81,6 +81,9 @@ def select_frame(video: Path, peak):
 
 def draw_cover(frame, face_center, text, output):
     image = Image.fromarray(cv2.cvtColor(cv2.resize(frame, (WIDTH, HEIGHT)), cv2.COLOR_BGR2RGB))
+    if not text:
+        image.save(output, quality=92, optimize=True)
+        return
     draw = ImageDraw.Draw(image)
     lines = '\n'.join(wrap(text, width=16))
     for size in range(84, 15, -2):

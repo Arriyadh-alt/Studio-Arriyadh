@@ -9,7 +9,7 @@ const keeping = new Map();
 let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
-const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([current?.rights?.confirmed,clip.podcast,clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.director,clip.director_result,clip.tracking,clip.tracking_result,clip.tracking_still_url,clip.needs_review])}`;
+const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([current?.rights?.confirmed,clip.podcast,clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.editing_mode,clip.authenticity,clip.director,clip.director_result,clip.tracking,clip.tracking_result,clip.tracking_still_url,clip.needs_review])}`;
 const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:null,...value});
 const renderedOffset = (clip, offset) => {
   const timeline=clip.director_result?.edits?.timeline;
@@ -17,8 +17,26 @@ const renderedOffset = (clip, offset) => {
   const shot=timeline.find(([,end])=>offset<end) || timeline[timeline.length-1];
   return shot[2] + Math.min(shot[1]-shot[0], Math.max(0, offset-shot[0]));
 };
-const directorDefaults = value => ({enabled:true,hook:true,edits:true,sfx:true,music:'auto',story:true,voiceover:false,hook_text:null,voice:'auto',delivery:'auto',loop:true,...value});
+const editingModes = {
+  full:['Full AI Director Mode','The original AI Director: storytelling openers, stronger effects and seamless loops.'],
+  natural:['Natural Editor Mode','Original footage and sound, adaptive pacing, subtle reframing and text hooks. AI voice-over is off by default.'],
+  enhanced:['AI Enhanced Mode','Keep events in order, with tighter pacing, stronger emphasis and optional music, effects or narration.']
+};
+const modeOptions = selected => Object.entries(editingModes).map(([value,[label]])=>`<option value="${value}" ${selected===value?'selected':''}>${label}</option>`).join('');
+const editingMode = clip => clip.editing_mode || 'full';
+const directorDefaults = (value, mode='full') => ({enabled:true,hook:true,edits:true,sfx:mode==='full',music:mode==='full'?'auto':'off',story:true,voiceover:false,hook_text:null,voice:'auto',delivery:'auto',loop:mode==='full',...value});
 const directorKeys = ['enabled','hook','edits','sfx','music','story','voiceover','hook_text','voice','delivery','loop'];
+const readDirector = node => Object.fromEntries(directorKeys.map(k=>{
+  const el=$(`[data-director=${k}]`,node);
+  return [k,k==='hook_text'?(el.value.trim()||null):el.type==='checkbox'?el.checked:el.value];
+}));
+function syncPodcastMode(root, mode, selector) {
+  const version=$(selector,root);
+  if(!version) return;
+  version.disabled=mode==='natural';
+  const note=$('[data-commentary-note]',version.parentElement);
+  note.hidden=mode!=='natural';
+}
 let voiceCatalog = {voices:[],deliveries:['excited','surprise','suspense','humor','warm']};
 const deliveryLabels = {excited:'Excited',surprise:'Surprised',suspense:'Suspense',humor:'Funny',warm:'Warm'};
 const voiceOptions = selected => `<option value="auto">Auto (match the scene)</option>${voiceCatalog.voices.map(v=>`<option value="${escapeHtml(v.id)}" title="${escapeHtml(v.description)}" ${selected===v.id?'selected':''}>${escapeHtml(v.name)}</option>`).join('')}`;
@@ -45,24 +63,26 @@ async function previewVoice(body, button, status) {
 }
 const directorLabels = {hook:'Hook',pacing:'Pacing',emotion:'Emotion',dialogue:'Dialogue',chat:'Chat'};
 function directorHtml(clip, draft) {
-  const d=directorDefaults(draft.director), r=clip.director_result;
+  const mode=draft.editing_mode, d=directorDefaults(draft.director,mode), r=clip.director_result;
+  const restricted=mode==='natural'?'disabled':'';
   const edits=r?.edits, loop=clip.status==='ready' ? edits?.loop : null;
   const report=r?.status==='used' ? `<div class="director-report">
     <p class="director-score"><strong>${r.score.overall}</strong><span>viral score</span></p>
     <ul class="director-bars">${Object.entries(directorLabels).map(([k,l])=>`<li><span>${l}</span><meter min="0" max="100" value="${r.score[k]}"></meter><span>${r.score[k]}</span></li>`).join('')}</ul>
-    <p class="hint">${[edits.hook?.style==='story'?`${edits.hook.duration.toFixed(1)} s story hook · ${edits.hook.build_up.toFixed(1)} s build-up · ${edits.hook.payoff.toFixed(1)} s payoff & reaction`:edits.hook?`${edits.hook.duration.toFixed(1)} s hook from ${timestamp(edits.hook.source_start)}`:'No teaser hook',`${edits.cuts} jump cuts`,`${edits.removed_seconds.toFixed(1)} s trimmed`,`${edits.zooms} zooms`,`${edits.sound_effects} sound effects`,edits.music?'music bed':''].filter(Boolean).map(escapeHtml).join(' · ')}</p>
+    <p class="hint">${[edits.hook?.style==='story'?`${edits.hook.duration.toFixed(1)} s story hook · ${edits.hook.build_up.toFixed(1)} s build-up · ${edits.hook.payoff.toFixed(1)} s payoff & reaction`:edits.hook?.style==='source'?`${edits.hook.duration.toFixed(1)} s text hook`:edits.hook?`${edits.hook.duration.toFixed(1)} s hook from ${timestamp(edits.hook.source_start)}`:'No teaser hook',`${edits.cuts} cuts`,`${edits.removed_seconds.toFixed(1)} s trimmed`,`${edits.zooms} zooms`,`${edits.sound_effects} sound effects`,edits.music?'music bed':''].filter(Boolean).map(escapeHtml).join(' · ')}</p>
     <ul class="quality">${r.quality.map(q=>`<li class="${escapeHtml(q.status)}"><strong>${escapeHtml(q.check)}</strong> ${escapeHtml(q.detail)}</li>`).join('')}</ul>
     ${loop?.status==='applied'?'<p class="hint">Seamless loop applied. Play the preview to hear and see the replay.</p>':loop?.reason?`<p class="hint">Seamless loop skipped: ${escapeHtml(loop.reason)}.</p>`:''}
     ${r.suggestions.length?`<ul class="suggestions">${r.suggestions.map(t=>`<li>${escapeHtml(t)}</li>`).join('')}</ul>`:''}</div>`
     : `<p class="hint">${r?.status==='unavailable'?'AI Director couldn’t edit this clip; it was rendered unedited.':d.enabled?'Re-render to let AI Director edit this clip.':'AI Director off'}</p>`;
   return `<fieldset class="director-options" ${locked(clip)?'disabled':''}><legend>AI Director</legend>
+    <label>Editing mode<select data-field="editing_mode">${modeOptions(mode)}</select><small class="hint" data-editing-hint>${editingModes[mode][1]}</small></label>
     <label class="check"><input type="checkbox" data-director="enabled" ${d.enabled?'checked':''}> Enabled</label>
     <label class="check"><input type="checkbox" data-director="hook" ${d.hook?'checked':''}> Hook opener</label>
     <label class="check"><input type="checkbox" data-director="edits" ${d.edits?'checked':''}> Cuts &amp; zooms</label>
-    <label class="check"><input type="checkbox" data-director="sfx" ${d.sfx?'checked':''}> Sound effects</label>
-    <label>Music<select data-director="music">${['auto','on','off'].map(m=>`<option value="${m}" ${d.music===m?'selected':''}>${m==='auto'?'Auto':m==='on'?'Always':'Off'}</option>`).join('')}</select></label>
-    <label class="check"><input type="checkbox" data-director="story" ${d.story?'checked':''}> Storytelling hook</label>
-    <label class="check"><input type="checkbox" data-director="loop" ${d.loop?'checked':''}> Seamless loop</label>
+    <label class="check"><input type="checkbox" data-director="sfx" ${d.sfx?'checked':''} ${restricted}> Sound effects</label>
+    <label>Music<select data-director="music" ${restricted}>${['auto','on','off'].map(m=>`<option value="${m}" ${d.music===m?'selected':''}>${m==='auto'?'Auto':m==='on'?'Always':'Off'}</option>`).join('')}</select></label>
+    <label class="check"><input type="checkbox" data-director="story" ${d.story?'checked':''}> <span data-automatic-hook>${mode==='full'?'Storytelling hook':'Quote the original speech'}</span></label>
+    <label class="check"><input type="checkbox" data-director="loop" ${d.loop?'checked':''} ${restricted}> Seamless loop</label>
     <label class="check"><input type="checkbox" data-director="voiceover" ${d.voiceover?'checked':''}> AI voice-over</label>
     <div class="voice-picker"><label>Voice<select data-director="voice">${voiceOptions(d.voice)}</select></label><label>Delivery<select data-director="delivery">${deliveryOptions(d.delivery)}</select></label><button type="button" data-action="voice-preview">▶ Preview voice</button><span class="hint voice-status" aria-live="polite">${escapeHtml(narrationLabel(clip))}</span></div>
     ${storyHtml(clip,d)}
@@ -74,13 +94,31 @@ function narrationLabel(clip) {
 }
 function storyHtml(clip, d) {
   const hook=clip.director_result?.edits?.hook, story=hook?.style==='story';
-  const text=d.hook_text || (story ? hook.text : '');
+  const text=d.hook_text || (story || hook?.style==='source' ? hook.text : '');
   const still=clip.source_still_url ? `.${escapeHtml(clip.source_still_url)}?v=${clip.rendered_at||0}` : '';
   return `<div class="story-hook">
-    <div class="story-preview" ${still?`style="background-image:url('${still}')"`:''}><span class="story-preview-text">${escapeHtml(text || 'Your storytelling hook appears here')}</span></div>
-    <label>Hook text<input data-director="hook_text" maxlength="64" value="${escapeHtml(d.hook_text||'')}" placeholder="${escapeHtml(story ? hook.text : 'Written automatically when the clip renders')}" autocomplete="off"></label>
+    <div class="story-preview" ${still?`style="background-image:url('${still}')"`:''}><span class="story-preview-text">${escapeHtml(text || 'Your hook appears here')}</span></div>
+    <label>Hook text<input data-director="hook_text" maxlength="64" value="${escapeHtml(d.hook_text||'')}" placeholder="${escapeHtml(hook?.text || 'Chosen when the clip renders')}" autocomplete="off"></label>
     ${story && hook.options?.length ? `<div class="story-options" role="group" aria-label="Suggested hooks">${hook.options.map(o=>`<button type="button" data-hook-option="${escapeHtml(o)}">${escapeHtml(o)}</button>`).join('')}</div>` : ''}
     <p class="hint">${story ? escapeHtml([hook.streamer, hook.game, hook.category, hook.language==='id'?'Indonesian':'English', hook.writer==='llm'?'written by LLM':'written offline'].filter(Boolean).join(' · ')) + '. ' : ''}Leave blank for the automatic hook; re-render to apply.</p></div>`;
+}
+const authenticityLabels={context:'Context',subtitles:'Subtitles',title:'Title',hook:'Hook',thumbnail:'Thumbnail'};
+function authenticityHtml(report) {
+  if(!report) return '';
+  const p=report.provenance, o=report.operations;
+  const source=p.channel?[`${p.title || 'Original recording'} · ${p.channel}`]:[p.title||p.filename||'Original recording'];
+  source.push(`${timestamp(p.start)}–${timestamp(p.end)}`);
+  const link = /^https:\/\/www\.youtube\.com\/watch\?v=[\w-]{11}$/.test(p.url||'') ?
+    ` · <a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">Original video ↗</a>` : '';
+  return `<section class="authenticity" aria-label="Content authenticity">
+    <h4>Content authenticity</h4>
+    ${report.style?`<p class="hint">Adaptive style: ${escapeHtml(report.style)}</p>`:''}
+    <ul class="quality">${Object.entries(report.checks).map(([key,c])=>`<li class="${c.status==='review'?'warn':escapeHtml(c.status)}"><strong>${escapeHtml(authenticityLabels[key]||key)}</strong> ${c.status==='review'?'Review: ':''}${escapeHtml(c.detail)}</li>`).join('')}</ul>
+    <p class="hint">Synthetic audio: ${o.synthetic_audio?'added':'none'} · Generated footage: ${o.generated_footage?'added':'none'}${o.source_freeze_frame?' · Held source frame':''}${o.loop_blend?' · Loop blend':''}</p>
+    <p><strong>Disclosure:</strong> ${escapeHtml(report.disclosure)}</p>
+    <p class="hint"><strong>Source:</strong> ${escapeHtml(source.join(' · '))}${link}</p>
+    <ul class="quality">${report.flags.map(f=>`<li class="warn">${escapeHtml(f)}</li>`).join('')}</ul>
+    </section>`;
 }
 function facecamHtml(clip, draft) {
   const f=facecamDefaults(draft.facecam), result=clip.facecam_result, box=f.box || result?.box;
@@ -104,6 +142,39 @@ fetch('./api/voices').then(r=>r.ok?r.json():null).then(catalog=>{
   if(current) drawJob(current);
 }).catch(()=>{});
 $('#create-voice-preview').addEventListener('click',event=>previewVoice({voice:$('#director-voice').value,delivery:$('#director-delivery').value,language:speechLanguage($('#start-form'))},event.currentTarget,$('#create-voice-status')));
+const jobMode = $('#editing-mode');
+jobMode.innerHTML=modeOptions('full');
+const jobDirectorKeys = ['enabled','music','story','voiceover','voice','delivery','loop'];
+const jobDirectorField = k => $(k==='enabled'?'#director':`#director-${k}`);
+const readJobDirector = () => Object.fromEntries(jobDirectorKeys.map(k=>{
+  const el=jobDirectorField(k);
+  return [k,el.type==='checkbox'?el.checked:el.value];
+}));
+const jobProfiles={};
+let lastJobMode='full';
+function syncJobMode() {
+  const mode=jobMode.value, natural=mode==='natural';
+  $('#editing-mode-hint').textContent=editingModes[mode][1];
+  $('#director-story-label').textContent=mode==='full'?'Storytelling hook':'Quote the original speech';
+  for(const key of ['loop','music']) jobDirectorField(key).disabled=natural;
+  for(const key of ['story','voiceover']) jobDirectorField(key).parentElement.hidden=mode==='full' &&
+    $('[name=content-type]:checked').value==='podcast';
+  syncPodcastMode($('#start-form'),mode,'#podcast-version');
+}
+jobMode.addEventListener('change',()=>{
+  jobProfiles[lastJobMode]=readJobDirector();
+  CaptionControls.applyProfile($('#create-caption-style'),jobMode.value,lastJobMode);
+  lastJobMode=jobMode.value;
+  const profile=jobProfiles[lastJobMode] || directorDefaults(null,lastJobMode);
+  for(const key of jobDirectorKeys) {
+    const el=jobDirectorField(key);
+    if(el.type==='checkbox') el.checked=profile[key];
+    else el.value=profile[key];
+  }
+  syncJobMode();
+});
+$('#start-form').addEventListener('change',event=>{if(event.target.name==='content-type') syncJobMode();});
+syncJobMode();
 const thumbnailUrl = clip => clip.thumbnail_url ? `.${clip.thumbnail_url}?v=${clip.thumbnail_version || clip.rendered_at || 0}` : '';
 
 function timestamp(value) {
@@ -174,7 +245,7 @@ function chart(job) {
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index) {
-  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),tracking:TrackingControls.defaults(clip.tracking),director:directorDefaults(clip.director),podcast:PodcastControls.defaults(clip),...CaptionControls.options(clip)};
+  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),tracking:TrackingControls.defaults(clip.tracking),editing_mode:editingMode(clip),director:directorDefaults(clip.director,editingMode(clip)),podcast:PodcastControls.defaults(clip),...CaptionControls.options(clip)};
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
@@ -184,6 +255,7 @@ function clipHtml(clip,index) {
     <div class="clip-body">${clip.title?`<h3>${escapeHtml(clip.title)}</h3>`:''}${clip.sources?.length?`<p class="moment-source">${escapeHtml(clip.sources.length>1?'AI + Chat':clip.sources[0]==='ai'?'AI Analysis':'Chat Analysis')}</p>`:''}<div class="clip-meta"><span class="score">↗ ${clip.sources?.length?`${Math.round(clip.score)} / 100 Viral Potential`:`${clip.score.toFixed(2)} spike score`}</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">${clip.onset!=null?`Onset ${timestamp(clip.onset)} · `:''}Peak ${timestamp(clip.peak)}</p>
     ${PodcastControls.isPodcastClip(clip)?PodcastControls.summary(clip):`<div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>`}
     ${clip.error ? `<p class="error">${escapeHtml(clip.error)}${clip.status==='failed'?'<br>Adjust the settings below or try Re-render again.':''}</p>` : ''}
+    ${authenticityHtml(clip.authenticity)}
     ${clip.status==='ready' ? `<form class="thumbnail-editor"><label>Thumbnail text<input name="text" maxlength="64" value="${escapeHtml(clip.thumbnail_text)}" placeholder="${escapeHtml(clip.thumbnail_hook || 'Automatic hook')}" autocomplete="off"></label><p class="hint">Leave blank to use the automatic hook.</p><div class="actions"><button type="submit">Regenerate ↻</button><a class="button thumbnail-download">Download JPG ↓</a></div><p class="hint thumbnail-status" role="status" hidden></p></form>` : ''}
     <form class="review"><div class="time-grid"><div>${timeField('start')}</div><div>${timeField('end')}</div></div>
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
@@ -202,7 +274,7 @@ function drawJob(job) {
   job.clips.forEach(c=>{if(keeping.has(c.id))c.kept=keeping.get(c.id);});
   current = job;
   const image = safeImage(job.metadata?.thumbnail);
-  $('#job-heading').innerHTML = `<div class="job-header">${image?`<img src="${image}" alt="Stream thumbnail">`:''}<div>${badge(job.status, job.queue_position)}<h1>${escapeHtml(jobTitle(job))}</h1><p>${date(job)} ${job.metadata?`· ${timestamp(job.metadata.duration)} stream`:''} · ${escapeHtml(job.request.mode)} layout</p></div></div>`;
+  $('#job-heading').innerHTML = `<div class="job-header">${image?`<img src="${image}" alt="Stream thumbnail">`:''}<div>${badge(job.status, job.queue_position)}<h1>${escapeHtml(jobTitle(job))}</h1><p>${date(job)} ${job.metadata?`· ${timestamp(job.metadata.duration)} stream`:''} · ${escapeHtml(job.request.mode)} layout · ${editingModes[editingMode(job.request)][0]}</p></div></div>`;
   $('#stage').textContent = job.stage;
   $('#progress').value = job.progress;
   $('#progress-label').textContent = `${Math.round(job.progress*100)}%`;
@@ -303,24 +375,24 @@ $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
     const source=await PodcastControls.source();
-    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),ai_analysis:$('#ai-analysis').checked,review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},director:{enabled:$('#director').checked,music:$('#director-music').value,story:$('#director-story').checked,voiceover:$('#director-voiceover').checked,voice:$('#director-voice').value,delivery:$('#director-delivery').value,loop:$('#director-loop').checked},...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),ai_analysis:$('#ai-analysis').checked,review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},editing_mode:jobMode.value,director:readJobDirector(),...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
   } finally { button.disabled=false; }
 });
-function saveDraft(node) {
+function saveDraft(node, profiles=drafts.get(node.dataset.id)?.profiles) {
   const clip=current.clips.find(c=>c.id===node.dataset.id);
   const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
   const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
-  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),director:Object.fromEntries(directorKeys.map(k=>{const el=$(`[data-director=${k}]`,node);return [k,k==='hook_text'?(el.value.trim()||null):el.type==='checkbox'?el.checked:el.value];})),podcast:PodcastControls.read(node,clip),...CaptionControls.read(node)});
+  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),editing_mode:$('[data-field=editing_mode]',node).value,director:readDirector(node),profiles,podcast:PodcastControls.read(node,clip),...CaptionControls.read(node)});
   draftFeedback(node);
 }
 function draftFeedback(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id), draft=drafts.get(clip.id);
   let error='',changed=false,length=clip.end-clip.start;
   if(draft) {
-    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking))||JSON.stringify(draft.podcast)!==JSON.stringify(PodcastControls.defaults(clip));
+    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||draft.editing_mode!==editingMode(clip)||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director,editingMode(clip)))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking))||JSON.stringify(draft.podcast)!==JSON.stringify(PodcastControls.defaults(clip));
     changed=changed||JSON.stringify({language:draft.language,caption_style:draft.caption_style})!==JSON.stringify(CaptionControls.options(clip));
     try {
       const start=parseTime(draft.start),end=parseTime(draft.end); length=end-start;
@@ -351,6 +423,26 @@ $('#delete-unkept').addEventListener('click',async event=>{
   catch(error){notice(error.message);}finally{event.target.disabled=false;await refresh();}
 });
 $('#clips').addEventListener('input',event=>{
+  if(event.target.matches('[data-field=editing_mode]')) {
+    const node=event.target.closest('.clip'), clip=current.clips.find(c=>c.id===node.dataset.id);
+    const previous=drafts.get(clip.id), lastMode=previous?.editing_mode || editingMode(clip), mode=event.target.value;
+    const profiles={...previous?.profiles,[lastMode]:readDirector(node)};
+    const profile=profiles[mode] || directorDefaults(null,mode);
+    for(const key of directorKeys) {
+      const el=$(`[data-director=${key}]`,node);
+      if(el.type==='checkbox') el.checked=profile[key];
+      else el.value=profile[key] ?? '';
+      if(['sfx','music','loop'].includes(key)) el.disabled=mode==='natural';
+    }
+    $('[data-automatic-hook]',node).textContent=mode==='full'?'Storytelling hook':'Quote the original speech';
+    $('[data-editing-hint]',node).textContent=editingModes[mode][1];
+    const input=$('[data-director=hook_text]',node);
+    $('.story-preview-text',node).textContent=input.value || input.placeholder;
+    syncPodcastMode(node,mode,'[data-podcast=version]');
+    CaptionControls.applyProfile(node,mode,lastMode);
+    saveDraft(node,profiles);
+    return;
+  }
   if(event.target.matches('[data-director=hook_text]')) {
     const preview=$('.story-preview-text',event.target.closest('.story-hook'));
     preview.textContent=event.target.value.trim() || event.target.placeholder;
@@ -417,6 +509,10 @@ $('#clips').addEventListener('submit',async event=>{
         Object.assign(clip,result);
         input.value=result.thumbnail_text || '';
         updateThumbnail(node,clip);
+        if(result.authenticity) {
+          $('.authenticity',node).outerHTML=authenticityHtml(result.authenticity);
+          node.dataset.version=clipVersion(clip);
+        }
       }
       status.textContent='Thumbnail updated.';
     } catch(error) { status.textContent=error.message; }
@@ -429,7 +525,7 @@ $('#clips').addEventListener('submit',async event=>{
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),director:draft.director,podcast:draft.podcast,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),editing_mode:draft.editing_mode,director:draft.director,podcast:draft.podcast,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
 // A picked target's time is relative to the rendered section; keep it on the same frame when Start moves.
