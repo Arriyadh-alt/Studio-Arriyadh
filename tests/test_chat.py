@@ -1,9 +1,14 @@
+import fcntl
+import json
+import tracemalloc
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from yt_dlp.utils import DownloadError
 
 from clipper_studio.chat import ChatReplayError, Message, fetch_chat, fetch_metadata, parse_chat
+from clipper_studio.spikes import detect_spikes
 
 
 FIXTURE = Path(__file__).parent / "fixtures/chat.jsonl"
@@ -102,25 +107,108 @@ def test_long_replay_download(stub_yt_dlp, tmp_path):
     metadata, messages = fetch_chat(REPLAY_URL, tmp_path)
     assert metadata["duration"] == 42403
     assert len(messages) == 3
-    assert (tmp_path / "replay.live_chat.json").read_bytes() == FIXTURE.read_bytes()
+    with messages.reader() as (group, count):
+        assert group(2) == (Message(12.5, "Alice", "WOW :fire:"),)
+        assert count(3) == 1
 
 
-@pytest.mark.parametrize("limit", ["time", "size", "final_size"])
-def test_replay_limit_cleans_up_incomplete_download(stub_yt_dlp, tmp_path, monkeypatch, limit):
-    now = [0]
-    monkeypatch.setattr("clipper_studio.chat.time.monotonic", lambda: now[0])
-    monkeypatch.setattr("clipper_studio.chat.MAX_REPLAY_SECONDS", 10)
-    monkeypatch.setattr("clipper_studio.chat.MAX_REPLAY_BYTES", 20)
+def test_chat_download_releases_shared_cookie_lock(stub_yt_dlp, tmp_path, monkeypatch):
+    cookies = tmp_path / "cookies.txt"
+    initial = "# Netscape HTTP Cookie File\n"
+    cookies.write_text(initial)
+    cookies.with_suffix(".txt.lock").touch(mode=0o600)
+    monkeypatch.setenv("CLIPPER_YTDLP_COOKIES", str(cookies))
 
-    def download(self, output, progress):
-        output.write_bytes(b"a" * 21)
-        now[0] = 11 if limit == "time" else 1
-        progress({"downloaded_bytes": 21 if limit == "size" else 1})
+    def download(self, output, hook):
+        private = Path(self.options["cookiefile"])
+        assert private != cookies and private.read_text() == initial
+        assert private.stat().st_mode & 0o777 == 0o600
+        with cookies.with_suffix(".txt.lock").open("r+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        private.write_text(initial + "# chat changes\n")
+        output.write_bytes(FIXTURE.read_bytes())
 
     stub_yt_dlp.download = download
-    with pytest.raises(ChatReplayError, match="exceeded Studio’s processing limit"):
-        fetch_chat(REPLAY_URL, tmp_path)
-    assert list(tmp_path.iterdir()) == []
+    _, messages = fetch_chat(REPLAY_URL, tmp_path / "chat", REPLAY_INFO)
+    assert len(messages) == 3
+    assert cookies.read_text() == initial
+
+
+def test_disk_guard_retains_partial_download(stub_yt_dlp, tmp_path, monkeypatch, caplog):
+    enough_space = [True]
+    monkeypatch.setattr("clipper_studio.chat.shutil.disk_usage",
+                        lambda _: SimpleNamespace(free=10**10 if enough_space[0] else 0))
+
+    def download(self, output, progress):
+        output.with_suffix(".json.part").write_bytes(FIXTURE.read_bytes())
+        enough_space[0] = False
+        progress({"downloaded_bytes": 1234})
+
+    stub_yt_dlp.download = download
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path)
+    assert len(buckets) == 3
+    assert "available disk space" in buckets.warning
+    assert "guard=disk_reserve elapsed=" in caplog.text and "bytes=1234" in caplog.text
+
+
+def replay_line(index, offset=100, author="Viewer", text="OMG"):
+    renderer = {"id": str(index), "authorName": {"simpleText": author}, "message": {"simpleText": text}}
+    action = {"videoOffsetTimeMsec": str(offset * 1000),
+              "actions": [{"addChatItemAction": {"item": {"liveChatTextMessageRenderer": renderer}}}]}
+    return (json.dumps({"replayChatItemAction": action}) + "\n").encode()
+
+
+def test_streams_large_replay_and_dedupes_deliveries_not_reactions(stub_yt_dlp, tmp_path, monkeypatch):
+    count = 160_000
+    now = [0]
+    monkeypatch.setattr("clipper_studio.chat.time.monotonic", lambda: now[0])
+
+    def download(self, output, progress):
+        partial = output.with_suffix(".json.part")
+        with partial.open("wb") as file:
+            for index in range(count):
+                file.write(replay_line(index, 100 + index % 40, f"Viewer {index % 100}"))
+                if index % 4000 == 3999:
+                    file.flush()
+                    now[0] += 30
+                    progress({"downloaded_bytes": 200 * 1024 * 1024})
+            file.write(replay_line(0, 100, "Viewer 0"))
+        partial.replace(output)
+        progress({"status": "finished", "downloaded_bytes": 200 * 1024 * 1024})
+
+    stub_yt_dlp.download = download
+    tracemalloc.start()
+    try:
+        info, buckets = fetch_chat(REPLAY_URL, tmp_path, REPLAY_INFO)
+        _, activity = detect_spikes(buckets, info["duration"])
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(buckets) == count and not buckets.warning
+    assert sum(point["count"] for point in activity) == count
+    assert peak < 12 * 1024 * 1024
+
+
+def test_retries_transient_download_and_scores_like_original(stub_yt_dlp, tmp_path, monkeypatch):
+    waits = []
+    monkeypatch.setattr("clipper_studio.chat.time.sleep", waits.append)
+    monkeypatch.setattr("clipper_studio.chat.random.uniform", lambda *_: .25)
+    data = [replay_line(i, 100 + i % 4, f"Viewer {i % 10}", ["OMG", "🔥", "what"][i % 3])
+            for i in range(50)]
+
+    def download(self, output, progress):
+        partial = output.with_suffix(".json.part")
+        if type(self).downloads < 3:
+            partial.write_bytes(b"".join(data[:20]))
+            progress({"downloaded_bytes": partial.stat().st_size})
+            raise DownloadError("HTTP Error 503: Service Unavailable")
+        output.write_bytes(b"".join(data))
+
+    stub_yt_dlp.download = download
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, REPLAY_INFO)
+    assert waits == [1.25, 2.25]
+    assert len(buckets) == len(data) and not buckets.warning
+    assert detect_spikes(buckets, REPLAY_INFO["duration"]) == detect_spikes(parse_chat(data), REPLAY_INFO["duration"])
 
 
 def test_preflight_metadata_reused_for_bounded_chat_download(stub_yt_dlp, tmp_path):

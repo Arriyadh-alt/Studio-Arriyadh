@@ -44,13 +44,12 @@ globalThis.MomentReview = (() => {
     job=value;
     panel.hidden=!job.moments?.length;
     if(panel.hidden) {panel.innerHTML='';key='';active=null;return;}
-    const next=JSON.stringify([job.id,job.moments,job.chat_error,job.ai_error,filter]);
+    const next=JSON.stringify([job.id,job.moments,job.ai_error,filter]);
     if(!force && next===key) return;
     key=next;
     const iframe=panel.querySelector('.moment-player > *');
     const selected=job.moments.filter(m=>m.status==='selected').length;
     panel.innerHTML=`<div class="section-heading"><div><span class="eyebrow">Find the standout</span><h2>Detected moments <span class="hint">· ${job.moments.length}</span></h2></div></div>
-      ${job.chat_error?`<p class="moment-warning">${job.moments.some(m=>m.sources.includes('chat'))?'Chat replay partially unavailable — ':job.moments.some(m=>m.sources.includes('ai'))?'Chat replay unavailable — AI analysis only. ':'Chat replay unavailable — '}${esc(job.chat_error)}</p>`:''}
       ${job.ai_error?`<p class="moment-warning">AI analysis unavailable — chat analysis only. ${esc(job.ai_error)}</p>`:''}
       <div class="moment-toolbar"><button class="primary" type="button" data-moment-action="batch" ${!selected?'disabled':''}>Render selected (${selected}) ↗</button><button type="button" data-moment-action="top">Select top 5</button></div>
       <p class="hint">${podcast()?'Rendered with the Podcast Director: hook teaser, natural pauses kept, voice clarity, speaker framing, captions — original voices are never replaced.':'Rendered with AI Director: hook, voice-over, facecam on top, captions, zooms, loop — according to this job’s settings.'}</p>

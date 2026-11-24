@@ -3,7 +3,10 @@
 import math
 import re
 import unicodedata
+from functools import lru_cache
 from statistics import median
+
+from .chat_buckets import BIN_SECONDS, ChatBuckets
 
 
 def greeting(text):
@@ -46,33 +49,50 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         raise ValueError("Invalid detector configuration")
     if not math.isfinite(chat_delay) or chat_delay < 0:
         raise ValueError("Chat delay must be finite and nonnegative")
+    if isinstance(messages, ChatBuckets):
+        if bin_seconds != BIN_SECONDS or duration != messages.duration:
+            raise ValueError("Replay buckets must match the analysis time base")
+        with messages.reader() as (group, count):
+            return _score(group, count, duration, clips, lead, bin_seconds, baseline_seconds, min_gap, tail, chat_delay)
     bins = [[] for _ in range(math.ceil(duration / bin_seconds))]
     for message in messages:
         if 0 <= message.offset_seconds < duration:
             bins[int(message.offset_seconds // bin_seconds)].append(message)
+    return _score(bins.__getitem__, lambda i: len(bins[i]), duration, clips, lead, bin_seconds,
+                  baseline_seconds, min_gap, tail, chat_delay)
+
+
+def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_seconds, min_gap, tail, chat_delay):
+    length = math.ceil(duration / bin_seconds)
     radius = max(1, round(5 / bin_seconds))
-    normalized = [[normalized_message(m.text) if not greeting(m.text) else '' for m in group] for group in bins]
-    authors_by_message = []
-    for group, texts in zip(bins, normalized):
+    group = lru_cache(maxsize=3)(read_group)
+
+    @lru_cache(maxsize=3)
+    def normalized(i):
+        return tuple(normalized_message(m.text) if not greeting(m.text) else '' for m in group(i))
+
+    @lru_cache(maxsize=3)
+    def authors_by_message(i):
         authors = {}
-        for message, text in zip(group, texts):
+        for message, text in zip(group(i), normalized(i)):
             if text:
                 authors.setdefault(text, set()).add(message.author.strip().casefold())
-        authors_by_message.append(authors)
-    reactors, signal, totals, active_authors, message_weights = [], [], [], [], []
+        return authors
+
     category_weights = {None: 0, "weak_hype": .25, "hype": .75, "laughter": 1, "shock": 1}
-    for i, group in enumerate(bins):
-        neighbors = range(max(0, i - radius), min(len(bins), i + radius + 1))
+    @lru_cache(maxsize=3)
+    def reactions(i):
+        neighbors = range(max(0, i - radius), min(length, i + radius + 1))
         shared_authors = {}
         for j in neighbors:
-            for text, authors in authors_by_message[j].items():
+            for text, authors in authors_by_message(j).items():
                 shared_authors.setdefault(text, set()).update(authors)
         waves = {text for text, authors in shared_authors.items() if len(authors) >= 3}
         weights = {}
         reacting = set()
         active = set()
         group_weights = []
-        for message, text in zip(group, normalized[i]):
+        for message, text in zip(group(i), normalized(i)):
             author = message.author.strip().casefold()
             weight = category_weights[reaction_category(message.text)]
             if text in waves:
@@ -83,16 +103,19 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
             weights[author] = max(weights.get(author, 0), weight)
             if weight:
                 reacting.add(author)
-        reactors.append(reacting)
-        signal.append(sum(weights.values()))
+        return reacting, active, group_weights, sum(weights.values())
+
+    signal, totals, intensities = [], [], []
+    for i in range(length):
+        reacting, active, _, strength = reactions(i)
+        signal.append(strength)
         totals.append(len(active))
-        active_authors.append(active)
-        message_weights.append(group_weights)
+        intensities.append(len(reacting))
 
     def smooth_values(values):
         smoothed = []
-        for i in range(len(bins)):
-            neighbors = range(max(0, i - radius), min(len(bins), i + radius + 1))
+        for i in range(length):
+            neighbors = range(max(0, i - radius), min(length, i + radius + 1))
             weights = [(j, radius + 1 - abs(j - i)) for j in neighbors]
             smoothed.append(sum(values[j] * w for j, w in weights) / sum(w for _, w in weights))
         return smoothed
@@ -108,7 +131,7 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         global_mad = median(abs(value - global_median) for value in values)
         points = []
         for i, value in enumerate(values):
-            history = [values[j] for j in range(max(0, i - window), min(len(bins), i + window + 1))
+            history = [values[j] for j in range(max(0, i - window), min(length, i + window + 1))
                        if abs(j - i) > exclusion]
             if len(history) >= max(8, window // 2):
                 baseline = median(history)
@@ -127,8 +150,8 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
     for i, (baseline, z) in enumerate(reaction_stats):
         reaction_score = .7 * z + .3 * min(z * 2, share_stats[i][1])
         score = reaction_score + .25 * volume_stats[i][1]
-        series.append({"time": i * bin_seconds, "count": len(bins[i]), "baseline": baseline,
-                       "intensity": len(reactors[i]), "score": round(score, 3)})
+        series.append({"time": i * bin_seconds, "count": count(i), "baseline": baseline,
+                       "intensity": intensities[i], "score": round(score, 3)})
     positive = sorted(point['score'] for point in series if point['score'] > 0)
     typical_volume = median(volume)
     threshold_floor = min(2.5, max(1.25, math.sqrt(typical_volume)))
@@ -139,12 +162,12 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
     for i, point in enumerate(series):
         if point['score'] < threshold:
             continue
-        nearby = range(max(0, i - radius), min(len(bins), i + radius + 1))
+        nearby = range(max(0, i - radius), min(length, i + radius + 1))
         if any(series[j]['score'] > point['score'] or (series[j]['score'] == point['score'] and j < i) for j in nearby):
             continue
-        reacting = set().union(*(reactors[j] for j in nearby))
-        all_authors = set().union(*(active_authors[j] for j in nearby))
-        peak_authors = {m.author.strip().casefold() for m in bins[i]}
+        reacting = set().union(*(reactions(j)[0] for j in nearby))
+        all_authors = set().union(*(reactions(j)[1] for j in nearby))
+        peak_authors = {m.author.strip().casefold() for m in group(i)}
         volume_led = (volume_stats[i][1] >= threshold and
                       volume[i] - volume_stats[i][0] >= minimum_reactors)
         participants = all_authors if volume_led else reacting
@@ -152,10 +175,15 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
             continue
         if (point['time'] < 60 or point['time'] >= duration - 60) and len(reacting) < .7 * max(1, len(all_authors)):
             continue
-        context = [m for j in range(max(0, i - exclusion), min(len(bins), i + exclusion + 1)) for m in bins[j]]
-        context_authors = {m.author.strip().casefold() for m in context}
-        farewells = {m.author.strip().casefold() for m in context if re.search(r"\b(?:bye+|goodbye|see you|gn|good night)\b", m.text, re.I)}
-        giveaways = {m.author.strip().casefold() for m in context if re.search(r"\b(?:got it|giveaway|free nitro|discord nitro|redeem)\b", m.text, re.I)}
+        context_authors, farewells, giveaways = set(), set(), set()
+        for j in range(max(0, i - exclusion), min(length, i + exclusion + 1)):
+            for m in group(j):
+                author = m.author.strip().casefold()
+                context_authors.add(author)
+                if re.search(r"\b(?:bye+|goodbye|see you|gn|good night)\b", m.text, re.I):
+                    farewells.add(author)
+                if re.search(r"\b(?:got it|giveaway|free nitro|discord nitro|redeem)\b", m.text, re.I):
+                    giveaways.add(author)
         if len(farewells) >= max(3, .1 * len(context_authors)) or len(giveaways) >= max(3, .2 * len(context_authors)):
             continue
         onset = i
@@ -165,7 +193,7 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
             above_volume_baseline = volume_led and totals[previous] > volume_stats[previous][0]
             if above_reaction_baseline or above_volume_baseline:
                 onset = previous
-            elif minimum_reactors == 2 and not bins[previous] and empty_bins == 0:
+            elif minimum_reactors == 2 and not count(previous) and empty_bins == 0:
                 empty_bins += 1
             else:
                 break
@@ -175,22 +203,25 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         if end - start < min(30, duration) or point['time'] >= end:
             continue
         if point['time'] >= duration - min(300, .15 * duration):
-            reaction_context = [m for j in range(max(0, i - radius), min(len(bins), math.ceil(end / bin_seconds)))
-                                for m in bins[j] if start <= m.offset_seconds < end]
-            leading_context = [m for j in range(int(start // bin_seconds), i + 1)
-                               for m in bins[j] if start <= m.offset_seconds < end]
+            reaction_context = (m for j in range(max(0, i - radius), min(length, math.ceil(end / bin_seconds)))
+                                for m in group(j) if start <= m.offset_seconds < end)
+            leading_context = (m for j in range(int(start // bin_seconds), i + 1)
+                               for m in group(j) if start <= m.offset_seconds < end)
             outro_dominated = False
             for neighborhood in (reaction_context, leading_context):
-                neighborhood_authors = {m.author.strip().casefold() for m in neighborhood}
-                outros = {m.author.strip().casefold() for m in neighborhood if re.search(
-                    r"\b(?:by+e+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
-                    r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
-                    r"(?:(?:great|awesome|fun|dual) )?(?:stream|live(?:stream)?))\b", m.text, re.I)}
+                neighborhood_authors, outros = set(), set()
+                for m in neighborhood:
+                    author = m.author.strip().casefold()
+                    neighborhood_authors.add(author)
+                    if re.search(r"\b(?:by+e+|goodbye|see (?:you|ya)|gn|good night|ggs? (?:everyone|everybody|all)|"
+                                 r"(?:thanks?|thank you) (?:so much )?for (?:the |this |another )?"
+                                 r"(?:(?:great|awesome|fun|dual) )?(?:stream|live(?:stream)?))\b", m.text, re.I):
+                        outros.add(author)
                 outro_dominated |= len(outros) >= 2 and len(outros) > .25 * len(neighborhood_authors)
             if outro_dominated:
                 continue
         samples = []
-        for message, _ in sorted(zip(bins[i], message_weights[i]), key=lambda item: -item[1]):
+        for message, _ in sorted(zip(group(i), reactions(i)[2]), key=lambda item: -item[1]):
             if message.text.strip().casefold() not in {s.strip().casefold() for s in samples}:
                 samples.append(message.text)
             if len(samples) == 5:
