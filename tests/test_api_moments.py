@@ -232,11 +232,12 @@ def test_retry_peak_does_not_replace_or_overlap_protected_moment(sources, status
     assert result == [snapshot]
 
 
-def test_retry_chat_matches_initial_merge_and_preserves_reviewed_moments():
+@pytest.mark.parametrize("second_start", [120, 140])
+def test_retry_chat_matches_nonoverlapping_initial_merge_and_preserves_reviewed_moments(second_start):
     from clipper_studio.ranking import add_chat_moments, merge_moments
 
     ai = [proposal(80)]
-    chat = [proposal(90), {**proposal(70), "start": 120, "end": 160, "peak": 143}]
+    chat = [proposal(90), {**proposal(70), "start": second_start, "end": 160, "peak": 143}]
     first_run = merge_moments(ai, chat, 600, 18)
     assert [m["sources"] for m in first_run] == [["ai", "chat"], ["chat"]]
     reviewed, rendered = merge_moments([], [
@@ -247,7 +248,10 @@ def test_retry_chat_matches_initial_merge_and_preserves_reviewed_moments():
     rendered.update(status="rendered", clip_id="clip", rank=4)
 
     existing = [*first_run, reviewed, rendered]
-    assert add_chat_moments(existing, chat, 600, 18) == existing
+    expected = existing if second_start == 140 else [
+        first_run[0], {**reviewed, "rank": 2}, {**rendered, "rank": 3},
+    ]
+    assert add_chat_moments(existing, chat, 600, 18) == expected
 
 
 def test_retry_drops_proposals_overlapping_either_range_of_reviewed_ai_moment():

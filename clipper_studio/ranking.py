@@ -23,6 +23,10 @@ def _matches(a, c):
     return (shorter > 0 and overlap >= .4 * shorter) or abs(a["peak"] - c["peak"]) <= 25
 
 
+def _overlaps(a, b):
+    return max(a["start"], b["start"]) < min(a["end"], b["end"])
+
+
 def _original_ai(moment):
     if "ai" not in moment["sources"]:
         return None
@@ -53,17 +57,13 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
     protected_ranges = [*protected, *(original for original in map(_original_ai, protected) if original)]
 
     def conflicts(candidate):
-        return any(_matches(m, candidate) or max(m["start"], candidate["start"]) < min(m["end"], candidate["end"])
-                   for m in protected_ranges)
+        return any(_matches(m, candidate) or _overlaps(m, candidate) for m in protected_ranges)
 
-    merged, ai_only = _merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead)
+    merged = _merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead, conflicts=conflicts)
     fresh = []
     for candidate in _rank(merged):
-        if conflicts(candidate):
-            candidate = ai_only.get(candidate["id"])
-            if candidate is None or conflicts(candidate):
-                continue
-        fresh.append(candidate)
+        if not any(_overlaps(candidate, m) for m in fresh):
+            fresh.append(candidate)
     unmatched = []
     for candidate in fresh:
         match = next((m for m in remaining if (m["start"], m["end"]) == (candidate["start"], candidate["end"])), None)
@@ -87,11 +87,10 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
 
 def merge_moments(ai, chat, duration, lead):
     """Match overlap or nearby peaks, retaining source proposals and AI timing."""
-    moments, _ = _merge_candidates(ai, chat, duration, lead)
-    return _rank(moments)
+    return _rank(_merge_candidates(ai, chat, duration, lead))
 
 
-def _merge_candidates(ai, chat, duration, lead):
+def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: False):
     def normalize(item, source):
         start = max(0., min(float(item["start"]), duration))
         end = max(start, min(float(item["end"]), duration, start + 60))
@@ -107,34 +106,34 @@ def _merge_candidates(ai, chat, duration, lead):
                 **({"podcast": item["podcast"]} if item.get("podcast") else {})}
 
     result = [normalize(a, "ai") for a in ai]
-    ai_only = {}
+    result = [a for a in result if not conflicts(a)]
     for original in chat:
         c = normalize(original, "chat")
-        matches = []
-        for a in result:
-            if a["sources"] != ["ai"]:
-                continue
-            if _matches(a, c):
-                matches.append(a)
-        if not matches:
-            if not any(m["sources"] == ["chat"] and _matches(m, c) for m in result):
+        matches = [a for a in result if a["sources"] == ["ai"] and _matches(a, c)]
+        for a in sorted(matches, key=lambda a: abs(a["peak"] - c["peak"])):
+            combined = _corroborate(a, c, duration, lead)
+            if not conflicts(combined):
+                a.update(combined)
+                break
+        else:
+            if (not conflicts(c) and not any(_overlaps(a, c) for a in matches)
+                    and not any(m["sources"] == ["chat"] and _matches(m, c) for m in result)):
                 result.append(c)
-            continue
-        a = min(matches, key=lambda a: abs(a["peak"] - c["peak"]))
-        ai_only[a["id"]] = dict(a)
-        a["alternatives"] = {"ai": {k: a[k] for k in ("start", "end")},
-                             "chat": {k: c[k] for k in ("start", "end")}}
-        # Chat peak is delayed engagement; the AI proposal anchors the true event.
-        start = max(0., min(a["start"], a["peak"] - lead))
-        end = min(duration, max(a["end"], c["end"]), start + 60)
-        if end < a["peak"]:
-            end = min(duration, a["peak"] + 1)
-            start = max(0., end - 60)
-        a.update(sources=["ai", "chat"], start=start, end=end, duration=end - start,
-                 chat_score=c["score"], score=min(100, max(a["score"], c["score"]) + 10),
-                 reason=a["reason"] + "; corroborated by chat: " + c["reason"],
-                 message_sample=c["message_sample"])
-    return result, ai_only
+    return result
+
+
+def _corroborate(a, c, duration, lead):
+    alternatives = {"ai": {k: a[k] for k in ("start", "end")},
+                    "chat": {k: c[k] for k in ("start", "end")}}
+    # Chat peak is delayed engagement; the AI proposal anchors the true event.
+    start = max(0., min(a["start"], a["peak"] - lead))
+    end = min(duration, max(a["end"], c["end"]), start + 60)
+    if end < a["peak"]:
+        end = min(duration, a["peak"] + 1)
+        start = max(0., end - 60)
+    return dict(a, alternatives=alternatives, sources=["ai", "chat"], start=start, end=end, duration=end - start,
+                chat_score=c["score"], score=min(100, max(a["score"], c["score"]) + 10),
+                reason=a["reason"] + "; corroborated by chat: " + c["reason"], message_sample=c["message_sample"])
 
 
 def _rank(moments):

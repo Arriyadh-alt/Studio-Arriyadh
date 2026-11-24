@@ -1,6 +1,9 @@
+from itertools import combinations
+from random import Random
+
 import pytest
 
-from clipper_studio.ranking import chat_moment, merge_moments
+from clipper_studio.ranking import add_chat_moments, chat_moment, merge_moments
 
 
 def moment(start=100, end=140, peak=118, score=70):
@@ -26,3 +29,54 @@ def test_separate_ranked_and_empty():
     assert result[0]["chat_score"] == 90 and result[0]["ai_score"] is None
     assert merge_moments([], [], 600, 18) == []
     assert chat_moment(moment(score=8))["score"] > chat_moment(moment(score=2))["score"]
+
+
+def test_retry_matches_second_spike_when_first_extension_crosses_touched_moment():
+    ai = [moment()]
+    original, touched = merge_moments(ai, [moment(150, 180, 167, 60)], 600, 18)
+    touched["reviewed"] = True
+    chat = [moment(110, 158, 128, 90), moment(108, 138, 125, 75)]
+    merged, kept = add_chat_moments([original, touched], chat, 600, 18, ai=ai)
+    assert merged["sources"] == ["ai", "chat"]
+    assert merged["chat_score"] == 75
+    assert merged["id"] == original["id"]
+    assert merged["end"] == 140 and kept == touched
+
+
+def test_retry_untouched_ranges_never_overlap_each_other_or_touched_ranges():
+    rng = Random(314159)
+
+    def candidates(count):
+        for _ in range(count):
+            start = rng.randrange(20, 570)
+            end = min(600, start + rng.randrange(20, 61))
+            yield moment(start, end, rng.randrange(start, end), rng.randrange(1, 101))
+
+    def overlaps(left, right):
+        return max(left["start"], right["start"]) < min(left["end"], right["end"])
+
+    for _ in range(100):
+        ai = list(candidates(6))
+        existing = merge_moments(ai, candidates(10), 600, 18)
+        protected = {}
+        protected_ranges = []
+        for original in rng.sample(existing, 3):
+            original["reviewed"] = True
+            if "ai" in original["sources"]:
+                original_range = original.get("alternatives", {}).get("ai")
+                if original_range is None:
+                    original_range = {k: original[k] for k in ("start", "end")}
+                    original["original_ai_range"] = original_range
+                protected_ranges.append(original_range)
+            moved = next(candidates(1))
+            original.update(start=moved["start"], end=moved["end"], duration=moved["end"] - moved["start"])
+            protected_ranges.append(original)
+            protected[original["id"]] = original
+        result = add_chat_moments(existing, candidates(10), 600, 18, ai=ai)
+        untouched = [m for m in result if m["id"] not in protected]
+        assert {m["id"]: m for m in result if m["id"] in protected} == {
+            m["id"]: {**protected[m["id"]], "rank": m["rank"]} for m in result if m["id"] in protected
+        }
+        assert protected.keys() <= {m["id"] for m in result}
+        assert not any(overlaps(a, b) for a, b in combinations(untouched, 2))
+        assert not any(overlaps(a, b) for a in untouched for b in protected_ranges)
