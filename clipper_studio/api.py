@@ -892,7 +892,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     def finish(jid, generation):
         with store.lock:
             job = active_job(jid, generation)
-            if not job.get("analysis_complete") or job.get("retry_stage"):
+            target = job.get("retry_stage")
+            if not job.get("analysis_complete") or (
+                    target and stage_states(job)[target]["status"] in ("processing", "retrying")):
                 return
             total = len(job["clips"])
             done = sum(c["status"] in ("ready", "failed", "cancelled") for c in job["clips"])
@@ -926,7 +928,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 return
             settle_stages(job)
             failed = any(c["status"] == "failed" for c in job["clips"])
-            job.update(status="completed_with_errors" if failed else "completed", progress=1,
+            job.update(status="completed_with_errors" if failed else "completed", progress=1, retry_stage=None,
                        stage="Finished" if job["clips"] else (f"{len(job['moments'])} moments ready for review"
                              if job["moments"] else "No viral moments found"),
                        elapsed_seconds=round(time.time() - job.get("processing_started", time.time()), 2))
@@ -1213,7 +1215,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     if buckets.is_file():
                         buckets.replace(directory / buckets.name)
                     if (chat or not fields["chat_error"]) and job["status"] == "failed" and not job.get("analysis_complete"):
-                        job.update(analysis_complete=True, status="completed", progress=1, error=None,
+                        job.update(analysis_complete=True, status="completed", progress=1, error=None, retry_stage=None,
                                    stage=f"{len(job['moments'])} moments ready for review" if job["moments"]
                                    else "No viral moments found")
                 record_chat(job, chat, fields)

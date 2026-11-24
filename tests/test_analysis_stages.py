@@ -184,6 +184,57 @@ def test_resume_failed_analysis_without_revalidating_source(tmp_path, monkeypatc
         assert len(calls) == 2
 
 
+@pytest.mark.parametrize("stale_marker", [False, True])
+def test_chat_recovery_after_failed_stage_retry_finishes_rendering(tmp_path, monkeypatch, media, stale_marker):
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": 240})
+    downloads = []
+
+    def no_media(*args, **kwargs):
+        downloads.append(args)
+        raise TimeoutError("Media unavailable")
+
+    def no_chat(*args):
+        raise ChatReplayError("Chat replay unavailable")
+
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", no_media)
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", no_chat)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": True, "captions": False}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        app.state.pending.join()
+        assert client.post(f"{base}/stages/audio_analysis/retry").status_code == 202
+        app.state.pending.join()
+        failed = client.get(base).json()
+        assert len(downloads) == 2 and failed["status"] == "failed"
+        assert failed["stages"]["audio_analysis"]["status"] == "failed"
+
+        monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 240}, []))
+        monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
+            dict(start=80, end=120, peak=100, score=7),
+        ], []))
+        assert client.post(f"{base}/chat/retry").status_code == 202
+        app.state.pending.join()
+        recovered = client.get(base).json()
+        assert recovered["status"] == "completed"
+        assert recovered["stages"]["audio_analysis"] == failed["stages"]["audio_analysis"]
+        if stale_marker:
+            job = app.state.store.get(jid)
+            job["retry_stage"] = "audio_analysis"
+            app.state.store.save(job)
+        else:
+            assert recovered.get("retry_stage") is None
+
+        moment, = recovered["moments"]
+        assert client.post(f"{base}/moments/render", json={"ids": [moment["id"]]}).status_code == 202
+        app.state.pending.join()
+        finished = client.get(base).json()
+        clip, = finished["clips"]
+        assert clip["status"] == "ready"
+        assert finished["status"] == "completed" and finished["progress"] == 1
+        assert finished["stages"]["final_rendering"]["status"] == "completed"
+
+
 def test_transcript_retry_refreshes_untouched_suggestion_only(tmp_path, monkeypatch):
     prepare_retry(monkeypatch)
     app = create_app(tmp_path)
