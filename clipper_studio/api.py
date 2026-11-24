@@ -932,10 +932,11 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         with store.lock:
             active_job(jid, generation)
 
-    def analyze_chat(jid, generation, job, info, retry=False):
+    def analyze_chat(jid, generation, job, info, retry_dir=None):
         started = time.monotonic()
         try:
-            metadata, messages = fetch_chat(job["url"], store.root / jid / "chat", info,
+            directory = retry_dir if retry_dir is not None else store.root / jid / "chat"
+            metadata, messages = fetch_chat(job["url"], directory, info,
                                             lambda: check_job(jid, generation))
             count, lead = job["request"]["clips"], job["request"]["lead"]
             spikes, activity = detect_spikes(messages, metadata["duration"], clips=count, lead=lead)
@@ -951,7 +952,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             moments, fields = [], {}
         fields.update(chat_error=error, chat_warning=CHAT_FALLBACK_WARNING if error else None,
                       chat_seconds=round(time.monotonic() - started, 2))
-        if not retry:
+        if retry_dir is None:
             update(jid, generation, **fields)
         return moments, fields
 
@@ -988,18 +989,35 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             shutil.rmtree(directory, ignore_errors=True)
 
     def retry_chat(jid, generation, job):
-        chat, fields = analyze_chat(jid, generation, job, None, retry=True)
-        with store.lock:
-            job = active_job(jid, generation)
-            if "activity" in fields:
-                duration = job["metadata"]["duration"]
-                job["moments"] = add_chat_moments(job["moments"], chat, duration, job["request"]["lead"])
-                if (chat or not fields["chat_error"]) and job["status"] == "failed" and not job.get("analysis_complete"):
-                    job.update(analysis_complete=True, status="completed", progress=1, error=None,
-                               stage=f"{len(job['moments'])} moments ready for review" if job["moments"]
-                               else "No viral moments found")
-            job.update(fields, chat_retrying=False)
-            store.save(job)
+        directory = store.root / jid / "chat"
+        directory.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=directory, prefix="retry-") as temporary:
+            candidate = Path(temporary)
+            chat, fields = analyze_chat(jid, generation, job, None, retry_dir=candidate)
+            with store.lock:
+                job = active_job(jid, generation)
+                if job.get("message_count"):
+                    old_count, new_count = job["message_count"], fields.get("message_count", 0)
+                    previous_bins = {point["time"] for point in job["activity"] if point["count"]}
+                    candidate_bins = {point["time"] for point in fields.get("activity", []) if point["count"]}
+                    if (new_count < old_count or (fields["chat_error"] and
+                            (not job.get("chat_error") or not previous_bins <= candidate_bins))):
+                        logger.info("Retaining prior chat replay for %s: retry covered fewer messages or intervals", jid)
+                        job["chat_retrying"] = False
+                        store.save(job)
+                        return
+                if "activity" in fields:
+                    duration = job["metadata"]["duration"]
+                    job["moments"] = add_chat_moments(job["moments"], chat, duration, job["request"]["lead"])
+                    buckets = candidate / "buckets.sqlite"
+                    if buckets.is_file():
+                        buckets.replace(directory / buckets.name)
+                    if (chat or not fields["chat_error"]) and job["status"] == "failed" and not job.get("analysis_complete"):
+                        job.update(analysis_complete=True, status="completed", progress=1, error=None,
+                                   stage=f"{len(job['moments'])} moments ready for review" if job["moments"]
+                                   else "No viral moments found")
+                job.update(fields, chat_retrying=False)
+                store.save(job)
 
     def analyze(jid, generation):
         try:
