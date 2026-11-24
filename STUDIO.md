@@ -150,6 +150,9 @@ raw static PNG (up to 2 MB and 2048 × 2048 pixels); it replaces the text on
 new renders. `GET /api/branding/logo` previews it; `DELETE /api/branding/logo`
 restores the text. The logo and settings are stored in `CLIPPER_DATA_DIR`,
 and already-rendered clips must be re-rendered to pick up changes.
+Non-ASCII text uses an installed font matched by Fontconfig when available.
+Install a font for any script not already covered on the render host (for
+example, `fonts-noto-cjk` on Debian/Ubuntu for Chinese, Japanese, and Korean).
 
 ### Caption options
 

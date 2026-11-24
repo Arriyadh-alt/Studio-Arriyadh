@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import subprocess
 from typing import Literal
 
 import cv2
@@ -64,6 +65,20 @@ class Watermark:
     y: int
 
 
+def _font_face(text):
+    if not text.isascii():
+        charset = " ".join(f"{ord(char):x}" for char in sorted(set(text)))
+        try:
+            match = subprocess.run(["fc-match", "-f", "%{file}\t%{index}",
+                                    f"sans-serif:style=Regular:charset={charset}"],
+                                   capture_output=True, check=True, text=True)
+            path, index = match.stdout.split("\t")
+            return path, int(index)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return "DejaVuSans.ttf", 0
+
+
 def _artwork(settings, logo):
     if logo:
         with Image.open(BytesIO(logo)) as image:
@@ -72,11 +87,15 @@ def _artwork(settings, logo):
                                 Image.Resampling.LANCZOS)
     else:
         size = settings.size
+        face, index = _font_face(settings.text)
         while True:
             try:
-                font = ImageFont.truetype("DejaVuSans.ttf", size)
+                font = ImageFont.truetype(face, size, index=index)
             except OSError:
-                font = ImageFont.load_default(size=size)
+                try:
+                    font = ImageFont.truetype("DejaVuSans.ttf", size)
+                except OSError:
+                    font = ImageFont.load_default(size=size)
             left, top, right, bottom = font.getbbox(settings.text)
             if right - left <= WIDTH // 2 or size <= 1:
                 break

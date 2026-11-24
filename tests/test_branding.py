@@ -1,10 +1,11 @@
 from io import BytesIO
 import subprocess
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageFont
 
 from clipper_studio.api import create_app
 from shorts_clipper.branding import BOTTOM, LOGO_LIMIT, BrandingSettings, prepare_watermark
@@ -69,6 +70,18 @@ def test_auto_watermark_keeps_clear_of_overlays_and_busy_regions(tmp_path, monke
     with Image.open(path) as artwork:
         assert mark.x > 540 and mark.y + artwork.height == pytest.approx(BOTTOM, abs=1)
         assert artwork.getchannel("A").getextrema()[1] == 128
+
+
+def test_non_ascii_watermark_loads_a_charset_matched_font(tmp_path):
+    settings = BrandingSettings(text="@日本語", position="top-left")
+    font = ImageFont.load_default(size=settings.size)
+    result = subprocess.CompletedProcess([], 0, stdout="/fonts/NotoSansCJK-Regular.ttc\t2")
+    with patch("shorts_clipper.branding.subprocess.run", return_value=result) as match, \
+         patch("shorts_clipper.branding.ImageFont.truetype", return_value=font) as load:
+        prepare_watermark(tmp_path / "mark.png", settings, None, tmp_path / "source.mp4", 0, 1, "crop")
+    assert match.call_args.args[0] == ["fc-match", "-f", "%{file}\t%{index}",
+                                      "sans-serif:style=Regular:charset=40 65e5 672c 8a9e"]
+    load.assert_called_once_with("/fonts/NotoSansCJK-Regular.ttc", settings.size, index=2)
 
 
 @pytest.mark.parametrize("mode", ["crop", "blur"])
