@@ -72,6 +72,15 @@ def test_mode_defaults_are_independent():
     assert director_config("full", DirectorSpec()) == DirectorSpec().model_dump()
 
 
+@pytest.mark.parametrize("shown_amount, expected", [("−5.2", "pass"), ("5.2", "review"), ("+5.2", "review")])
+def test_authenticity_compares_signed_numbers_in_subtitles_and_hooks(shown_amount, expected):
+    source = [Caption(0., 1., "The balance is -5.2 dollars.")]
+    shown = [Caption(0., 1., f"The balance is {shown_amount} dollars.")]
+    clip = {"start": 0., "end": 2., "captions": True, "title": shown[0].text}
+    report = authenticity_report({}, clip, None, source, shown, 2., hook=shown[0].text)
+    assert [report["checks"][key]["status"] for key in ("subtitles", "title", "thumbnail")] == [expected] * 3
+
+
 @pytest.mark.parametrize("mode", ["natural", "enhanced"])
 def test_narration_reserves_time_even_when_source_starts_with_dialogue(mode):
     speech = [Caption(0., 1., "I just started."), *SPEECH[1:]]

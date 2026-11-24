@@ -131,7 +131,7 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
 
 
 def _tokens(text):
-    return re.findall(r"\w+", (text or "").casefold())
+    return re.findall(r"[+-]?\d+(?:[.,]\d+)*|\w+", (text or "").casefold().replace("−", "-"))
 
 
 def authenticity_report(job, clip, plan, transcript, shown, duration, *, style=None, hook=None, tracking=None):
