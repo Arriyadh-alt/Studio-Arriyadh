@@ -63,7 +63,7 @@ def test_worker(tmp_path, monkeypatch, scenario):
         if scenario=='long_captioned' and kwargs.get('facecam') is not None:
             assert kwargs.get('facecam') == overlay and overlay.rect.w >= 410
             assert r'\fs' in a[3].read_text()
-        if scenario=='render_failure' and kwargs:
+        if scenario=='render_failure' and kwargs.get('facecam') is not None:
             raise RuntimeError('overlay filter')
         output.write_bytes(b'video')
     monkeypatch.setattr('clipper_studio.api.make_vertical_clip', render)

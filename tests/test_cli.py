@@ -41,6 +41,7 @@ def test_no_captions_skips_transcription(tmp_path):
         assert cli.main(["URL", "0", "10", "--no-captions"]) == 0
         transcribe.assert_not_called()
         assert render.call_args.args[-1] is None
+        assert render.call_args.kwargs["watermark"].path.name == "branding.png"
 
 
 def test_empty_speech_and_transcription_error(tmp_path, capsys):

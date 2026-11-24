@@ -7,6 +7,7 @@ from clipper_studio.api import JobRequest, create_app
 from shorts_clipper.captions import Caption, Transcript
 from shorts_clipper.director import Word
 from test_api import REPLAY_URL
+from test_branding import assert_logo_burned, install_test_logo
 
 
 @pytest.fixture(scope="module")
@@ -59,6 +60,7 @@ def test_upload_podcast_review_render_and_rights(monkeypatch, tmp_path, video):
     monkeypatch.setattr("clipper_studio.api.transcribe", captions)
     app = create_app(tmp_path)
     with TestClient(app) as client:
+        install_test_logo(client)
         assert client.post("/api/uploads", content=b"x", headers={"X-Filename": "a.exe"}).status_code == 400
         assert client.post("/api/uploads", content=b"x").status_code == 400
         assert client.post("/api/uploads", content=b"not video", headers={"X-Filename": "a.mp4"}).status_code == 400
@@ -80,6 +82,7 @@ def test_upload_podcast_review_render_and_rights(monkeypatch, tmp_path, video):
         app.state.pending.join()
         clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
         assert clip["status"] == "ready", clip.get("error")
+        assert_logo_burned(tmp_path / jid / cid / "clip.mp4")
         assert clip["podcast"]["version"] == "commentary" and clip["podcast"]["caption_edits"][0]["replace"] == "clock"
         result = clip["director_result"]
         assert result["status"] == "used" and result["options"]["preset"] == "podcast"

@@ -15,11 +15,13 @@
   <link rel="stylesheet" href="./tracking.css">
   <link rel="stylesheet" href="./moments.css">
   <link rel="stylesheet" href="./podcast.css">
+  <link rel="stylesheet" href="./branding.css">
   <script src="./captions.js" defer></script>
   <script src="./tracking.js" defer></script>
   <script src="./podcast.js" defer></script>
   <script src="./app.js" defer></script>
   <script src="./moments.js" defer></script>
+  <script src="./branding.js" defer></script>
 </head>
 <body>
   <header class="topbar"><a class="brand" href="#"><span class="brand-icon">✂</span> Clipper Studio</a><span class="tag">From stream to standout</span></header>
@@ -62,6 +64,35 @@
         <div class="analysis-options"><label class="check" data-gaming-only><input id="ai-analysis" type="checkbox" checked> AI video &amp; audio analysis</label><label class="check"><input id="review-moments" type="checkbox" checked> Review moments before rendering</label></div>
         <p class="hint">✦ AI + chat or conversation detection <span>·</span> AI Director <span>·</span> 9:16 vertical <span>·</span> Up to 60 seconds</p>
       </form>
+      <details class="panel branding-panel">
+        <summary>Branding Settings <span>Watermark for all new renders</span></summary>
+        <div class="branding-layout">
+          <form id="branding-settings">
+            <label>Watermark text<input name="text" type="text" maxlength="60" required value="@ARLSTUDIOZ"></label>
+            <label>Opacity <output name="opacity-value">50%</output><input name="opacity" type="range" min="1" max="100" value="50"></label>
+            <label>Size <output name="size-value">48</output><input name="size" type="range" min="24" max="96" value="48"></label>
+            <label>Position<select name="position">
+              <option value="auto">Auto (avoid captions, facecam and busy areas)</option>
+              <option value="top-left">Top left</option><option value="top">Top center</option><option value="top-right">Top right</option>
+              <option value="bottom-left">Bottom left</option><option value="bottom">Bottom center</option><option value="bottom-right">Bottom right</option>
+            </select></label>
+            <label>Custom PNG logo<input name="logo" type="file" accept=".png,image/png"></label>
+            <p class="hint">Uploading a PNG saves it immediately and replaces text on new renders. Max 2 MB.</p>
+            <div class="actions">
+              <button class="primary" type="submit">Save branding</button>
+              <button type="button" name="remove-logo" hidden>Remove logo</button>
+            </div>
+            <p class="hint" role="status" aria-live="polite" id="branding-status"></p>
+          </form>
+          <figure class="branding-preview">
+            <div class="branding-sample" data-position="top-left" aria-hidden="true">
+              <div class="branding-sample-caption">Sample captions</div>
+              <div class="branding-mark"><span>@ARLSTUDIOZ</span><img alt="" hidden></div>
+            </div>
+            <figcaption class="hint">Live preview · Auto position varies by clip</figcaption>
+          </figure>
+        </div>
+      </details>
       <div class="section-heading"><div><span class="eyebrow">Your workspace</span><h2>Recent streams</h2></div><button id="refresh-jobs" class="quiet">Refresh ↻</button></div>
       <div id="jobs" class="jobs"></div>
     </section>

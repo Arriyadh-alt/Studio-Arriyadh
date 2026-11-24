@@ -136,6 +136,24 @@ Clip shape: `{id,onset,peak,score,start,end,message_sample,mode,captions,status,
 error,file_url,download_url,thumbnail_url,language,caption_style,caption_language}`; status `queued`, `rendering`, `ready`,
 `failed`, or `cancelled`. URLs are null until ready. Errors are explicit strings.
 
+### Branding Settings
+
+Every new render and re-render burns the workspace watermark into the MP4.
+The default is white `@ARLSTUDIOZ` at 50% opacity, with a subtle shadow and
+automatic placement clear of facecam, captions, and the hook where possible.
+Auto placement also favors quieter regions of the picture.
+
+`GET /api/branding` returns `text`, `opacity` (1–100), `size` (24–96 at
+1080 px wide), `position` (auto, a corner, top, or bottom), and `has_logo`.
+`PUT /api/branding` saves those settings. `PUT /api/branding/logo` takes a
+raw static PNG (up to 2 MB and 2048 × 2048 pixels); it replaces the text on
+new renders. `GET /api/branding/logo` previews it; `DELETE /api/branding/logo`
+restores the text. The logo and settings are stored in `CLIPPER_DATA_DIR`,
+and already-rendered clips must be re-rendered to pick up changes.
+Non-ASCII text uses an installed font matched by Fontconfig when available.
+Install a font for any script not already covered on the render host (for
+example, `fonts-noto-cjk` on Debian/Ubuntu for Chinese, Japanese, and Korean).
+
 ### Caption options
 
 `captions` remains a boolean. `language` is `"auto"`/null (Whisper auto-detection)

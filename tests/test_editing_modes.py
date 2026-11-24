@@ -10,6 +10,7 @@ from shorts_clipper.director import DirectorOptions, Plan, Segment, cut_source, 
 from shorts_clipper.editing import authenticity_report, plan_source_edit, record_operations
 from shorts_clipper.sources import local_section
 from shorts_clipper.video import hdr_to_sdr, make_vertical_clip
+from test_branding import assert_logo_burned, install_test_logo
 from test_api import REPLAY_URL
 
 
@@ -164,6 +165,7 @@ def test_editing_modes_render_and_persist(monkeypatch, tmp_path, source, mode):
     monkeypatch.setattr("clipper_studio.api.loudness", loudness)
     app = create_app(tmp_path)
     with TestClient(app) as client:
+        install_test_logo(client)
         request = {"url": REPLAY_URL, "review": False, "facecam": {"enabled": False},
                    "tracking": {"enabled": False}, "director": {"voiceover": False, "loop": mode == "enhanced"}}
         if mode != "full":
@@ -181,6 +183,7 @@ def test_editing_modes_render_and_persist(monkeypatch, tmp_path, source, mode):
         assert report["checks"]["subtitles"]["status"] == "pass"
         assert clip["director_result"]["status"] == "used"
         video_path = tmp_path / jid / clip["id"] / "clip.mp4"
+        assert_logo_burned(video_path)
         result = probe(video_path, export_details=True)
         v = next(s for s in result["streams"] if s["codec_type"] == "video")
         a = next(s for s in result["streams"] if s["codec_type"] == "audio")
