@@ -16,7 +16,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif,"Apple C
 .thumbnail-preview figcaption{position:absolute;top:6px;left:6px;font-size:11px;background:#161b22;color:var(--text);border-radius:5px;padding:3px 7px}
 .thumbnail-editor{border-top:1px solid var(--line);padding:16px 0}
 .thumbnail-editor .actions>*{flex:1}
+.stage-panel{margin-top:16px}
+.stage-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+#stage-list{list-style:none;margin:12px 0 0;padding:0}
+.stage-item{border-top:1px solid var(--line);padding:10px 0;display:grid;grid-template-columns:minmax(100px,1.2fr) minmax(115px,auto) minmax(80px,1fr) auto;align-items:center;gap:8px 16px}
+.stage-info strong,.stage-info small{display:block}
+.stage-item .badge{justify-self:start}
+.stage-item .badge.pending,.stage-item .badge.skipped{color:var(--muted);background:transparent;border-color:var(--line)}
+.stage-meter{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+.stage-meter progress{flex:1;min-width:0;margin:0}
+.stage-retry{font-size:12px}
+.stage-error{grid-column:1/-1;color:#ffb9ab;overflow-wrap:anywhere}
 @media(max-width:640px){
+  .stage-item{grid-template-columns:minmax(0,1fr) auto;gap:8px 12px}
+  .stage-meter{grid-row:2;grid-column:1/-1}
+  .stage-retry{grid-column:1/-1;justify-self:start}
   input,select,textarea{font-size:16px}
   .nudges{display:grid;grid-template-columns:repeat(2,minmax(44px,1fr));gap:8px}
   .nudges button{min-width:44px;min-height:44px;font-size:14px}

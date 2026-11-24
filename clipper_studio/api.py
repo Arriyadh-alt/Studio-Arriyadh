@@ -23,6 +23,7 @@ from typing import Annotated, Literal
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import cv2
+import numpy as np
 
 from fastapi import FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
@@ -36,9 +37,9 @@ from starlette.background import BackgroundTask
 from shorts_clipper.branding import BrandingSettings, LOGO_LIMIT, normalize_logo, prepare_watermark, read_logo
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, apply_caption_edits, caption_height, to_ass, transcribe
 from shorts_clipper.downloader import download_analysis_media, download_section
-from shorts_clipper.moments import analyze_media
-from shorts_clipper.podcast import analyze_podcast
-from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source
+from shorts_clipper.moments import _audio, analyze_media
+from shorts_clipper.podcast import analyze_podcast, transcribe_all, voice_features
+from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source, source_track_kinds
 from shorts_clipper.speakers import frame_conversation
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
 from shorts_clipper.director import (STEP, DirectorOptions, plan_podcast_edit, Effects, caption_band, cut_source, effects_for, framing_fix, has_audio, hook_layout,
@@ -53,10 +54,12 @@ from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facec
 from shorts_clipper.tracking import analyze_reaction, keyframe_expression, layout_options, plan_reframe, to_output_time
 from shorts_clipper.youtube import YouTubeAccessError
 
-from .chat import METADATA_KEYS, ChatReplayError, fetch_chat, fetch_metadata
+from .chat import DISK_RESERVE_BYTES, METADATA_KEYS, ChatReplayError, fetch_chat, fetch_metadata
+from .media_analysis import SEGMENTED_MIN_SECONDS, analyze_ranges
 from .scheduler import Scheduler
 from .spikes import detect_spikes
-from .ranking import add_chat_moments, chat_moment, merge_moments
+from .ranking import add_chat_moments, chat_moment, merge_moments, refresh_suggestions
+from .stages import ANALYSIS_STAGES, RENDER_STAGES, RETRYABLE, AnalysisTracker, Checkpoints, Stage, mark_stage, stage_states
 
 
 logger = logging.getLogger(__name__)
@@ -344,6 +347,7 @@ class Store:
                     clip.setdefault("facecam", FacecamSpec().model_dump())
                     clip.setdefault("tracking", TrackingSpec().model_dump())
                     clip.setdefault("director", dict(LEGACY_DIRECTOR))
+                stage_states(job)
                 return job
             except FileNotFoundError:
                 raise HTTPException(404, "Job not found") from None
@@ -456,6 +460,16 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             job.update(fields)
             store.save(job)
 
+    def set_stage(jid, generation, name, status, progress=None, error=None, artifacts=(), **fields):
+        with store.lock:
+            job = active_job(jid, generation)
+            mark_stage(job, name, status, progress, error, artifacts)
+            job.update(fields)
+            store.save(job)
+
+    def checkpoints(jid):
+        return Checkpoints(store.root / jid / "checkpoints")
+
     def render_attempt(jid, cid, generation):
         with store.lock:
             job = active_job(jid, generation)
@@ -500,7 +514,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 transcript = None
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
-                    captions = transcribe(source, language=spec.get("language"), clip_end=duration)
+                    try:
+                        captions = transcribe(source, language=spec.get("language"), clip_end=duration)
+                    except Exception:
+                        logger.warning("Subtitles unavailable for %s/%s; rendering without them", jid, cid, exc_info=True)
                     caption_language = getattr(captions, "language", None)
                     if choice and choice.caption_edits:
                         transcript = deepcopy(captions)
@@ -555,7 +572,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         logger.warning("Reaction tracking unavailable for %s/%s", jid, cid, exc_info=True)
                 trigger = reaction.trigger if reaction is not None else None
                 if director.enabled:
-                    update(jid, generation, stage=f"{clip_label} · AI Director planning edits")
+                    set_stage(jid, generation, "ai_director", "processing",
+                              stage=f"{clip_label} · AI Director planning edits")
                     try:
                         if professional:
                             context = story_context(job, spec, caption_language or getattr(captions, "language", None),
@@ -774,9 +792,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                             plan.loop = {"status": "skipped", "reason": "Could not render loop"}
                             logger.warning("AI Director loop failed for %s/%s", jid, cid, exc_info=True)
                     update(jid, generation, stage=f"{clip_label} · AI Director quality check")
-                    director_result = plan_record(plan, director, quality_check(
-                        video, plan, shown, fixes, layout, tracking_result, export_fps=fps,
-                        preserve_audio=professional and not (plan.voiceover or plan.music or plan.sfx or plan.voice_clarity)))
+                    try:
+                        director_result = plan_record(plan, director, quality_check(
+                            video, plan, shown, fixes, layout, tracking_result, export_fps=fps,
+                            preserve_audio=professional and not (plan.voiceover or plan.music or plan.sfx or plan.voice_clarity)))
+                    except Exception:
+                        director_result = {"status": "unavailable"}
+                        logger.warning("AI Director quality check failed for %s/%s", jid, cid, exc_info=True)
                     peak = plan.map_time(peak) if peak is not None else None
                 record_operations(authenticity, plan, mixed=mixed_audio)
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
@@ -807,12 +829,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     clip["tracking_result"] = tracking_result
                     clip["needs_review"] = bool(tracking_result.get("needs_review"))
                     clip["director_result"] = director_result
+                    clip["director_stage"] = ("skipped" if not director.enabled else
+                                              "failed" if director_result["status"] == "unavailable" else "completed")
                     clip["authenticity"] = authenticity
                     revision = str(time.time_ns())
                     clip.update(status="ready", rendered_at=int(revision), file_url=base + "/video",
                                 download_url=base + "/download", thumbnail_url=base + "/thumbnail",
                                 thumbnail_version=revision, thumbnail_hook=hook, caption_language=caption_language)
                     clip.pop("previous_render", None)
+                    clip.pop("director_retry", None)
                     store.save(job)
         except Exception:
             raise
@@ -828,17 +853,27 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     return
                 clip.update(attempt=attempt, status="rendering", error=None)
                 job.update(status="running")
+                mark_stage(job, "final_rendering", "processing")
+                if attempt > 1:
+                    stage_states(job)["final_rendering"]["attempts"] += 1
                 store.save(job)
             try:
                 render_attempt(jid, cid, generation)
                 return
-            except (WorkCancelled, YouTubeAccessError):
+            except WorkCancelled:
                 raise
             except Exception as error:
                 with store.lock:
                     job = active_job(jid, generation)
                     clip = next((c for c in job["clips"] if c["id"] == cid), None)
                     if clip is None:
+                        return
+                    if isinstance(error, YouTubeAccessError) and not clip.get("director_retry"):
+                        raise
+                    if clip.get("director_retry") and (attempt == 3 or isinstance(error, YouTubeAccessError)):
+                        clip.pop("director_retry")
+                        clip.update(status="ready", error=None, director_stage="failed")
+                        store.save(job)
                         return
                     clip.update(status="failed" if attempt == 3 else "rendering",
                                               error=str(error))
@@ -847,19 +882,53 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if attempt < 3:
                     time.sleep(attempt * 2)
 
+    def settle_stages(job, error="The stage did not record a result. Retry this stage."):
+        for name, state in stage_states(job).items():
+            if name == "chat_analysis" and job.get("chat_retrying"):
+                continue
+            if state["status"] in ("processing", "retrying"):
+                mark_stage(job, name, "failed", error=state["error"] or error)
+
     def finish(jid, generation):
         with store.lock:
             job = active_job(jid, generation)
-            if not job.get("analysis_complete"):
+            target = job.get("retry_stage")
+            if not job.get("analysis_complete") or (
+                    target and stage_states(job)[target]["status"] in ("processing", "retrying")):
                 return
             total = len(job["clips"])
             done = sum(c["status"] in ("ready", "failed", "cancelled") for c in job["clips"])
             job["progress"] = 0.15 + 0.85 * done / total if total else 1
             if done < total:
+                states = stage_states(job)
+                states["final_rendering"]["progress"] = round(100 * done / total)
+                if states["ai_director"]["status"] == "processing":
+                    states["ai_director"]["progress"] = round(100 * done / total)
+            elif total:
+                ready = [c for c in job["clips"] if c["status"] == "ready"]
+                failed_clips = [c for c in job["clips"] if c["status"] == "failed"]
+                render_status = (("partially_completed" if ready else "failed") if failed_clips else
+                                 ("completed" if ready else "skipped"))
+                final = mark_stage(job, "final_rendering", render_status, 100 * len(ready) / total,
+                                   "One or more clips could not be rendered." if failed_clips else None)
+                final["artifacts"] = [f"{c['id']}/clip.mp4" for c in ready]
+                directed = [c for c in ready if c.get("director_stage") == "completed"]
+                failures = [c for c in ready if c.get("director_stage") == "failed"]
+                director_status = (("partially_completed" if directed else "failed") if failures else
+                                   ("completed" if directed else "skipped"))
+                director = mark_stage(job, "ai_director", director_status,
+                                      100 * len(directed) / (len(directed) + len(failures)) if failures else None,
+                                      "AI Director was unavailable for one or more clips." if failures else None)
+                director["artifacts"] = [f"job.json#clips/{c['id']}/director_result" for c in directed]
+            elif not job["moments"]:
+                for name in RENDER_STAGES:
+                    mark_stage(job, name, "skipped")["artifacts"] = []
+            if done < total:
                 store.save(job)
                 return
+            settle_stages(job)
             failed = any(c["status"] == "failed" for c in job["clips"])
-            job.update(status="completed_with_errors" if failed else "completed", progress=1,
+            job.update(status="completed_with_errors" if failed else "completed", progress=1, retry_stage=None,
                        stage="Finished" if job["clips"] else (f"{len(job['moments'])} moments ready for review"
                              if job["moments"] else "No viral moments found"),
                        elapsed_seconds=round(time.time() - job.get("processing_started", time.time()), 2))
@@ -876,6 +945,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 job = active_job(jid, generation)
                 job.update(status="failed", stage="Failed", error=message, generation=generation + 1,
                            chat_retrying=False)
+                settle_stages(job, message)
                 for clip in job["clips"]:
                     if clip["status"] in ("queued", "rendering"):
                         clip.update(status="failed", error=message)
@@ -889,9 +959,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
 
     def preflight(jid, generation):
         try:
-            update(jid, generation, status="running", stage="Checking stream metadata", processing_started=time.time())
             with store.lock:
                 job = active_job(jid, generation)
+                mark_stage(job, "source_validation", "processing")
+                job.update(status="running", stage="Checking stream metadata",
+                           processing_started=job.get("processing_started", time.time()))
+                store.save(job)
             if job.get("upload"):
                 path = upload_path(job)
                 info = {"id": job["upload"], "title": Path(job.get("filename") or "Uploaded video").stem,
@@ -904,6 +977,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 metadata_cache[jid, generation] = info
                 job.update(status="queued", stage="Queued for analysis",
                            metadata={key: info.get(key) for key in METADATA_KEYS})
+                mark_stage(job, "source_validation", "completed", artifacts=("job.json#metadata",))
                 store.save(job)
                 pending.put((jid, None, generation))
         except WorkCancelled:
@@ -933,6 +1007,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             active_job(jid, generation)
 
     def analyze_chat(jid, generation, job, info, retry_dir=None):
+        name = "chat_analysis/result.json"
+        cache = checkpoints(jid)
+        if retry_dir is None and (saved := cache.read(name)) is not None:
+            with store.lock:
+                latest = active_job(jid, generation)
+                record_chat(latest, saved["moments"], saved["fields"], write_checkpoint=False)
+                store.save(latest)
+            return saved["moments"], saved["fields"]
+        set_stage(jid, generation, "chat_analysis", "processing")
         started = time.monotonic()
         try:
             directory = retry_dir if retry_dir is not None else store.root / jid / "chat"
@@ -953,40 +1036,155 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         fields.update(chat_error=error, chat_warning=CHAT_FALLBACK_WARNING if error else None,
                       chat_seconds=round(time.monotonic() - started, 2))
         if retry_dir is None:
-            update(jid, generation, **fields)
+            with store.lock:
+                latest = active_job(jid, generation)
+                record_chat(latest, moments, fields)
+                store.save(latest)
         return moments, fields
+
+    def record_chat(job, moments, fields, write_checkpoint=True):
+        jid = job["id"]
+        name = "chat_analysis/result.json"
+        artifacts = []
+        if "activity" in fields:
+            if write_checkpoint:
+                checkpoints(jid).write(name, dict(moments=moments, fields=fields))
+            artifacts.append(f"checkpoints/{name}")
+            if (store.root / jid / "chat/buckets.sqlite").is_file():
+                artifacts.append("chat/buckets.sqlite")
+        error = fields["chat_error"]
+        mark_stage(job, "chat_analysis", ("partially_completed" if artifacts else "failed") if error else "completed",
+                   100 if artifacts and error else None, error, artifacts)
+        job.update(fields)
 
     def analyze_ai(jid, generation, job, duration, podcast, upload):
         count, lead = job["request"]["clips"], job["request"]["lead"]
-        directory = store.root / jid / "analysis"
+        cache = checkpoints(jid)
+        check = lambda: check_job(jid, generation)
+        target = job.get("retry_stage")
+        can_reuse = not target or target == "viral_moment_detection"
+        if can_reuse and (saved := cache.read("ai-result.json")) is not None:
+            with store.lock:
+                latest = active_job(jid, generation)
+                if isinstance(saved, dict):
+                    current = stage_states(latest)
+                    for name, state in saved["stages"].items():
+                        if current[name]["status"] in ("pending", "processing", "retrying"):
+                            mark_stage(latest, name, state["status"], state["progress"], state["error"],
+                                       state["artifacts"])
+                latest["ai_error"] = None
+                store.save(latest)
+            return (saved["moments"] if isinstance(saved, dict) else saved), None
+
+        def publish(name, status, progress=None, error=None, artifacts=()):
+            set_stage(jid, generation, name, status, progress, error, artifacts)
+
+        needed = {target}
+        if podcast and target == "transcript_generation":
+            needed.add("audio_analysis")
+        frozen = {name for name in ANALYSIS_STAGES if name not in needed and stage_states(job)[name]["status"] in RETRYABLE}
+        tracking = AnalysisTracker(cache, publish, check, frozen if target in ANALYSIS_STAGES else ())
+        language = job["request"].get("language")
+        language = None if language == "auto" else language
+        speakers = (job["request"].get("podcast") or {}).get("speakers")
+        stage = "AI understanding the conversation" if podcast else "AI analyzing video, audio & speech"
+
+        def progress(fraction, detail):
+            with store.lock:
+                latest = active_job(jid, generation)
+                latest.update(stage=stage, progress=max(latest["progress"], .2 + .65 * max(0, min(1, fraction))),
+                              analysis_detail=detail)
+                store.save(latest)
+
+        def media(name, fetch, *, refresh=False, track_kinds=None, required_tracks=()):
+            def download():
+                owner = "video_analysis" if refresh or required_tracks else "audio_analysis"
+                if owner not in tracking.started:
+                    publish(owner, "processing")
+                    tracking.started.add(owner)
+                return fetch()
+
+            paths = cache.media(name, download, refresh=refresh, track_kinds=track_kinds,
+                                required_tracks=required_tracks)
+            artifacts = [f"checkpoints/{path.relative_to(cache.root)}" for path in paths if path and
+                         path.is_relative_to(cache.root)]
+            if artifacts:
+                with store.lock:
+                    latest = active_job(jid, generation)
+                    state = stage_states(latest)["audio_analysis"]
+                    state["artifacts"] = list(dict.fromkeys([*state["artifacts"], *artifacts]))
+                    store.save(latest)
+            return paths
+
         try:
-            update(jid, generation, stage="Preparing the source for AI analysis" if upload
-                   else "Downloading audio for AI analysis", progress=.15)
-            audio, video = (local_analysis_media(upload, directory) if upload else
-                            download_analysis_media(job["url"], directory,
-                                                    should_continue=lambda: check_job(jid, generation)))
-            stage = "AI understanding the conversation" if podcast else "AI analyzing video, audio & speech"
-            update(jid, generation, stage=stage)
-            language = job["request"].get("language")
-            language = None if language == "auto" else language
+            if duration >= SEGMENTED_MIN_SECONDS and not upload:
+                def fetch(segment):
+                    folder = cache.file(f"media/{segment.key}")
+                    required = ("video",) if target == "video_analysis" else ()
+                    if required:
+                        folder = folder / f"video-{uuid.uuid4().hex}"
 
-            def progress(fraction, text):
-                update(jid, generation, stage=stage,
-                       progress=.2 + .65 * max(0, min(1, fraction)), analysis_detail=text)
+                    def download():
+                        if shutil.disk_usage(store.root).free < DISK_RESERVE_BYTES:
+                            raise YouTubeAccessError("Analysis paused to preserve available disk space.")
+                        folder.mkdir(parents=True, exist_ok=True)
+                        return (download_section(job["url"], folder, segment.start, segment.end,
+                                                 max_height=240, analysis=True),)
 
-            if podcast:
-                return analyze_podcast(audio, video, duration, clips=count, language=language, progress=progress,
-                                       speakers=(job["request"].get("podcast") or {}).get("speakers"))[:count], None
-            return analyze_media(audio, video, duration, clips=count, lead=lead,
-                                 language=language, progress=progress)[:count], None
+                    try:
+                        source, = media(f"media/{segment.key}.json", download, track_kinds=source_track_kinds,
+                                        required_tracks=required)
+                        return source
+                    except WorkCancelled:
+                        raise
+                    except Exception:
+                        if required:
+                            shutil.rmtree(folder, ignore_errors=True)
+                        raise
+
+                moments = analyze_ranges(duration, count, lead, language, fetch=fetch, checkpoint=tracking.run,
+                                         expect=tracking.expect, progress=progress, check=check,
+                                         podcast=podcast, speakers=speakers)
+            else:
+                cache.root.mkdir(exist_ok=True)
+                directory = cache.file("source")
+                progress(0, "Preparing source media")
+                audio, video = media("source.json", lambda: local_analysis_media(upload, directory) if upload else
+                                     download_analysis_media(job["url"], directory, should_continue=check))
+                if audio is not None and video is None and target == "video_analysis" and not upload:
+                    audio, video = media("source.json", lambda: download_analysis_media(
+                        job["url"], directory, should_continue=check, prior_audio=audio), refresh=True)
+                if podcast:
+                    moments = analyze_podcast(
+                        audio, video, duration, clips=count, language=language, progress=progress, speakers=speakers,
+                        transcribe_fn=lambda path, lang: tracking.run("transcript_generation", "conversation",
+                                                                      lambda: transcribe_all(path, lang)),
+                        features_fn=lambda path, length: np.asarray(tracking.run(
+                            "audio_analysis", "voices", lambda: voice_features(path, length).tolist())),
+                        audio_fn=lambda path, length: tracking.run("audio_analysis", "scan",
+                                                                   lambda: [a.tolist() for a in _audio(path, length)]))
+                else:
+                    moments = analyze_media(audio, video, duration, clips=count, lead=lead, language=language,
+                                            progress=progress, checkpoint=tracking.run, expect=tracking.expect)
+                    if audio is not None and video is None and "video_analysis" not in tracking.frozen:
+                        publish("video_analysis", "processing")
+                        tracking.errors["video_analysis"].add("source")
+            check()
+            tracking.finish()
+            with store.lock:
+                states = stage_states(active_job(jid, generation))
+                stage_results = {name: states[name] for name in ANALYSIS_STAGES}
+            cache.write("ai-result.json", dict(moments=moments[:count], stages=stage_results))
+            update(jid, generation, ai_error=None)
+            return moments[:count], None
         except WorkCancelled:
             raise
         except Exception as error:
+            check()
+            tracking.finish(required_error=error)
             update(jid, generation, ai_error=str(error) if isinstance(error, YouTubeAccessError)
                    else "AI analysis was unavailable. Try this replay again.")
             return [], error
-        finally:
-            shutil.rmtree(directory, ignore_errors=True)
 
     def retry_chat(jid, generation, job):
         directory = store.root / jid / "chat"
@@ -1003,6 +1201,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     if (new_count < old_count or (fields["chat_error"] and
                             (not job.get("chat_error") or not previous_bins <= candidate_bins))):
                         logger.info("Retaining prior chat replay for %s: retry covered fewer messages or intervals", jid)
+                        error = job.get("chat_error")
+                        mark_stage(job, "chat_analysis", "partially_completed" if error else "completed",
+                                   error=error)
                         job["chat_retrying"] = False
                         store.save(job)
                         return
@@ -1014,10 +1215,14 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     if buckets.is_file():
                         buckets.replace(directory / buckets.name)
                     if (chat or not fields["chat_error"]) and job["status"] == "failed" and not job.get("analysis_complete"):
-                        job.update(analysis_complete=True, status="completed", progress=1, error=None,
+                        job.update(analysis_complete=True, status="completed", progress=1, error=None, retry_stage=None,
                                    stage=f"{len(job['moments'])} moments ready for review" if job["moments"]
                                    else "No viral moments found")
-                job.update(fields, chat_retrying=False)
+                record_chat(job, chat, fields)
+                job["chat_retrying"] = False
+                if job.get("analysis_complete"):
+                    mark_stage(job, "viral_moment_detection", "completed", artifacts=("job.json#moments",))
+                    settle_stages(job)
                 store.save(job)
 
     def analyze(jid, generation):
@@ -1025,7 +1230,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             with store.lock:
                 job = active_job(jid, generation)
                 retrying = job.get("chat_retrying", False)
-                info = None if retrying else metadata_cache.pop((jid, generation))
+                info = None if retrying else metadata_cache.pop((jid, generation), None)
             if retrying:
                 try:
                     retry_chat(jid, generation, job)
@@ -1033,15 +1238,21 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     raise
                 except Exception:
                     logger.warning("Could not save chat retry for job %s", jid, exc_info=True)
-                    update(jid, generation, chat_retrying=False, chat_error="Could not save the chat retry.")
+                    set_stage(jid, generation, "chat_analysis", "failed", error="Could not save the chat retry.",
+                              chat_retrying=False)
                 return
             podcast, upload = is_podcast(job), upload_path(job)
             count, lead = job["request"]["clips"], job["request"]["lead"]
-            duration = info["duration"]
+            duration = job["metadata"]["duration"]
             chat, ai, fields, ai_error = [], [], {}, None
             update(jid, generation, status="running", stage="Fetching chat replay" if not (podcast or upload)
                    else "Preparing AI analysis")
             if podcast or upload:
+                set_stage(jid, generation, "chat_analysis", "skipped")
+                ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
+            elif (job.get("retry_stage") in ANALYSIS_STAGES and job.get("chat_error") and
+                    not checkpoints(jid).file("chat_analysis/result.json").is_file()):
+                fields = {"chat_error": job["chat_error"]}
                 ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
             elif job["request"].get("ai_analysis", False):
                 with ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-replay") as worker:
@@ -1050,21 +1261,42 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     chat, fields = chat_task.result()
             else:
                 chat, fields = analyze_chat(jid, generation, job, info)
-                if fields["chat_error"]:
+                if fields["chat_error"] or job.get("retry_stage") in ANALYSIS_STAGES:
                     ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
+                else:
+                    for name in ANALYSIS_STAGES:
+                        set_stage(jid, generation, name, "skipped")
             if ai_error and (podcast or upload or (fields.get("chat_error") and not chat)):
-                raise ai_error
+                if not job.get("analysis_complete"):
+                    raise ai_error
+                update(jid, generation, retry_stage=None)
+                finish(jid, generation)
+                return
+            set_stage(jid, generation, "viral_moment_detection", "processing")
             duration = fields.get("metadata", {}).get("duration", duration)
-            moments = merge_moments(ai, chat, duration, lead)
             with store.lock:
                 job = active_job(jid, generation)
-                clips = [] if job["request"].get("review", False) else [
-                    moment_clip(job, m, i) for i, m in enumerate(moments[:count], 1)]
-                job.update(clips=clips, moments=moments, ai_candidates=ai, analysis_complete=True,
-                           stage="Queued for rendering")
+                if job.get("analysis_complete"):
+                    existing_ids = {moment["id"] for moment in job["moments"]}
+                    clips = job["clips"]
+                    moments = refresh_suggestions(job["moments"], ai, chat, duration, lead, clips=clips)
+                    new_moments = [moment for moment in moments if moment["id"] not in existing_ids]
+                else:
+                    moments = merge_moments(ai, chat, duration, lead)
+                    new_moments, clips = moments, []
+                if not job["request"].get("review", False) and len(clips) < count:
+                    number = max((clip_number(job, clip) for clip in clips), default=0)
+                    clips.extend(moment_clip(job, moment, number + i)
+                                 for i, moment in enumerate(new_moments[:count - len(clips)], 1))
+                job.update(clips=clips, moments=moments, analysis_complete=True, stage="Queued for rendering",
+                           retry_stage=None)
+                if ai_error is None:
+                    job["ai_candidates"] = ai
+                mark_stage(job, "viral_moment_detection", "completed", artifacts=("job.json#moments",))
                 store.save(job)
                 for clip in clips:
-                    pending.put((jid, clip["id"], generation))
+                    if clip["status"] == "queued":
+                        pending.put((jid, clip["id"], generation))
             finish(jid, generation)
         except WorkCancelled:
             pass
@@ -1109,20 +1341,25 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         clip.setdefault("number", number)
                     store.save(job)
                 if job.get("chat_retrying"):
+                    mark_stage(job, "chat_analysis", "retrying")
+                    store.save(job)
                     pending.put((job["id"], None, job.get("generation", 0)))
                 if job["status"] in ACTIVE_STATUSES:
                     generation = job.get("generation", 0)
                     job.update(status="queued", stage="Resuming after restart", error=None,
                                analysis_complete=job.get("analysis_complete", bool(job["clips"])))
-                    if job["analysis_complete"]:
+                    for name, state in stage_states(job).items():
+                        if state["status"] == "processing":
+                            mark_stage(job, name, "retrying")
+                    if job["analysis_complete"] and not job.get("retry_stage"):
                         for clip in job["clips"]:
                             if clip["status"] in ("queued", "rendering"):
                                 clip.update(status="queued", error=None)
                                 pending.put((job["id"], clip["id"], generation), priority=clip.get("render_priority", False))
                     else:
-                        pending.put((job["id"], None, generation), preflight=True)
+                        pending.put((job["id"], None, generation), preflight=not job.get("metadata"))
                     store.save(job)
-                    if job["analysis_complete"]:
+                    if job["analysis_complete"] and not job.get("retry_stage"):
                         finish(job["id"], generation)
         pending.start()
         yield
@@ -1275,6 +1512,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                    progress=0, metadata=None, activity=[], clips=[], error=None, generation=0, analysis_complete=False,
                    upload=request.upload, filename=filename, rights=None)
         job["request"]["director"] = director_config(request.editing_mode, request.director)
+        stage_states(job)
         with store.lock:
             store.save(job)
             pending.put((jid, None, 0), preflight=True)
@@ -1303,8 +1541,52 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     job.get("chat_retrying") or is_podcast(job) or not job.get("url") or not job.get("metadata")):
                 raise HTTPException(409, "Chat analysis can only be retried for a finished YouTube job.")
             job["chat_retrying"] = True
+            mark_stage(job, "chat_analysis", "retrying")
             store.save(job)
             pending.put((jid, None, job.get("generation", 0)))
+        return {"id": jid}
+
+    @app.post("/api/jobs/{jid}/stages/{name}/retry", status_code=202)
+    def retry_stage(jid: str, name: Stage):
+        with store.lock:
+            job = store.get(jid)
+            if (job["status"] in (*ACTIVE_STATUSES, "cancelled") or job.get("chat_retrying") or
+                    stage_states(job)[name]["status"] not in RETRYABLE):
+                raise HTTPException(409, "Wait until the job stops, then retry a failed or partially completed stage.")
+            if name == "chat_analysis":
+                return queue_chat_retry(jid)
+            generation = job.get("generation", 0)
+            if name in RENDER_STAGES:
+                clips = [clip for clip in job["clips"] if (clip["status"] == "failed" if name == "final_rendering"
+                         else clip["status"] == "ready" and clip.get("director_stage") == "failed")]
+                if not clips:
+                    raise HTTPException(409, "There are no clips to retry for this stage.")
+                for clip in clips:
+                    clip.update(status="queued", error=None)
+                    if name == "ai_director":
+                        clip["director_retry"] = True
+                    pending.put((jid, clip["id"], generation), priority=True)
+            else:
+                job["retry_stage"] = name
+                pending.put((jid, None, generation), preflight=name == "source_validation")
+            mark_stage(job, name, "retrying")
+            job.update(status="queued", stage="Retrying failed stage", error=None)
+            store.save(job)
+        return {"id": jid}
+
+    @app.post("/api/jobs/{jid}/resume", status_code=202)
+    def resume_analysis(jid: str):
+        with store.lock:
+            job = store.get(jid)
+            if (job["status"] not in ("failed", "cancelled") or job.get("analysis_complete") or
+                    job.get("chat_retrying")):
+                raise HTTPException(409, "Only interrupted analysis can be resumed.")
+            for name, state in stage_states(job).items():
+                if state["status"] in ("processing", "failed"):
+                    mark_stage(job, name, "retrying")
+            job.update(status="queued", stage="Resuming analysis", error=None)
+            store.save(job)
+            pending.put((jid, None, job.get("generation", 0)), preflight=not job.get("metadata"))
         return {"id": jid}
 
     @app.post("/api/jobs/{jid}/cancel")
@@ -1320,6 +1602,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     previous = clip.pop("previous_render", None)
                     if previous is not None:
                         clip.update(previous, status="ready", error=None)
+                    elif clip.pop("director_retry", False):
+                        clip.update(status="ready", error=None)
                     else:
                         clip.update(status="cancelled", error=None)
             store.save(job)

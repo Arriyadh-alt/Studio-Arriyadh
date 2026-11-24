@@ -17,6 +17,7 @@ class Scheduler:
         self.render_workers = render_workers
         self.condition = threading.Condition()
         self.analysis = deque()
+        self.analyzing = set()
         self.checks = deque()
         self.priority = deque()
         self.renders = OrderedDict()
@@ -46,7 +47,11 @@ class Scheduler:
                 if kind == "metadata" and self.checks:
                     return self.checks.popleft()
                 if kind == "analysis" and self.analysis:
-                    return self.analysis.popleft()
+                    for index, item in enumerate(self.analysis):
+                        if item[0] not in self.analyzing:
+                            del self.analysis[index]
+                            self.analyzing.add(item[0])
+                            return item
                 if kind == "render":
                     if self.priority:
                         return self.priority.popleft()
@@ -72,6 +77,8 @@ class Scheduler:
                 logging.exception("Unhandled scheduler task error")
             finally:
                 with self.condition:
+                    if kind == "analysis":
+                        self.analyzing.remove(item[0])
                     self.outstanding -= 1
                     self.condition.notify_all()
 

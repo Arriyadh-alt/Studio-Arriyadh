@@ -29,7 +29,9 @@ use its cache. Caption generation runs on CPU. `/docs` serves OpenAPI docs.
 
 `CLIPPER_DATA_DIR` defaults to `~/clipper-data` and must be outside this repo.
 Each job has an atomically replaced `job.json`, disk-backed chat buckets, and clip folders
-with `clip.mp4` and `thumbnail.jpg`. Intermediate section downloads are removed.
+with `clip.mp4` and `thumbnail.jpg`. The job's `checkpoints/` directory keeps
+analysis media, scan data, and transcripts for resume and stage retry. Temporary
+render files are removed.
 Use **one uvicorn process, without reload**. Independent bounded thread pools run
 metadata preflight (default 3), highlight analysis (3), and rendering (2).
 Configure `CLIPPER_METADATA_WORKERS`, `CLIPPER_ANALYSIS_WORKERS`, and
@@ -46,10 +48,20 @@ and read/modify/write operations share a process-local reentrant lock; files are
 atomically replaced. Multiple server processes sharing one data directory are
 not supported.
 
-On restart, interrupted analysis jobs are re-queued for preflight/analysis;
-interrupted queued/rendering clips are re-queued without redoing ready or failed
-clips. A completed analysis is persisted even when it found no spikes.
-Cancelled jobs remain cancelled. This is a local backend, with no
+On restart, interrupted analysis jobs resume from their saved media and analysis
+artifacts; source validation is not repeated once it has succeeded. Interrupted
+queued/rendering clips are re-queued without redoing ready or failed clips.
+Completed analysis is persisted even when it found no moments. Failed or
+cancelled analysis can be resumed manually. The dashboard shows each stage's
+status, progress, and attempts, and provides retry controls for failed or
+partially completed stages.
+
+YouTube sources at least one hour long are scanned in 15-minute ranges with
+overlapping margins. For gaming, only candidate peaks from the global scan
+are transcribed. For podcasts, source-relative transcript chunks are joined before
+identifying speakers, topics, and complete-conversation moments. Long jobs are
+limited by infrastructure (e.g. source access and available disk), not a fixed
+stream-duration ceiling. This is a local backend, with no
 authentication: do not expose it publicly without access controls and quotas.
 
 ## Optional YouTube authentication
@@ -67,8 +79,9 @@ is copied before use. Text secrets are written under
 temporary directory and writable 0600 cookie file, cleaned up after yt-dlp closes;
 refreshed cookies are sanitized and atomically saved to file-path sources with
 mode 0600 only after exception-free calls. Any failure preserves the source. The source directory must be
-writable for the lock and replacement file. Calls sharing that file are serialized
-to avoid losing rotated cookies; environment text is never written back.
+writable for the lock and replacement file. Calls that update the shared file are
+serialized to avoid losing rotated cookies. Long chat replay downloads use a read-only
+snapshot of the cookie file and do not hold its lock. Environment text is never written back.
 Without either setting, cookie behavior is
 unchanged. The CLI's `--cookies FILE` overrides both environment settings.
 
@@ -92,6 +105,13 @@ and use only media you are authorized to access.
 - `POST /api/jobs/{id}/chat/retry` → 202 `{id}` for a finished YouTube job
   that uses chat. Retries chat without re-running AI or changing rendered clips,
   and exposes `chat_retrying` while queued or running.
+- `POST /api/jobs/{id}/stages/{name}/retry` → 202 `{id}` for a failed or
+  partially completed stage. Returns 409 while the job is active or if that
+  stage is not retryable. The stage's names and records are in the job's
+  `stages` object; each record includes status, progress (0–100), attempts,
+  error, and job-relative artifact references.
+- `POST /api/jobs/{id}/resume` → 202 `{id}` to resume incomplete analysis
+  after a failure or cancellation; returns 409 otherwise.
 - `PATCH /api/jobs/{id}/moments/{mid}` accepts `{status?,start?,end?}`; status is
   `suggested`, `selected`, or `rejected`. Boundaries must fit the replay and be at
   most 60 seconds (422 otherwise); rendered status cannot be reverted (409).
