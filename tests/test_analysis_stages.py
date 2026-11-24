@@ -198,7 +198,7 @@ def test_transcript_retry_refreshes_untouched_suggestion_only(tmp_path, monkeypa
         assert kept == touched
 
 
-def prepare_retry(monkeypatch):
+def prepare_retry(monkeypatch, *, new_on_retry=False):
     monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": 240})
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 240}, []))
     monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([], []))
@@ -216,11 +216,30 @@ def prepare_retry(monkeypatch):
         except RuntimeError:
             title = "Audio only"
         found = title == "Recovered speech"
-        return [dict(start=81 if found else 80, end=120, peak=100, score=90 if found else 80, title=title),
-                dict(start=160, end=195, peak=175, score=60, title=title)]
+        moments = [dict(start=81 if found else 80, end=120, peak=100, score=90 if found else 80, title=title)]
+        if found or not new_on_retry:
+            moments.append(dict(start=160, end=195, peak=175, score=60, title=title))
+        return moments
 
     monkeypatch.setattr("clipper_studio.api.download_analysis_media", lambda *a, **k: (None, None))
     monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
+
+
+def test_autopilot_stage_retry_renders_new_moments_without_replacing_ready_clip(tmp_path, monkeypatch, media):
+    prepare_retry(monkeypatch, new_on_retry=True)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        request = {"url": REPLAY_URL, "review": False, "clips": 2, "captions": False}
+        jid = client.post("/api/jobs", json=request).json()["id"]
+        base = f"/api/jobs/{jid}"
+        app.state.pending.join()
+        first, = client.get(base).json()["clips"]
+        assert first["status"] == "ready"
+        assert client.post(f"{base}/stages/transcript_generation/retry").status_code == 202
+        app.state.pending.join()
+        original, added = client.get(base).json()["clips"]
+        assert original == first
+        assert added["status"] == "ready" and added["number"] == 2 and added["peak"] == 175
 
 
 def test_resume_waits_for_inflight_upload_conversion_without_blocking_other_jobs(tmp_path, monkeypatch):

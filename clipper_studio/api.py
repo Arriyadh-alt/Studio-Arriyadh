@@ -1265,10 +1265,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             with store.lock:
                 job = active_job(jid, generation)
                 if job.get("analysis_complete"):
+                    existing_ids = {moment["id"] for moment in job["moments"]}
                     moments, clips = refresh_suggestions(job["moments"], moments), job["clips"]
+                    new_moments = [moment for moment in moments if moment["id"] not in existing_ids]
                 else:
-                    clips = [] if job["request"].get("review", False) else [
-                        moment_clip(job, m, i) for i, m in enumerate(moments[:count], 1)]
+                    new_moments, clips = moments, []
+                if not job["request"].get("review", False) and len(clips) < count:
+                    number = max((clip_number(job, clip) for clip in clips), default=0)
+                    clips.extend(moment_clip(job, moment, number + i)
+                                 for i, moment in enumerate(new_moments[:count - len(clips)], 1))
                 job.update(clips=clips, moments=moments, analysis_complete=True, stage="Queued for rendering",
                            retry_stage=None)
                 if ai_error is None:
