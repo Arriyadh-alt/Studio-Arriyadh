@@ -28,7 +28,8 @@ globalThis.CaptionControls = (() => {
     const result = options();
     root.querySelectorAll('[data-caption]').forEach(input => {
       const key = input.dataset.caption;
-      const value = input.type==='checkbox' ? input.checked : key==='size' ? Number(input.value) : input.value;
+      const value = input.type==='checkbox' ? input.checked : input.type==='color' ? input.value.toUpperCase() :
+        key==='size' ? Number(input.value) : input.value;
       if(key==='language')result.language=value; else result.caption_style[key]=value;
     });
     return result;
