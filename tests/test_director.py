@@ -108,6 +108,18 @@ def test_hook_title_and_framing_fix():
     assert framing_fix(CaptionStyle(position="bottom"), OutputRect(24, 24, 450, 450))[1] is None
 
 
+@pytest.mark.parametrize("style", ["static", "teaser", "story"])
+def test_long_hooks_wrap_in_every_title_style(style):
+    import re
+
+    text = "What was the hardest part of learning to compete?"
+    ass = hook_title_ass(None, text, 3, static=style == "static", story=style == "story")
+    dialogue = next(line for line in ass.splitlines() if line.startswith("Dialogue:"))
+    label = re.sub(r"\{[^}]*}", "", dialogue.split(",", 9)[9])
+    assert r"\N" in label
+    assert label.replace(r"\N", " ") == (text if style == "static" else text.upper())
+
+
 def test_hook_band_clears_a_top_corner_facecam():
     facecam = OutputRect(414, 24, 450, 520)
     top, bottom = hook_band("Thank you", facecam, CaptionStyle())

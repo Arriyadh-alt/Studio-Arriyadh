@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .captions import STOPWORDS, Caption, chunk_words, literal_text, _classic_ass, caption_height as measure_caption_height
+from .captions import STOPWORDS, Caption, chunk_words, literal_text, style_font, _classic_ass, caption_height as measure_caption_height
 from .video import professional_video_options
 
 STEP = 0.1
@@ -564,12 +564,31 @@ def remap_captions(captions, plan: Plan) -> list:
 
 HOOK_SIZE = 88
 STORY_SIZE = 96
+HOOK_LINE_WIDTH = (1080 - 2 * 110 - 2 * 14) / 1.08
 
 
-def hook_height(text: str, size=HOOK_SIZE) -> int:
+def _hook_wrap(text, size, static):
+    words = literal_text(text if static else text.upper()).split()
+    while True:
+        font = style_font("Montserrat", size)
+        width = font.getlength if font else lambda line: len(line) * size
+        if size == 1 or all(width(word) <= HOOK_LINE_WIDTH for word in words):
+            break
+        size -= 1
+    lines, line = [], []
+    for word in words:
+        if line and width(" ".join([*line, word])) > HOOK_LINE_WIDTH:
+            lines.append(line)
+            line = []
+        line.append(word)
+    lines.append(line)
+    return size, lines
+
+
+def hook_height(text: str, size=HOOK_SIZE, *, static=False) -> int:
     """Height of the hook banner box at its peak scale, in 1080x1920 output pixels."""
-    lines = max(1, math.ceil(len(text) * size * 0.62 / 860))
-    return round((lines * size * 1.25 + 28) * 1.08)
+    size, lines = _hook_wrap(text, size, static)
+    return round((len(lines) * size * 1.25 + 28) * 1.08)
 
 
 def _bands_overlap(a, b, gap=0):
@@ -582,17 +601,18 @@ def hook_layout(hook, rect, style, captions, caption_limit=None):
     active = [c for c in captions if c.start < end and c.end > 0]
     height = measure_caption_height(active, style, caption_limit) if style is not None else 0
     band = hook_band(hook["text"], rect, style if active else None, preferred=760 if story else 380,
-                     size=STORY_SIZE if story else HOOK_SIZE, caption_height=height)
+                     size=STORY_SIZE if story else HOOK_SIZE, caption_height=height,
+                     static=hook.get("style") == "source")
     return band, height, bool(active)
 
 
-def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE, caption_height=None):
+def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE, caption_height=None, *, static=False):
     """Vertical band for the hook banner clear of the facecam and the captions."""
     regions = [(60,1860)] if rect is None else [(60,min(1860,rect.y-20)), (max(60,rect.y+rect.h+20),1860)]
     regions = [(a,b) for a,b in regions if b > a]
     if not regions:
         raise ValueError("No title space outside the facecam")
-    height = min(hook_height(text, size), max(b-a for a,b in regions))
+    height = min(hook_height(text, size, static=static), max(b-a for a,b in regions))
     blocked = caption_band(style, getattr(style,"size",80), caption_height) if style is not None else None
     candidates = []
     for a,b in regions:
@@ -615,8 +635,9 @@ def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position
     A storytelling hook is larger, white, and pops in word by word with the streamer's name in yellow."""
     ass_text = ass_text or _classic_ass([])
     size = STORY_SIZE if story else HOOK_SIZE
-    while max_height is not None and size > 1 and hook_height(text,size) > max_height:
+    while max_height is not None and size > 1 and hook_height(text, size, static=static) > max_height:
         size -= 1
+    size, lines = _hook_wrap(text, size, static)
     if top is not None:
         alignment, margin = 8, int(top)
     else:
@@ -624,28 +645,26 @@ def hook_title_ass(ass_text: str | None, text: str, end: float, caption_position
     style = (f"Style: Hook,Montserrat Black,{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00101317,-1,0,0,0,100,100,0,0,"
              f"3,14,0,{alignment},110,110,{margin},1\n")
     ass_text = ass_text.replace("\n\n[Events]", "\n" + style + "\n[Events]", 1)
-    label = literal_text(text.upper())
+    label = r"\N".join(" ".join(line) for line in lines)
     banner = (r"{\fad(80,160)\fscx70\fscy70\t(0,160,\fscx108\fscy108)\t(160,260,\fscx100\fscy100)\1c&H4DE3FF&}" + label)
     if static:
-        banner = r"{\fad(180,250)}" + literal_text(text)
+        banner = r"{\fad(180,250)}" + label
     elif story:
-        tokens = text.upper().split()
         named = set((highlight or "").upper().split())
-        gap = min(150, 1300 // max(1, len(tokens)))
-        pieces = []
-        for i, token in enumerate(tokens):
+        gap = min(150, 1300 // max(1, sum(map(len, lines))))
+
+        def animate(i, token):
             at = 80 + i * gap
             bare = re.sub(r"(?:['’]S)?[!?.,…]*$", "", token)
             color = r"\1c&H00D7FF&" if bare in named else r"\1c&HFFFFFF&"
-            pieces.append("{" + rf"\alpha&HFF&{color}\t({at},{at + 90},\alpha&H00&)" + "}" + literal_text(token))
-        per_line, lines, width = int(860 / (size * 0.5)), [[]], 0
-        for token, piece in zip(tokens, pieces):
-            if lines[-1] and width + 1 + len(token) > per_line:
-                lines.append([])
-                width = 0
-            width += len(token) + (1 if lines[-1] else 0)
-            lines[-1].append(piece)
-        banner = r"{\fad(0,200)\fscx85\fscy85\t(0,260,\fscx100\fscy100)}" + r"\N".join(" ".join(l) for l in lines)
+            return "{" + rf"\alpha&HFF&{color}\t({at},{at + 90},\alpha&H00&)" + "}" + token
+
+        animated = []
+        offset = 0
+        for line in lines:
+            animated.append(" ".join(animate(offset + i, token) for i, token in enumerate(line)))
+            offset += len(line)
+        banner = r"{\fad(0,200)\fscx85\fscy85\t(0,260,\fscx100\fscy100)}" + r"\N".join(animated)
     from .captions import timestamp
     return ass_text + f"Dialogue: 1,{timestamp(0, True)},{timestamp(max(0.8, end), True)},Hook,,0,0,0,,{banner}\n"
 
