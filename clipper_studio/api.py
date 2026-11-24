@@ -882,10 +882,17 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if attempt < 3:
                     time.sleep(attempt * 2)
 
+    def settle_stages(job, error="The stage did not record a result. Retry this stage."):
+        for name, state in stage_states(job).items():
+            if name == "chat_analysis" and job.get("chat_retrying"):
+                continue
+            if state["status"] in ("processing", "retrying"):
+                mark_stage(job, name, "failed", error=state["error"] or error)
+
     def finish(jid, generation):
         with store.lock:
             job = active_job(jid, generation)
-            if not job.get("analysis_complete"):
+            if not job.get("analysis_complete") or job.get("retry_stage"):
                 return
             total = len(job["clips"])
             done = sum(c["status"] in ("ready", "failed", "cancelled") for c in job["clips"])
@@ -917,6 +924,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if done < total:
                 store.save(job)
                 return
+            settle_stages(job)
             failed = any(c["status"] == "failed" for c in job["clips"])
             job.update(status="completed_with_errors" if failed else "completed", progress=1,
                        stage="Finished" if job["clips"] else (f"{len(job['moments'])} moments ready for review"
@@ -935,9 +943,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 job = active_job(jid, generation)
                 job.update(status="failed", stage="Failed", error=message, generation=generation + 1,
                            chat_retrying=False)
-                for name, state in stage_states(job).items():
-                    if state["status"] in ("processing", "retrying"):
-                        mark_stage(job, name, "failed", error=message)
+                settle_stages(job, message)
                 for clip in job["clips"]:
                     if clip["status"] in ("queued", "rendering"):
                         clip.update(status="failed", error=message)
@@ -1056,7 +1062,17 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         target = job.get("retry_stage")
         can_reuse = not target or target == "viral_moment_detection"
         if can_reuse and (saved := cache.read("ai-result.json")) is not None:
-            return saved, None
+            with store.lock:
+                latest = active_job(jid, generation)
+                if isinstance(saved, dict):
+                    current = stage_states(latest)
+                    for name, state in saved["stages"].items():
+                        if current[name]["status"] in ("pending", "processing", "retrying"):
+                            mark_stage(latest, name, state["status"], state["progress"], state["error"],
+                                       state["artifacts"])
+                latest["ai_error"] = None
+                store.save(latest)
+            return (saved["moments"] if isinstance(saved, dict) else saved), None
 
         def publish(name, status, progress=None, error=None, artifacts=()):
             set_stage(jid, generation, name, status, progress, error, artifacts)
@@ -1153,7 +1169,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         tracking.errors["video_analysis"].add("source")
             check()
             tracking.finish()
-            cache.write("ai-result.json", moments[:count])
+            with store.lock:
+                states = stage_states(active_job(jid, generation))
+                stage_results = {name: states[name] for name in ANALYSIS_STAGES}
+            cache.write("ai-result.json", dict(moments=moments[:count], stages=stage_results))
             update(jid, generation, ai_error=None)
             return moments[:count], None
         except WorkCancelled:
@@ -1201,6 +1220,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 job["chat_retrying"] = False
                 if job.get("analysis_complete"):
                     mark_stage(job, "viral_moment_detection", "completed", artifacts=("job.json#moments",))
+                    settle_stages(job)
                 store.save(job)
 
     def analyze(jid, generation):

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from clipper_studio.api import create_app
 from clipper_studio.chat import ChatReplayError
 from clipper_studio.media_analysis import analyze_ranges, media_ranges
+from clipper_studio.stages import Checkpoints
 from test_api import REPLAY_URL, media, saved_job
 
 
@@ -265,6 +266,56 @@ def prepare_retry(monkeypatch, *, new_on_retry=False):
 
     monkeypatch.setattr("clipper_studio.api.download_analysis_media", lambda *a, **k: (None, None))
     monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
+
+
+@pytest.mark.parametrize("legacy_checkpoint", [False, True])
+def test_resume_settles_transcript_stage_when_reusing_ai_result(tmp_path, monkeypatch, legacy_checkpoint):
+    prepare_retry(monkeypatch)
+    writing, release = threading.Event(), threading.Event()
+    ai_writes = []
+    write = Checkpoints.write
+
+    def hold_first_result(cache, name, value):
+        if name == "ai-result.json":
+            ai_writes.append(name)
+            if len(ai_writes) == 1:
+                writing.set()
+                assert release.wait(5)
+                if legacy_checkpoint and isinstance(value, dict):
+                    value = value["moments"]
+        write(cache, name, value)
+
+    def fail_chat(*args):
+        raise ChatReplayError("Chat unavailable")
+
+    monkeypatch.setattr(Checkpoints, "write", hold_first_result)
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", fail_chat)
+    app = create_app(tmp_path, analysis_workers=2)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": True, "ai_analysis": False}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        try:
+            assert writing.wait(5)
+            previous = client.get(base).json()["stages"]["transcript_generation"]
+            assert previous["status"] == "failed" and previous["error"]
+            assert client.post(f"{base}/cancel").status_code == 200
+            assert client.post(f"{base}/resume").status_code == 202
+            assert client.get(base).json()["stages"]["transcript_generation"]["status"] == "retrying"
+        finally:
+            release.set()
+        app.state.pending.join()
+        job = client.get(base).json()
+        assert job["status"] == "completed" and job["progress"] == 1
+        assert ai_writes == ["ai-result.json"]
+        assert job["moments"][0]["title"] == "Audio only"
+        assert not any(stage["status"] in ("processing", "retrying") for stage in job["stages"].values())
+        transcript = job["stages"]["transcript_generation"]
+        assert transcript["status"] == "failed" and transcript["error"]
+        if not legacy_checkpoint:
+            assert transcript == previous
+        assert client.post(f"{base}/stages/transcript_generation/retry").status_code == 202
+        app.state.pending.join()
+        assert client.get(base).json()["stages"]["transcript_generation"]["status"] == "completed"
 
 
 def test_autopilot_stage_retry_renders_new_moments_without_replacing_ready_clip(tmp_path, monkeypatch, media):
