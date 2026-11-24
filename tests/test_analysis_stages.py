@@ -223,6 +223,46 @@ def prepare_retry(monkeypatch):
     monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
 
 
+def test_resume_waits_for_inflight_upload_conversion_without_blocking_other_jobs(tmp_path, monkeypatch):
+    entered, release, other_job = threading.Event(), threading.Event(), threading.Event()
+    conversions = []
+
+    def convert(source, folder):
+        conversions.append(folder)
+        folder.mkdir(exist_ok=True)
+        audio, video = folder / "audio.m4a", folder / "video.mp4"
+        audio.write_bytes(b"incomplete")
+        if len(conversions) == 1:
+            entered.set()
+            assert release.wait(5)
+        elif folder != conversions[0]:
+            other_job.set()
+        audio.write_bytes(b"complete")
+        video.write_bytes(b"complete")
+        return audio, video
+
+    monkeypatch.setattr("clipper_studio.api.probe_source", lambda *a: {"duration": 240})
+    monkeypatch.setattr("clipper_studio.api.local_analysis_media", convert)
+    monkeypatch.setattr("clipper_studio.api.analyze_podcast", lambda *a, **k: [])
+    app = create_app(tmp_path, analysis_workers=2)
+    with TestClient(app) as client:
+        upload = client.post("/api/uploads", content=b"upload", headers={"X-Filename": "episode.mp4"}).json()["id"]
+        jid = client.post("/api/jobs", json={"upload": upload, "content_type": "podcast"}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        try:
+            assert entered.wait(5)
+            assert client.post(f"{base}/cancel").status_code == 200
+            assert client.post(f"{base}/resume").status_code == 202
+            second = client.post("/api/jobs", json={"upload": upload, "content_type": "podcast"}).json()["id"]
+            assert other_job.wait(5)
+            assert conversions.count(conversions[0]) == 1
+        finally:
+            release.set()
+        app.state.pending.join()
+        assert client.get(base).json()["status"] == "completed"
+        assert client.get(f"/api/jobs/{second}").json()["status"] == "completed"
+
+
 def test_segmented_podcast_keeps_question_and_answer_in_one_conversation(monkeypatch):
     duration = 1000
     first, second = media_ranges(duration)
