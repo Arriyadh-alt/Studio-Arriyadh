@@ -6,8 +6,9 @@ from fastapi.testclient import TestClient
 
 from clipper_studio.api import DirectorSpec, create_app, director_config
 from shorts_clipper.captions import Caption
-from shorts_clipper.director import DirectorOptions, loudness, probe, remap_captions
+from shorts_clipper.director import DirectorOptions, Plan, Segment, cut_source, loudness, probe, remap_captions
 from shorts_clipper.editing import authenticity_report, plan_source_edit, record_operations
+from shorts_clipper.video import hdr_to_sdr, make_vertical_clip
 from test_api import REPLAY_URL
 
 
@@ -106,6 +107,25 @@ def source(tmp_path_factory):
         "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(path),
     ], check=True)
     return path
+
+
+@pytest.mark.parametrize("transfer", ["smpte2084", "arib-std-b67"])
+def test_professional_exports_tone_map_hdr_before_cuts_or_captions(tmp_path, transfer):
+    hdr = tmp_path / "hdr.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=10:d=1",
+        "-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p10le", "-colorspace", "bt2020nc",
+        "-color_primaries", "bt2020", "-color_trc", transfer, str(hdr),
+    ], check=True)
+    assert hdr_to_sdr(hdr)
+    cut = cut_source(hdr, tmp_path / "cut.mp4", Plan([Segment(0, .3), Segment(.6, .9)]),
+                     fps="10/1", professional=True)
+    direct = make_vertical_clip(hdr, tmp_path / "vertical.mp4", 0., .4, "blur",
+                                export_fps="10/1", silent_audio=True)
+    for video in (cut, direct):
+        info = next(s for s in probe(video, export_details=True)["streams"] if s["codec_type"] == "video")
+        assert [info[k] for k in ("color_space", "color_transfer", "color_primaries")] == ["bt709"] * 3
+        assert not hdr_to_sdr(video)
 
 
 @pytest.mark.parametrize("mode", ["natural", "enhanced", "full"])

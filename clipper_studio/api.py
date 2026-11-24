@@ -559,7 +559,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                 title_voice=lambda text, **limits: context["voice"](
                                     text, context["language"], voice=director.voice, delivery=director.delivery, **limits))
                             if len(plan.segments) > 1:
-                                directed = cut_source(source, work / "directed.mp4", plan, fps=fps)
+                                directed = cut_source(source, work / "directed.mp4", plan, fps=fps, professional=True)
                         elif podcast:
                             context = story_context(job, spec, caption_language, work, store.root / "voices")
                             teaser = analysis.get("teaser") or {}

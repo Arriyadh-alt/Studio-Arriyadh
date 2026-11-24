@@ -58,6 +58,16 @@ def professional_video_options() -> list[str]:
             "-color_trc", "bt709", "-color_range", "tv"]
 
 
+def hdr_to_sdr(source: Path) -> str:
+    result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                             "stream=color_transfer", "-of", "csv=p=0", str(source)],
+                            check=True, capture_output=True, text=True)
+    if result.stdout.strip() not in ("smpte2084", "arib-std-b67"):
+        return ""
+    return ("zscale=transfer=linear:npl=100,format=gbrpf32le,tonemap=mobius,"
+            "zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=limited,format=yuv420p")
+
+
 def detect_focal_x(source: Path, start: float, end: float) -> float:
     if not source.is_file():
         return 0.5
@@ -130,6 +140,7 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
         raise ValueError(f"Unknown mode {mode!r}; choose from {', '.join(FILTERS)}")
     if end <= start:
         raise ValueError("End time must be after start time")
+    tone_map = hdr_to_sdr(source) if export_fps else ""
     filters = FILTERS[mode]
     split = (facecam is not None and facecam.rect.x == 0 and facecam.rect.y == 0
              and facecam.rect.w == WIDTH and mode == 'crop')
@@ -161,13 +172,16 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
                f"pad={rect.w}:{rect.h}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
                f"drawbox=x=0:y=0:w=iw:h=ih:color=white@0.9:t=3")
         filters = (
-            f"[0:v]split[mainin][camin];[mainin]{_hide_facecam(source, box) if facecam.hide_source else ''}{filters}[main];"
+            f"[0:v]{tone_map + ',' if tone_map else ''}split[mainin][camin];"
+            f"[mainin]{_hide_facecam(source, box) if facecam.hide_source else ''}{filters}[main];"
             f"[camin]crop=w='max(2,trunc(iw*{box.w:.8f}/2)*2)':"
             f"h='max(2,trunc(ih*{box.h:.8f}/2)*2)':"
             f"x='iw*{box.x:.8f}':y='ih*{box.y:.8f}',"
             f"setsar=1,{fit}[cam];"
             f"[main][cam]overlay={rect.x}:{rect.y}"
         )
+    elif tone_map:
+        filters = f"{tone_map},{filters}"
     if captions is not None:
         path = str(captions.resolve())
         fonts = str(FONT_DIR.resolve())

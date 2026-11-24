@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from .captions import STOPWORDS, Caption, chunk_words, literal_text, style_font, _classic_ass, caption_height as measure_caption_height
-from .video import professional_video_options
+from .video import hdr_to_sdr, professional_video_options
 
 STEP = 0.1
 FPS = 30
@@ -677,19 +677,26 @@ def has_audio(source: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def cut_command(source: Path, output: Path, plan: Plan, *, fps=FPS) -> list:
+def cut_command(source: Path, output: Path, plan: Plan, *, fps=FPS, professional=False) -> list:
     audio = has_audio(source)
     parts, labels = [], ""
+    tone_map = hdr_to_sdr(source) if professional else ""
+    if tone_map:
+        count = len(plan.segments)
+        split = f",split={count}" if count > 1 else ""
+        outputs = "".join(f"[sdr{i}]" for i in range(count))
+        parts.append(f"[0:v]{tone_map}{split}{outputs}")
     for i, segment in enumerate(plan.segments):
+        input_video = f"[sdr{i}]" if tone_map else "[0:v]"
         if segment.role == "intro":
             # A dimmed still of the build-up's first frame sits under the storytelling hook.
-            parts.append(f"[0:v]trim=start={segment.start:.3f}:end={segment.start + 0.2:.3f},setpts=PTS-STARTPTS,"
+            parts.append(f"{input_video}trim=start={segment.start:.3f}:end={segment.start + 0.2:.3f},setpts=PTS-STARTPTS,"
                          f"fps={fps},trim=end_frame=1,tpad=stop_mode=clone:stop_duration={segment.length:.3f},"
                          f"trim=duration={segment.length:.3f},setpts=PTS-STARTPTS,eq=brightness=-0.08:saturation=0.7[v{i}]")
             parts.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={segment.length:.3f}[a{i}]")
             labels += f"[v{i}][a{i}]"
             continue
-        parts.append(f"[0:v]trim=start={segment.start:.3f}:end={segment.end:.3f},setpts=PTS-STARTPTS,fps={fps}[v{i}]")
+        parts.append(f"{input_video}trim=start={segment.start:.3f}:end={segment.end:.3f},setpts=PTS-STARTPTS,fps={fps}[v{i}]")
         if audio:
             parts.append(f"[0:a]atrim=start={segment.start:.3f}:end={segment.end:.3f},asetpts=PTS-STARTPTS,"
                          f"aresample=48000,afade=t=in:d=0.02,afade=t=out:st={max(0, segment.length - 0.03):.3f}:d=0.03[a{i}]")
@@ -702,8 +709,8 @@ def cut_command(source: Path, output: Path, plan: Plan, *, fps=FPS) -> list:
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(output)]
 
 
-def cut_source(source: Path, output: Path, plan: Plan, *, fps=FPS) -> Path:
-    subprocess.run(cut_command(source, output, plan, fps=fps), check=True)
+def cut_source(source: Path, output: Path, plan: Plan, *, fps=FPS, professional=False) -> Path:
+    subprocess.run(cut_command(source, output, plan, fps=fps, professional=professional), check=True)
     return output
 
 
