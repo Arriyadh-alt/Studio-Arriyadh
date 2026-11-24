@@ -95,11 +95,14 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
             text = f"AI commentary: {options.commentary}"
             plan.commentary = {"text": options.commentary, "label": "AI commentary", "voiced": False}
         if text:
-            plan.hook = {"style": "source", "text": text, "duration": min(duration, 3.0)}
-            voice_limit = min(3., MAX_OUTPUT - plan.duration - .45)
+            display_time = max(3., len(text.split()) / 2.5) if plan.commentary else 3.
+            plan.hook = {"style": "source", "text": text, "duration": min(duration, display_time)}
+            available = MAX_OUTPUT - plan.duration - .45
+            voice_limit = available if plan.commentary else min(3., available)
             if title_voice and options.voiceover and voice_limit >= .5:
                 try:
-                    voice, detail = title_voice(options.commentary or text, max_seconds=voice_limit)
+                    limits = {"allow_truncate": False} if plan.commentary else {}
+                    voice, detail = title_voice(options.commentary or text, max_seconds=voice_limit, **limits)
                     intro_duration = max(plan.hook["duration"], detail["seconds"] + .4)
                     if plan.duration + intro_duration > MAX_OUTPUT:
                         intro_duration = detail["seconds"] + .4
@@ -107,7 +110,7 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
                     plan.voiceover = str(voice)
                     plan.hook.update(voiceover=True, narration=detail, duration=intro_duration)
                     if plan.commentary:
-                        plan.commentary["voiced"] = True
+                        plan.commentary.update(voiced=True, duration=intro_duration)
                 except Exception:
                     logging.getLogger(__name__).warning("Hook voice-over unavailable", exc_info=True)
     if options.edits and timing.zoom:

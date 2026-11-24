@@ -64,6 +64,15 @@ def test_narrate_drops_the_lead_in_when_the_hook_runs_long(monkeypatch, tmp_path
     assert info["script"] == "A Very Long Hook Line!" and info["seconds"] <= voices.MAX_SECONDS + 0.05
 
 
+def test_non_truncatable_narration_is_not_written_if_it_does_not_fit(monkeypatch, tmp_path):
+    monkeypatch.setattr(voices, "_neural", lambda lines, voice, work: [tone(1.), tone(8.)])
+    out = tmp_path / "commentary.wav"
+    with pytest.raises(ValueError, match="without truncation"):
+        narrate("A long commentary", "en", out, tmp_path, "hype", "win",
+                max_seconds=3., allow_truncate=False)
+    assert not out.exists()
+
+
 def test_narrate_falls_back_to_the_offline_voice(monkeypatch, tmp_path):
     def broken(*a):
         raise OSError("no network")

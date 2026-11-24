@@ -83,6 +83,20 @@ def test_narration_reserves_time_even_when_source_starts_with_dialogue(mode):
     assert plan.map_time(9.5) is not None
 
 
+def test_enhanced_commentary_can_use_a_longer_intro_without_truncation():
+    commentary = "One lesson here is to slow down and give the other person time to finish their thought."
+
+    def voice(text, **limits):
+        assert text == commentary
+        assert limits["max_seconds"] > 8 and limits["allow_truncate"] is False
+        return "voice.wav", {"seconds": 8.}
+
+    plan, _ = plan_source_edit(np.full(100, -20.), SPEECH, 10,
+                               DirectorOptions(preset="podcast", voiceover=True, commentary=commentary),
+                               mode="enhanced", category="podcast", title_voice=voice)
+    assert plan.commentary["voiced"] and plan.map_time(0.) > 8.15
+
+
 @pytest.fixture(scope="module")
 def source(tmp_path_factory):
     path = tmp_path_factory.mktemp("mode-source") / "source.mp4"
