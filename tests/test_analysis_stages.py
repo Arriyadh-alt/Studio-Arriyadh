@@ -200,6 +200,46 @@ def test_transcript_retry_refreshes_untouched_suggestion_only(tmp_path, monkeypa
         assert kept == touched
 
 
+def test_transcript_retry_preserves_recovered_ai_when_chat_extension_overlaps_reviewed_moment(tmp_path, monkeypatch):
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": 300})
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 300}, []))
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", lambda *a, **k: (None, None))
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
+        dict(start=140, end=182, peak=155, score=5),
+    ], []))
+    attempts = []
+
+    def analyze(audio, video, duration, checkpoint, **kwargs):
+        def speech():
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise RuntimeError("Transcription unavailable")
+            return "Recovered speech"
+
+        moments = [dict(start=175, end=210, peak=190, score=80, title="Reviewed AI")]
+        try:
+            title = checkpoint("transcript_generation", "speech", speech)
+        except RuntimeError:
+            return moments
+        return [*moments, dict(start=125, end=160, peak=145, score=90, title=title)]
+
+    monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": True}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        app.state.pending.join()
+        kept, chat = client.get(base).json()["moments"]
+        assert kept["sources"] == ["ai"] and chat["sources"] == ["chat"]
+        kept = client.patch(f"{base}/moments/{kept['id']}", json={"status": "selected"}).json()
+        assert client.post(f"{base}/stages/transcript_generation/retry").status_code == 202
+        app.state.pending.join()
+        original, recovered = client.get(base).json()["moments"]
+        assert original == kept
+        assert recovered["id"] == chat["id"] and recovered["sources"] == ["ai"]
+        assert (recovered["start"], recovered["end"], recovered["title"]) == (125, 160, "Recovered speech")
+
+
 def prepare_retry(monkeypatch, *, new_on_retry=False):
     monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": 240})
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 240}, []))

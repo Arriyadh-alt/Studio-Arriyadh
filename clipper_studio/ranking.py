@@ -41,15 +41,12 @@ def _chat_signature(moment):
     return None
 
 
-def refresh_suggestions(existing, fresh):
+def refresh_suggestions(existing, ai, chat, duration, lead, *, clips=()):
     result = list(existing)
     remaining = {i for i, moment in enumerate(existing) if _untouched(moment)}
     protected = [moment for i, moment in enumerate(existing) if i not in remaining]
-    claimed = {signature for moment in protected if (signature := _chat_signature(moment)) is not None}
     rank = max((moment["rank"] for moment in existing), default=0)
-    for candidate in fresh:
-        if _chat_signature(candidate) in claimed or any(_overlaps(moment, candidate) for moment in protected):
-            continue
+    for candidate in _retry_candidates(protected, ai, chat, duration, lead, clips=clips):
         nearby = {i for i, moment in enumerate(result) if abs(moment["peak"] - candidate["peak"]) <= 25}
         if nearby - remaining:
             continue
@@ -74,6 +71,17 @@ def _original_ai(moment):
     return {**moment, "start": start, "end": end, "duration": end - start}
 
 
+def _retry_candidates(protected, ai, chat, duration, lead, *, clips=()):
+    protected_ranges = [*protected, *(original for original in map(_original_ai, protected) if original)]
+
+    def conflicts(candidate):
+        return (any(_matches(m, candidate) or _overlaps(m, candidate) for m in protected_ranges)
+                or any(_overlaps(clip, candidate) for clip in clips))
+
+    claimed = {signature for moment in protected if (signature := _chat_signature(moment)) is not None}
+    return _rank(_merge_candidates(ai, chat, duration, lead, conflicts=conflicts, claimed=claimed, disjoint=True))
+
+
 def add_chat_moments(existing, chat, duration, lead, *, ai=None):
     protected, remaining, legacy_ai = [], [], []
     for moment in existing:
@@ -91,14 +99,7 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
                 original["message_sample"] = []
             legacy_ai.append(original)
 
-    protected_ranges = [*protected, *(original for original in map(_original_ai, protected) if original)]
-
-    def conflicts(candidate):
-        return any(_matches(m, candidate) or _overlaps(m, candidate) for m in protected_ranges)
-
-    claimed = {signature for moment in protected if (signature := _chat_signature(moment)) is not None}
-    fresh = _rank(_merge_candidates(legacy_ai if ai is None else ai, chat, duration, lead,
-                                    conflicts=conflicts, claimed=claimed, disjoint=True))
+    fresh = _retry_candidates(protected, legacy_ai if ai is None else ai, chat, duration, lead)
     unmatched = []
     for candidate in fresh:
         match = next((m for m in remaining if (m["start"], m["end"]) == (candidate["start"], candidate["end"])), None)

@@ -1252,14 +1252,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 return
             set_stage(jid, generation, "viral_moment_detection", "processing")
             duration = fields.get("metadata", {}).get("duration", duration)
-            moments = merge_moments(ai, chat, duration, lead)
             with store.lock:
                 job = active_job(jid, generation)
                 if job.get("analysis_complete"):
                     existing_ids = {moment["id"] for moment in job["moments"]}
-                    moments, clips = refresh_suggestions(job["moments"], moments), job["clips"]
+                    clips = job["clips"]
+                    moments = refresh_suggestions(job["moments"], ai, chat, duration, lead, clips=clips)
                     new_moments = [moment for moment in moments if moment["id"] not in existing_ids]
                 else:
+                    moments = merge_moments(ai, chat, duration, lead)
                     new_moments, clips = moments, []
                 if not job["request"].get("review", False) and len(clips) < count:
                     number = max((clip_number(job, clip) for clip in clips), default=0)
