@@ -998,6 +998,28 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         with store.lock:
             active_job(jid, generation)
 
+    def refresh_suggestions(existing, fresh):
+        result = list(existing)
+        remaining = {i for i, moment in enumerate(existing)
+                     if moment["status"] == "suggested" and not moment.get("reviewed")
+                     and not moment.get("clip_id") and not moment.get("edits")}
+        rank = max((moment["rank"] for moment in existing), default=0)
+        for candidate in fresh:
+            nearby = {i for i, moment in enumerate(result) if abs(moment["peak"] - candidate["peak"]) <= 25}
+            if nearby - remaining:
+                continue
+            if nearby:
+                match = min(nearby, key=lambda i: (abs(result[i]["peak"] - candidate["peak"]), i))
+                previous = result[match]
+                if "ai" in previous["sources"] and "ai" not in candidate["sources"]:
+                    continue
+                remaining.remove(match)
+                result[match] = dict(candidate, id=previous["id"], rank=previous["rank"])
+            else:
+                rank += 1
+                result.append(dict(candidate, rank=rank))
+        return result
+
     def analyze_chat(jid, generation, job, info, retry_dir=None):
         name = "chat_analysis/result.json"
         cache = checkpoints(jid)
@@ -1240,14 +1262,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             with store.lock:
                 job = active_job(jid, generation)
                 if job.get("analysis_complete"):
-                    existing = job["moments"]
-                    rank = max((m["rank"] for m in existing), default=0)
-                    for moment in moments:
-                        if not any(abs(m["peak"] - moment["peak"]) <= 25 for m in existing):
-                            rank += 1
-                            moment["rank"] = rank
-                            existing.append(moment)
-                    moments, clips = existing, job["clips"]
+                    moments, clips = refresh_suggestions(job["moments"], moments), job["clips"]
                 else:
                     clips = [] if job["request"].get("review", False) else [
                         moment_clip(job, m, i) for i, m in enumerate(moments[:count], 1)]

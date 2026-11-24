@@ -134,6 +134,8 @@ def test_retry_failed_video_reuses_audio_and_preserves_existing_moment(tmp_path,
         original = client.get(base).json()
         assert original["status"] == "completed"
         assert original["stages"]["video_analysis"]["status"] == "failed"
+        mid = original["moments"][0]["id"]
+        original["moments"][0] = client.patch(f"{base}/moments/{mid}", json={"status": "selected"}).json()
         assert client.post(f"{base}/stages/audio_analysis/retry").status_code == 409
         assert client.post(f"{base}/stages/video_analysis/retry").status_code == 202
         app.state.pending.join()
@@ -177,6 +179,48 @@ def test_resume_failed_analysis_without_revalidating_source(tmp_path, monkeypatc
         assert job["status"] == "completed"
         assert job["stages"]["source_validation"] == failed["stages"]["source_validation"]
         assert len(calls) == 2
+
+
+def test_transcript_retry_refreshes_untouched_suggestion_only(tmp_path, monkeypatch):
+    prepare_retry(monkeypatch)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        base = f"/api/jobs/{jid}"
+        app.state.pending.join()
+        old = client.get(base).json()["moments"]
+        touched = client.patch(f"{base}/moments/{old[1]['id']}", json={"status": "selected"}).json()
+        assert client.post(f"{base}/stages/transcript_generation/retry").status_code == 202
+        app.state.pending.join()
+        refreshed, kept = client.get(base).json()["moments"]
+        assert refreshed["id"] == old[0]["id"]
+        assert refreshed["title"] == "Recovered speech" and refreshed["start"] == 81 and refreshed["score"] == 90
+        assert kept == touched
+
+
+def prepare_retry(monkeypatch):
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", lambda *a: {"duration": 240})
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration": 240}, []))
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([], []))
+    attempts = []
+
+    def analyze(audio, video, duration, checkpoint, **kwargs):
+        def speech():
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise RuntimeError("Transcription unavailable")
+            return "Recovered speech"
+
+        try:
+            title = checkpoint("transcript_generation", "speech", speech)
+        except RuntimeError:
+            title = "Audio only"
+        found = title == "Recovered speech"
+        return [dict(start=81 if found else 80, end=120, peak=100, score=90 if found else 80, title=title),
+                dict(start=160, end=195, peak=175, score=60, title=title)]
+
+    monkeypatch.setattr("clipper_studio.api.download_analysis_media", lambda *a, **k: (None, None))
+    monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
 
 
 def test_segmented_podcast_keeps_question_and_answer_in_one_conversation(monkeypatch):
