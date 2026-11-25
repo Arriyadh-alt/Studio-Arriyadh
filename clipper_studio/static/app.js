@@ -42,10 +42,10 @@ let voiceCatalog = {voices:[],deliveries:['excited','surprise','suspense','humor
 const deliveryLabels = {excited:'Excited',surprise:'Surprised',suspense:'Suspense',humor:'Funny',warm:'Warm'};
 const voiceOptions = selected => `<option value="auto">Auto (match the scene)</option>${voiceCatalog.voices.map(v=>`<option value="${escapeHtml(v.id)}" title="${escapeHtml(v.description)}" ${selected===v.id?'selected':''}>${escapeHtml(v.name)}</option>`).join('')}`;
 const deliveryOptions = selected => `<option value="auto">Auto (from the scene)</option>${voiceCatalog.deliveries.map(m=>`<option value="${m}" ${selected===m?'selected':''}>${deliveryLabels[m]||m}</option>`).join('')}`;
-const speechLanguage = (root, hook) => {
+const voiceLanguage = language => ['id','ms','jw','su'].includes(language) ? 'id' : 'en';
+const speechLanguage = (root, fallback) => {
   const chosen=$('[data-caption=language]',root)?.value;
-  if(chosen && chosen!=='auto') return ['id','ms','jw','su'].includes(chosen) ? 'id' : 'en';
-  return ['id','ms','jw','su'].includes(hook?.language) ? 'id' : 'en';
+  return voiceLanguage(chosen && chosen!=='auto' ? chosen : fallback);
 };
 async function previewVoice(body, button, status, narrationUrl) {
   const audio=new Audio();
@@ -573,9 +573,11 @@ $('#clips').addEventListener('click',async event=>{
       const clip=current.clips.find(c=>c.id===cid), hook=clip?.director_result?.edits?.hook, field=button.closest('fieldset');
       const d=readDirector(node), p=PodcastControls.read(node,clip), mode=$('[data-field=editing_mode]',node).value;
       const old=directorDefaults(clip.director,editingMode(clip)), oldPodcast=PodcastControls.defaults(clip);
-      const language=speechLanguage(node,{language:hook?.language || clip.caption_language});
+      const hookLanguage=voiceLanguage(hook?.language || clip.caption_language || clip.language);
+      const language=speechLanguage(node,hookLanguage);
       const commentary=p?.version==='commentary' && mode!=='natural' ? p.commentary || clip.podcast_analysis?.commentary : null;
-      const text=p?.hook_text || d.hook_text || (['story','source'].includes(hook?.style) && !clip.director_result?.edits?.commentary ? hook.text : null);
+      const cachedHook=language===hookLanguage && ['story','source'].includes(hook?.style) && !clip.director_result?.edits?.commentary;
+      const text=p?.hook_text || d.hook_text || (cachedHook ? hook.text : null);
       const same=mode===editingMode(clip) && ['enabled','hook','story','voiceover','voice','delivery','hook_text'].every(k=>d[k]===old[k])
         && ['version','hook_text','commentary'].every(k=>p?.[k]===oldPodcast?.[k])
         && $('[data-caption=language]',node).value===(clip.language || 'auto');
