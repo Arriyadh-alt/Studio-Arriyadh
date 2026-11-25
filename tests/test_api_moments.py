@@ -307,6 +307,46 @@ def test_queued_chat_has_a_separate_wait_budget(monkeypatch, tmp_path, analysis,
             assert result["stages"]["chat_analysis"]["status"] == "completed"
 
 
+def test_ai_failure_waits_for_queued_chat_without_holding_analysis_worker(monkeypatch, tmp_path, analysis):
+    first_chat, release, ai_failed = threading.Event(), threading.Event(), threading.Event()
+    ai_attempts = 0
+
+    def fetch(url, *args):
+        if not first_chat.is_set():
+            first_chat.set()
+            assert release.wait(8)
+        return {"duration": 600}, []
+
+    def analyze(*args, **kwargs):
+        nonlocal ai_attempts
+        ai_attempts += 1
+        if ai_attempts == 2:
+            ai_failed.set()
+            raise YouTubeAccessError("AI media unavailable")
+        return [proposal()]
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", fetch)
+    monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
+    app = create_app(tmp_path, analysis_workers=1)
+    with TestClient(app) as client:
+        request = {"url": REPLAY_URL}
+        try:
+            client.post("/api/jobs", json=request)
+            assert first_chat.wait(3)
+            fallback = client.post("/api/jobs", json=request).json()["id"]
+            assert ai_failed.wait(3)
+            unrelated = client.post("/api/jobs", json=request).json()["id"]
+            published = wait_job(client, unrelated, lambda job: job["analysis_complete"])
+            assert published["moments"][0]["sources"] == ["ai"]
+            assert not client.get(f"/api/jobs/{fallback}").json()["analysis_complete"]
+        finally:
+            release.set()
+        app.state.pending.join()
+        recovered = client.get(f"/api/jobs/{fallback}").json()
+        assert recovered["status"] == "completed"
+        assert recovered["moments"][0]["sources"] == ["chat"]
+
+
 def test_retry_chat_only_preserves_existing_reviews_and_clips(monkeypatch, tmp_path, analysis):
     entered, release = threading.Event(), threading.Event()
 

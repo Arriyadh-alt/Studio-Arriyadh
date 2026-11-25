@@ -1410,6 +1410,50 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             except WorkCancelled:
                 pass
 
+    def publish_analysis(jid, generation, ai, ai_error, chat, fields, *, defer_chat=False, ai_required=False):
+        with store.lock:
+            job = active_job(jid, generation)
+            if ai_error and (ai_required or (fields.get("chat_error") and not chat)):
+                if not job.get("analysis_complete"):
+                    raise ai_error
+                update(jid, generation, retry_stage=None)
+                finish(jid, generation)
+                return
+            count, lead = job["request"]["clips"], job["request"]["lead"]
+            duration = fields.get("metadata", job["metadata"])["duration"]
+            mark_stage(job, "viral_moment_detection", "processing")
+            if job.get("analysis_complete"):
+                existing_ids = {moment["id"] for moment in job["moments"]}
+                clips = job["clips"]
+                moments = refresh_suggestions(job["moments"], ai, chat, duration, lead, clips=clips)
+                new_moments = [moment for moment in moments if moment["id"] not in existing_ids]
+            else:
+                moments = merge_moments(ai, chat, duration, lead)
+                new_moments, clips = moments, []
+            if not job["request"].get("review", False) and len(clips) < count:
+                number = max((clip_number(job, clip) for clip in clips), default=0)
+                clips.extend(moment_clip(job, moment, number + i)
+                             for i, moment in enumerate(new_moments[:count - len(clips)], 1))
+            job.update(clips=clips, moments=moments, analysis_complete=True, stage="Queued for rendering",
+                       retry_stage=None, chat_pending=defer_chat)
+            if ai_error is None:
+                job["ai_candidates"] = ai
+            mark_stage(job, "viral_moment_detection", "completed", artifacts=("job.json#moments",))
+            store.save(job)
+            for clip in clips:
+                if clip["status"] == "queued":
+                    pending.put((jid, clip["id"], generation))
+        finish(jid, generation)
+
+    def complete_chat_fallback(jid, generation, ai_error, collect):
+        try:
+            chat, fields = collect()
+            publish_analysis(jid, generation, [], ai_error, chat, fields)
+        except WorkCancelled:
+            pass
+        except Exception as error:
+            fail_job(jid, generation, error)
+
     def analyze(jid, generation):
         try:
             with store.lock:
@@ -1420,9 +1464,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 pending.background(lambda: retry_chat(jid, generation, job))
                 return
             podcast, upload = is_podcast(job), upload_path(job)
-            count, lead = job["request"]["clips"], job["request"]["lead"]
             duration = job["metadata"]["duration"]
-            chat, ai, fields, ai_error = [], [], {}, None
+            chat, fields = [], {}
             update(jid, generation, status="running", stage="Preparing AI analysis")
             collect_chat = ready_chat = None
             if podcast or upload:
@@ -1433,41 +1476,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             else:
                 ready_chat, collect_chat = start_chat(jid, generation, job, info)
             ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
-            defer_chat = collect_chat is not None and ai_error is None and not ready_chat()
+            defer_chat = collect_chat is not None and not ready_chat()
+            if defer_chat and ai_error is not None:
+                update(jid, generation, stage="Waiting for chat analysis")
+                pending.background(lambda: complete_chat_fallback(jid, generation, ai_error, collect_chat))
+                return
             if collect_chat and not defer_chat:
                 chat, fields = collect_chat()
-            if ai_error and (podcast or upload or (fields.get("chat_error") and not chat)):
-                if not job.get("analysis_complete"):
-                    raise ai_error
-                update(jid, generation, retry_stage=None)
-                finish(jid, generation)
-                return
-            set_stage(jid, generation, "viral_moment_detection", "processing")
-            duration = fields.get("metadata", {}).get("duration", duration)
-            with store.lock:
-                job = active_job(jid, generation)
-                if job.get("analysis_complete"):
-                    existing_ids = {moment["id"] for moment in job["moments"]}
-                    clips = job["clips"]
-                    moments = refresh_suggestions(job["moments"], ai, chat, duration, lead, clips=clips)
-                    new_moments = [moment for moment in moments if moment["id"] not in existing_ids]
-                else:
-                    moments = merge_moments(ai, chat, duration, lead)
-                    new_moments, clips = moments, []
-                if not job["request"].get("review", False) and len(clips) < count:
-                    number = max((clip_number(job, clip) for clip in clips), default=0)
-                    clips.extend(moment_clip(job, moment, number + i)
-                                 for i, moment in enumerate(new_moments[:count - len(clips)], 1))
-                job.update(clips=clips, moments=moments, analysis_complete=True, stage="Queued for rendering",
-                           retry_stage=None, chat_pending=defer_chat)
-                if ai_error is None:
-                    job["ai_candidates"] = ai
-                mark_stage(job, "viral_moment_detection", "completed", artifacts=("job.json#moments",))
-                store.save(job)
-                for clip in clips:
-                    if clip["status"] == "queued":
-                        pending.put((jid, clip["id"], generation))
-            finish(jid, generation)
+            publish_analysis(jid, generation, ai, ai_error, chat, fields,
+                             defer_chat=defer_chat, ai_required=bool(podcast or upload))
             if defer_chat:
                 pending.background(lambda: complete_chat(jid, generation, collect_chat, automatic=True))
         except WorkCancelled:
