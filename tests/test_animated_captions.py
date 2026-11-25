@@ -17,6 +17,49 @@ def word(text, start, end):
     return SimpleNamespace(word=text, start=start, end=end)
 
 
+@pytest.mark.parametrize('preset', ['classic', 'minimal', 'pop'])
+def test_rendered_cues_fit_two_lines_without_discarding_text(preset):
+    text = 'A very long corrected subtitle with several meaningful words that should all be visible'
+    ass = to_ass([Caption(0, 2, text)], CaptionStyle(preset=preset, size=130))
+    event = next(line for line in ass.splitlines() if line.startswith('Dialogue:'))
+    rendered = re.sub(r'\{[^}]+\}', '', event.split(',', 9)[-1]).split(r'\N')
+    assert len(rendered) <= 2
+    assert ' '.join(rendered) == text
+
+
+def test_phrase_correction_keeps_timing_through_director_edits():
+    from shorts_clipper.captions import apply_caption_edits
+    from shorts_clipper.director import Plan, Segment, remap_captions
+
+    captions = chunk_words([word(' Bahasa', 3, 3.3), word(' In donesia!', 3.4, 4), word(' yes', 4.2, 4.5)])
+    apply_caption_edits(captions, [{'find': 'bahasa in donesia', 'replace': 'Bahasa Indonesia'}])
+    corrected = remap_captions(captions, Plan([Segment(2, 5)]))
+    assert corrected[0].text == 'Bahasa Indonesia!'
+    assert corrected[0].words[0].start == 1
+    assert corrected[0].words[0].end == pytest.approx(1.3)
+    assert corrected[0].words[1].start == pytest.approx(1.4)
+    assert corrected[0].words[1].end == 2
+    assert r'\t(' in to_ass(corrected)
+
+
+def test_phrase_correction_crosses_caption_cues_and_survives_export():
+    from shorts_clipper.captions import apply_caption_edits
+    from shorts_clipper.director import Plan, Segment, remap_captions
+
+    tokens = [word(' ' + text, 3 + i*.3, 3.25 + i*.3)
+              for i, text in enumerate('Now we speak Bahasa In donesia!'.split())]
+    captions = chunk_words(tokens)
+    assert [c.text for c in captions] == ['Now we speak Bahasa', 'In donesia!']
+    apply_caption_edits(captions, [{'find': 'bahasa in donesia', 'replace': 'Bahasa Indonesia'}])
+    corrected = remap_captions(captions, Plan([Segment(2, 5)]))
+    words = [w for c in corrected for w in c.words]
+    assert [w.word.strip() for w in words] == ['Now', 'we', 'speak', 'Bahasa', 'Indonesia!']
+    assert words[3].start == pytest.approx(1.9)
+    assert words[4].end == pytest.approx(2.75)
+    ass = to_ass(corrected, CaptionStyle(preset='minimal'))
+    assert 'Indonesia!' in ass and 'donesia!' not in ass.replace('Indonesia!', '')
+
+
 @pytest.mark.parametrize('available', [True,False])
 def test_fitted_caption_font_sizes_are_reused_between_cues(monkeypatch,available):
     from shorts_clipper.captions import fit_caption_style

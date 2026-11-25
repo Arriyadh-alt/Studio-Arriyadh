@@ -96,6 +96,14 @@ def test_upload_podcast_review_render_and_rights(monkeypatch, tmp_path, video):
         assert client.get(f"/api/jobs/{jid}/clips/{cid}/download").status_code == 200
         text = client.get(f"/api/jobs/{jid}/clips/{cid}/description").json()["text"]
         assert "Source: My Episode" in text and "AI-generated commentary" in text and "Licensed" in text
+        monkeypatch.setattr("clipper_studio.api.frame_conversation", lambda *args: None)
+        assert client.post(f"/api/jobs/{jid}/clips/{cid}/render",
+                           json={"start": clip["start"], "end": clip["end"], "director": {"enabled": False},
+                                 "podcast": {"version": "original"}}).status_code == 202
+        app.state.pending.join()
+        clip = client.get(f"/api/jobs/{jid}").json()["clips"][0]
+        assert clip["status"] == "ready" and clip["needs_review"]
+        assert clip["tracking_result"]["status"] == "unavailable"
 
 
 def test_gaming_jobs_keep_chat_and_open_exports(monkeypatch, tmp_path):

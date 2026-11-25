@@ -33,6 +33,7 @@ globalThis.MomentReview = (() => {
     return `<article class="moment-card ${m.status==='rejected'?'is-rejected':''}" data-moment="${esc(m.id)}">
       <div class="moment-meta"><strong class="moment-rank">#${m.rank}</strong><span>${range(m)} · ${Math.round(m.duration)}s</span><span class="moment-source">${source(m)}</span></div>
       <h3>${esc(m.title || 'Stream reaction')}</h3><p class="moment-description">${esc(m.description)}</p>${PodcastControls.momentHtml(m,rendered,job)}
+      ${!rendered && !podcast() && job.request?.captions!==false ? `<details><summary>Subtitle corrections</summary><form class="moment-captions">${CaptionControls.corrections(m.caption_edits)}<button type="submit">Save subtitle fixes</button></form></details>` : ''}
       <div class="potential"><span>Viral Potential</span><strong>${Math.round(m.score)}<small> / 100</small></strong></div><progress max="100" value="${m.score}" aria-label="Viral Potential ${m.score} out of 100"></progress>
       <p class="moment-reason">${esc(m.reason)}</p>
       ${m.alternatives?`<details class="moment-alternatives"><summary>Compare AI &amp; chat ranges</summary>${['ai','chat'].map(s=>`<div><span>${s==='ai'?'AI':'Chat'}: ${range(m.alternatives[s])}</span><button type="button" data-moment-action="${s}" ${rendered?'disabled':''}>Apply ${s==='ai'?'AI':'chat'}</button></div>`).join('')}</details>`:''}
@@ -110,6 +111,12 @@ globalThis.MomentReview = (() => {
     drafts.set(node.dataset.moment,Object.fromEntries(new FormData(node.querySelector('.moment-times'))));
   });
   panel.addEventListener('submit',event=>{
+    if(event.target.matches('.moment-captions')) {
+      event.preventDefault();
+      const node=event.target.closest('[data-moment]');
+      action(node,()=>request(`/${node.dataset.moment}`,'PATCH',{caption_edits:CaptionControls.readCorrections(event.target)}));
+      return;
+    }
     if(event.target.matches('.moment-podcast')) {
       event.preventDefault();
       const node=event.target.closest('[data-moment]');

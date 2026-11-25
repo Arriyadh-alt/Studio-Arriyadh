@@ -106,10 +106,41 @@ def test_story_arc_builds_up_before_the_event_and_ends_after_the_reaction():
     assert not any(w.start + 0.01 < t < w.end - 0.01 for w in words for t in (nonstop["start"], nonstop["end"]))
 
 
+def test_story_limit_stops_at_the_completed_sentence_before_continuous_speech():
+    words = speech([(0, 34)])
+    words += [word(34, 'Finished.', .3), word(34.32, 'The', .3),
+              word(34.66, 'next', .3), word(35, 'sentence', .48)]
+    arc = story_arc(np.full(400, -24.0), words, 40, peak=20)
+    assert arc["event"] == 20
+    assert arc["end"] == 34.3
+
+
 def test_intro_length_fits_text_and_voice():
     assert 2.5 <= intro_length("Short one") <= 3.3
     assert intro_length("x" * 60) == 3.3
     assert intro_length("Short", voice=3.2) == 3.6
+
+
+def test_full_story_retains_ordered_beats_without_stacked_intro_effects():
+    words = speech([(5, 13), (19, 24), (26, 29)])
+    captions = [Caption(w.start, w.end, w.word, [w]) for w in words]
+    plan = plan_edit(levels(36, loud=[(20, 23)], quiet=[(14, 18), (29, 36)]), captions, 36,
+                     DirectorOptions(), peak=21, trigger=18.5, story={"language": "en"})
+    assert [beat["name"] for beat in plan.beats] == ["hook", "context", "buildup", "climax", "reaction", "payoff"]
+    assert all(a["end"] == b["start"] for a, b in zip(plan.beats, plan.beats[1:]))
+    assert plan.map_time(18.5) is not None and plan.map_time(26.0) is not None
+    assert not plan.flashes and not plan.shakes and len(plan.sfx) <= 2
+
+
+def test_quiet_duplicate_sentence_can_be_cut_but_not_inside_a_story_beat():
+    from shorts_clipper.director import _repeated_sentences
+
+    words = [word(t+i*.3, token, .2) for t in (1, 3)
+             for i, token in enumerate("Here is the entrance.".split())]
+    words.append(word(5, "Okay."))
+    quiet = levels(7) - 12
+    assert _repeated_sentences(words, quiet, 0, 7, []) == [(2.9, pytest.approx(4.2))]
+    assert _repeated_sentences(words, quiet, 0, 7, [(3, 4)]) == []
 
 
 def test_plan_opens_with_story_intro_then_build_up_event_and_reaction():
@@ -125,7 +156,8 @@ def test_plan_opens_with_story_intro_then_build_up_event_and_reaction():
     assert hook["style"] == "story" and "Windah Basudara" in hook["text"] and hook["category"] == "karma"
     assert hook["text"] == hook["options"][0] and hook["build_up"] >= 5 and hook["payoff"] >= 3.5
     assert plan.map_time(hook["event"]) > intro.length
-    assert [kind for _, kind in plan.sfx][:2] == ["hit", "boing"]
+    assert [kind for t, kind in plan.sfx if t < intro.length] == ["boing"]
+    assert [kind for t, kind in plan.sfx if t >= intro.length] == ["hit"]
     assert plan.score["hook"] == 80  # scored on the written hook, not the original opening
     shown = remap_captions(captions(words), plan)
     assert shown[0].start >= intro.length - 0.01  # no captions over the hook card
