@@ -42,6 +42,24 @@ def test_phrase_correction_keeps_timing_through_director_edits():
     assert r'\t(' in to_ass(corrected)
 
 
+def test_phrase_correction_crosses_caption_cues_and_survives_export():
+    from shorts_clipper.captions import apply_caption_edits
+    from shorts_clipper.director import Plan, Segment, remap_captions
+
+    tokens = [word(' ' + text, 3 + i*.3, 3.25 + i*.3)
+              for i, text in enumerate('Now we speak Bahasa In donesia!'.split())]
+    captions = chunk_words(tokens)
+    assert [c.text for c in captions] == ['Now we speak Bahasa', 'In donesia!']
+    apply_caption_edits(captions, [{'find': 'bahasa in donesia', 'replace': 'Bahasa Indonesia'}])
+    corrected = remap_captions(captions, Plan([Segment(2, 5)]))
+    words = [w for c in corrected for w in c.words]
+    assert [w.word.strip() for w in words] == ['Now', 'we', 'speak', 'Bahasa', 'Indonesia!']
+    assert words[3].start == pytest.approx(1.9)
+    assert words[4].end == pytest.approx(2.75)
+    ass = to_ass(corrected, CaptionStyle(preset='minimal'))
+    assert 'Indonesia!' in ass and 'donesia!' not in ass.replace('Indonesia!', '')
+
+
 @pytest.mark.parametrize('available', [True,False])
 def test_fitted_caption_font_sizes_are_reused_between_cues(monkeypatch,available):
     from shorts_clipper.captions import fit_caption_style

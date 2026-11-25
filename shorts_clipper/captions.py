@@ -1,7 +1,9 @@
 """Local speech transcription and short, speech-timed captions."""
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
+from itertools import groupby
 from pathlib import Path
 import re
 import os
@@ -107,24 +109,29 @@ def text_width(text: str) -> float:
                for c in text)
 
 
-def join_tokens(tokens) -> str:
+def _token_parts(tokens):
     tokens = list(tokens)
     has_whitespace = any(token and token[0].isspace() for token in tokens)
-    text = ''
+    started = False
     hyphen_continuation = False
     for token in tokens:
         stripped = token.strip()
         if not stripped:
+            yield '', ''
             continue
         leading_space = token[0].isspace()
         continuation = (not leading_space and stripped[0] in "-’'"
                         and (has_whitespace or not re.match(r"[-’']\d", stripped))
-                        and text)
+                        and started)
         punctuation = stripped[0] in ',.;:!?%'
-        separator = '' if not text or continuation or punctuation or (hyphen_continuation and not leading_space) else ' '
-        text += separator + stripped
+        separator = '' if not started or continuation or punctuation or (hyphen_continuation and not leading_space) else ' '
+        yield separator, stripped
+        started = True
         hyphen_continuation = bool(continuation and stripped == '-')
-    return text
+
+
+def join_tokens(tokens) -> str:
+    return ''.join(separator + token for separator, token in _token_parts(tokens))
 
 
 def wrap_caption(text: str) -> list[str]:
@@ -164,24 +171,27 @@ class TimedWord:
 
 
 def _correct_words(words, pattern, replacement):
-    text = join_tokens(w.word for w in words)
-    spans = []
-    for i, word in enumerate(words, 1):
-        end = len(join_tokens(w.word for w in words[:i]))
-        spans.append((end - len(word.word.strip()), end))
+    parts, starts, ends = [], [], []
+    end = 0
+    for separator, token in _token_parts(w.word for w in words):
+        parts.append(separator + token)
+        starts.append(end + len(separator))
+        end = starts[-1] + len(token)
+        ends.append(end)
+    text = ''.join(parts)
     groups = []
     for match in pattern.finditer(text):
-        hits = [i for i, (a, b) in enumerate(spans) if a < match.end() and b > match.start()]
-        if not hits:
+        first = bisect_right(ends, match.start())
+        last = bisect_left(starts, match.end()) - 1
+        if first > last:
             continue
-        first, last = hits[0], hits[-1]
         if groups and first <= groups[-1][1]:
             first, _, previous = groups.pop()
             groups.append((first, last, [*previous, match]))
         else:
             groups.append((first, last, [match]))
     for first, last, matches in reversed(groups):
-        left, right = spans[first][0], spans[last][1]
+        left, right = starts[first], ends[last]
         corrected = text[left:right]
         for match in reversed(matches):
             corrected = corrected[:match.start()-left] + replacement + corrected[match.end()-left:]
@@ -204,13 +214,23 @@ def apply_caption_edits(captions, edits):
     """Reviewer subtitle fixes: whole-word, case-insensitive find/replace on caption text and timed words."""
     rules = [(re.compile(r"(?<!\w)" + re.escape(e["find"].strip()) + r"(?!\w)", re.I), e.get("replace", "").strip())
              for e in edits or () if e.get("find", "").strip()]
-    for caption in captions:
-        for pattern, replacement in rules:
-            if caption.words:
-                if _correct_words(caption.words, pattern, replacement):
-                    caption.text = join_tokens(w.word for w in caption.words)
-            else:
-                caption.text = " ".join(pattern.sub(lambda _: replacement, caption.text).split())
+    if not rules:
+        return captions
+    corrected = []
+    for timed, group in groupby(captions, key=lambda c: bool(c.words)):
+        cues = list(group)
+        if timed:
+            words = [w for c in cues for w in c.words]
+            changed = False
+            for pattern, replacement in rules:
+                changed |= _correct_words(words, pattern, replacement)
+            corrected.extend(chunk_words(words, clip_end=cues[-1].end) if changed else cues)
+        else:
+            for caption in cues:
+                for pattern, replacement in rules:
+                    caption.text = " ".join(pattern.sub(lambda _: replacement, caption.text).split())
+            corrected.extend(cues)
+    captions[:] = corrected
     return captions
 
 
