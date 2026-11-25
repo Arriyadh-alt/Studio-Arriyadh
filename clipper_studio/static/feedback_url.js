@@ -18,3 +18,7 @@ export function publishedVideoId(value) {
 export function isDifferentPublishedVideo(savedUrl, currentUrl) {
   return !!savedUrl && publishedVideoId(savedUrl) !== publishedVideoId(currentUrl);
 }
+
+export function setPublicationMetricsAvailable(available, panel, fieldset) {
+  panel.hidden = fieldset.disabled = !available;
+}

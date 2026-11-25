@@ -1,4 +1,4 @@
-import { isDifferentPublishedVideo } from './feedback_url.js';
+import { isDifferentPublishedVideo, setPublicationMetricsAvailable } from './feedback_url.js';
 
 const page = document.querySelector('#performance');
 const form = page.querySelector('#publication-form');
@@ -6,6 +6,7 @@ const importForm = page.querySelector('#performance-import');
 const chooser = form.elements.clip;
 const metricSelect = page.querySelector('#performance-compare');
 const metricsPanel = page.querySelector('#publication-metrics');
+const metricsFields = page.querySelector('#performance-metrics');
 const metricsResetNotice = page.querySelector('#publication-metrics-reset');
 const status = page.querySelector('#performance-status');
 const endpoint = './api/feedback';
@@ -57,7 +58,7 @@ for (const [name, label] of Object.entries(metricLabels)) {
   input.step = decimal.includes(name) ? 'any' : '1';
   if (ratios.includes(name)) input.max = 100;
   field.append(input);
-  page.querySelector('#performance-metrics').append(field);
+  metricsFields.append(field);
   const option = node('option', label);
   option.value = name;
   metricSelect.append(option);
@@ -67,7 +68,7 @@ const retention = node('textarea');
 retention.name = 'retention_graph';
 retention.placeholder = '[{"position_percent":0,"retained_percent":100},{"position_percent":50,"retained_percent":72}]';
 retentionLabel.append(retention, node('small', 'Use position within the video (0–100%) and the measured retention percentage.', 'hint'));
-page.querySelector('#performance-metrics').append(retentionLabel);
+metricsFields.append(retentionLabel);
 metricSelect.value = 'average_percentage_viewed';
 
 async function request(path = '', method = 'GET', data) {
@@ -131,7 +132,7 @@ function metricsBelongToCurrentVideo() {
 }
 
 function syncMetricsVisibility() {
-  metricsPanel.hidden = !metricsBelongToCurrentVideo();
+  setPublicationMetricsAvailable(metricsBelongToCurrentVideo(), metricsPanel, metricsFields);
   metricsResetNotice.hidden = !metricsPanel.hidden;
 }
 

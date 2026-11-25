@@ -8,6 +8,7 @@
 .performance-panel label,.performance-panel .performance-actions{margin:12px 0}
 .performance-panel pre{overflow:auto;white-space:pre-wrap;font-size:11px}
 .performance-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:12px}
+#performance-metrics{border:0;margin:0;padding:0;min-inline-size:0}
 .performance-fields .retention-field{grid-column:1/-1}
 .retention-field textarea{width:100%;min-height:76px;resize:vertical;padding:10px;font:inherit;color:var(--text);background:#101419;border:1px solid #424a56;border-radius:8px}
 .performance-actions{display:flex;flex-wrap:wrap;gap:8px}
