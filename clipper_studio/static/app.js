@@ -1,6 +1,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const busy = job => ['queued', 'running'].includes(job.status);
+const canCancel = job => busy(job) || job.chat_pending || job.chat_retrying;
 let current = null;
 let timer;
 let poll = null;
@@ -314,9 +315,10 @@ function drawJob(job) {
   $('#stage').textContent = job.stage;
   $('#progress').value = job.progress;
   $('#progress-label').textContent = `${Math.round(job.progress*100)}%`;
-  const cancellable = busy(job) && 'queue_position' in job;
+  const cancellable = canCancel(job) && 'queue_position' in job;
   $('#cancel-job').hidden = !cancellable;
-  $('#cancel-hint').hidden = !cancellable;
+  $('#cancel-job').textContent = busy(job) ? 'Cancel job' : 'Cancel chat analysis';
+  $('#cancel-hint').hidden = !cancellable || !busy(job);
   $('#job-error').hidden = !job.error;
   $('#job-error').textContent = job.error || '';
   $('#analysis-detail').hidden = !busy(job) || !job.analysis_detail;
@@ -493,7 +495,9 @@ function draftFeedback(node) {
   $('.review [type=submit]',node).disabled=locked(clip)||!!error;
 }
 $('#cancel-job').addEventListener('click',async event=>{
-  if(!current || !busy(current) || !confirm('Cancel this job? Ready clips will be kept.'))return;
+  if(!current || !canCancel(current))return;
+  if(!confirm(busy(current) ? 'Cancel this job? Ready clips will be kept.' :
+    'Cancel chat analysis? Existing moments and clips will be kept.')) return;
   const jid=current.id;
   event.target.disabled=true;
   try {notice('');await api(`./api/jobs/${jid}/cancel`,'POST');await refresh();}

@@ -1,11 +1,15 @@
+import signal
+import subprocess
+import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from clipper_studio.api import CHAT_FALLBACK_WARNING, JobRequest, Store, create_app
-from clipper_studio.chat import ChatReplayError, REPLAY_LIMIT_MESSAGE
+from clipper_studio.chat import ChatReplayError, REPLAY_LIMIT_MESSAGE, fetch_chat
 from shorts_clipper.youtube import YouTubeAccessError
 from test_api import REPLAY_URL, media, metadata, saved_job, wait_job
 
@@ -144,7 +148,8 @@ def test_ai_starts_without_waiting_for_chat(monkeypatch, tmp_path, analysis):
         assert job["status"] == "completed" and job["chat_error"] == "Chat replay unavailable"
 
 
-def test_ai_publishes_and_renders_while_chat_is_scoring(monkeypatch, tmp_path, analysis, media):
+@pytest.mark.parametrize("cancel", [False, True])
+def test_ai_publishes_and_renders_while_chat_is_scoring(monkeypatch, tmp_path, analysis, media, cancel):
     scoring, release = threading.Event(), threading.Event()
 
     def score(*args, **kwargs):
@@ -167,14 +172,57 @@ def test_ai_publishes_and_renders_while_chat_is_scoring(monkeypatch, tmp_path, a
                                  any(clip["status"] == "ready" for clip in job["clips"]))
             assert published["moments"][0]["sources"] == ["ai"]
             assert published["stages"]["chat_analysis"]["status"] == "processing"
+            if cancel:
+                assert published["status"] == "completed"
+                assert client.post(f"/api/jobs/{jid}/cancel").status_code == 200
         finally:
             release.set()
         app.state.pending.join()
         finished = client.get(f"/api/jobs/{jid}").json()
         assert finished["moments"][0] == published["moments"][0]
         assert finished["clips"][0]["id"] == published["clips"][0]["id"]
+        if cancel:
+            assert finished["moments"] == published["moments"]
+            assert finished["clips"] == published["clips"]
+            assert finished["status"] == "completed"
+            assert not finished["chat_pending"]
+            assert finished["stages"]["chat_analysis"]["status"] == "failed"
+            return
         assert finished["stages"]["chat_analysis"]["status"] == "completed"
         assert any(moment["sources"] == ["chat"] for moment in finished["moments"])
+
+
+def test_cancel_completed_job_kills_chat_download(monkeypatch, tmp_path, analysis, media):
+    started = threading.Event()
+    processes = []
+
+    def spawn(*args, **kwargs):
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+        processes.append(process)
+        started.set()
+        return process
+
+    monkeypatch.setattr("clipper_studio.download_worker.subprocess", SimpleNamespace(Popen=spawn))
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", fetch_chat)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": False}).json()["id"]
+        try:
+            assert started.wait(5)
+            published = wait_job(client, jid, lambda job: job["status"] == "completed" and job["chat_pending"])
+            assert published["clips"][0]["status"] == "ready"
+            assert processes[0].poll() is None
+            assert client.post(f"/api/jobs/{jid}/cancel").status_code == 200
+            assert processes[0].wait(timeout=5) == -signal.SIGKILL
+        finally:
+            if processes and processes[0].poll() is None:
+                processes[0].kill()
+                processes[0].wait(timeout=5)
+        app.state.pending.join()
+        finished = client.get(f"/api/jobs/{jid}").json()
+        assert finished["moments"] == published["moments"]
+        assert finished["clips"] == published["clips"]
+        assert not finished["chat_pending"]
 
 
 @pytest.mark.parametrize("ai_analysis", [False, True])

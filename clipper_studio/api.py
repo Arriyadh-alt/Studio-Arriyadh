@@ -1768,10 +1768,19 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     def cancel_job(jid: str):
         with store.lock:
             job = store.get(jid)
-            if job["status"] not in ("queued", "running", "cancelled"):
+            cancel_chat = job.get("chat_pending") or job.get("chat_retrying")
+            cancel_job_work = job["status"] in ("queued", "running", "cancelled")
+            if not cancel_job_work and not cancel_chat:
                 raise HTTPException(409, "This job has already finished")
-            job.update(status="cancelled", stage="Cancelled. In-flight work stops at the next stage boundary.",
-                       generation=job.get("generation", 0) + 1, chat_retrying=False, chat_pending=False)
+            if cancel_job_work:
+                job.update(status="cancelled", stage="Cancelled. In-flight work stops at the next stage boundary.")
+            job.update(generation=job.get("generation", 0) + 1, chat_retrying=False, chat_pending=False)
+            chat_stage = stage_states(job)["chat_analysis"]
+            if chat_stage["status"] in ("processing", "retrying"):
+                error = "Chat analysis was cancelled."
+                mark_stage(job, "chat_analysis", "partially_completed" if job.get("message_count") else "failed",
+                           error=error)
+                job["chat_error"] = error
             for clip in job["clips"]:
                 if clip["status"] in ("queued", "rendering"):
                     previous = clip.pop("previous_render", None)
@@ -1786,7 +1795,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             for key in list(metadata_cache):
                 if key[0] == jid:
                     metadata_cache.pop(key)
-        return {"id": jid, "status": "cancelled"}
+        return {"id": jid, "status": job["status"]}
 
     @app.patch("/api/jobs/{jid}/clips/{cid}")
     def keep_clip(jid: str, cid: str, request: KeepRequest):
