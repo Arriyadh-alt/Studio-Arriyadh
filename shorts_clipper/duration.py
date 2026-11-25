@@ -58,13 +58,17 @@ def boundary_options(words, activity, duration, window, peak, trigger=None, *, o
             outcome = max(outcome, b)
     outcome = min(hi, outcome)
     anchor = max(lo, min(start, event - .5))
-    evidence_start = min((a for a, b in evidence if b >= anchor and a <= event), default=anchor)
-    earliest = min(anchor, evidence_start)
+    setup = anchor
+    for a, b in sorted(evidence, key=lambda interval: interval[1], reverse=True):
+        if b < setup - 2.5:
+            break
+        if max(lo, a) < setup:
+            setup = max(lo, a)
     options = {}
     for preset, (minimum, maximum) in PRESET_RANGES.items():
         pairs = [(a, b) for a in starts for b in ends
                  if minimum <= b - a <= maximum and b >= outcome - .35
-                 and a >= earliest - 1.5 and b <= max(outcome + 2.0, end + .35)]
+                 and setup - 1.5 <= a <= setup and b <= max(outcome + 2.0, end + .35)]
         if pairs:
             a, b = min(pairs, key=lambda pair: (abs(pair[0] - anchor) + abs(pair[1] - outcome),
                                                pair[1] - pair[0]))

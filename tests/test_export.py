@@ -33,6 +33,18 @@ def test_presets_follow_completed_speech_and_do_not_add_filler():
     assert "story" not in options and "extended" not in options
 
 
+def test_quick_preset_is_not_offered_if_it_would_drop_the_setup():
+    words = [{"start": 8, "end": 11.8, "word": "Setup."},
+             {"start": 12.5, "end": 13.2, "word": "Context."},
+             {"start": 33, "end": 35.8, "word": "Payoff."}]
+    activity = np.zeros(60)
+    activity[12:36] = .4
+    options = boundary_options(words, activity, 60, (12., 36.), 30, 27)
+    assert "quick" not in options
+    assert options["standard"]["start"] <= 8
+    assert options["standard"]["end"] >= 35.8
+
+
 def test_approved_source_timeline_is_not_recropped_by_the_director():
     levels = np.full(600, -38.)
     levels[188:229] = -8.
