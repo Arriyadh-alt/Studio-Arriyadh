@@ -191,16 +191,13 @@ def test_editing_modes_render_and_persist(monkeypatch, tmp_path, source, mode):
         with video_path.open("rb") as mp4:
             header = mp4.read(128)
         assert b"ftyp" in header and b"moov" in header
-        if mode == "full":
-            assert v["avg_frame_rate"] == "30/1"
-        else:
+        assert v["r_frame_rate"] == "24000/1001" and a["sample_rate"] == "48000"
+        assert (v["color_space"], v["color_transfer"], v["color_primaries"]) == ("bt709", "bt709", "bt709")
+        if mode != "full":
             assert report["style"] == "funny" and report["checks"]["context"]["status"] == "pass"
             assert not report["operations"]["synthetic_audio"] and not report["operations"]["generated_footage"]
             assert clip["director_result"]["edits"]["cuts"] > 0
             assert report["operations"]["loop_blend"] == (mode == "enhanced")
-            assert v["r_frame_rate"] == "24000/1001" and a["sample_rate"] == "48000"
-            assert (v["color_space"], v["color_transfer"], v["color_primaries"]) == ("bt709", "bt709", "bt709")
-            assert 12_000_000 <= int(v["bit_rate"]) <= 20_000_000
         if mode == "natural":
             base = f"/api/jobs/{jid}/clips/{clip['id']}"
             edit = client.post(base + "/thumbnail", json={"text": "New record"})

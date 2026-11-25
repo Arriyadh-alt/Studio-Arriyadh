@@ -89,7 +89,7 @@ def test_cookie_blocking_is_a_friendly_job_error(monkeypatch, tmp_path, phase, c
         monkeypatch.setenv("YOUTUBE_COOKIES", "mock cookies")
     calls = []
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         calls.append(phase)
         error = YouTubeAccessError if phase == "section" else ChatReplayError
         raise error(blocking_message("HTTP Error 429: Too Many Requests"))
@@ -131,8 +131,8 @@ def metadata(monkeypatch):
 
 
 @pytest.fixture
-def media(monkeypatch):
-    monkeypatch.setattr("clipper_studio.api.download_section", lambda url, directory, *a: directory / "source.mp4")
+def media(monkeypatch, stub_export_validation):
+    monkeypatch.setattr("clipper_studio.api.download_section", lambda url, directory, *a, **kw: directory / "source.mp4")
     monkeypatch.setattr("clipper_studio.api.video_duration", lambda p: 30)
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p: [])
     monkeypatch.setattr("clipper_studio.api.make_vertical_clip", lambda source, output, *a, **kw: output.write_bytes(b"video"))
@@ -157,7 +157,7 @@ def saved_job(jid, status="completed"):
                        "mode": "crop", "captions": False, "kept": True}]}
 
 
-def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
+def test_pipeline_and_file_endpoints(monkeypatch, tmp_path, stub_export_validation):
     stages = []
     save = Store.save
     def record_stage(store, job):
@@ -169,7 +169,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
         {"title": "🔴 Test!", "duration": 600, "thumbnail": None},
         [Message(t, str(i), "W") for t in (100, 300, 500) for i in range(20)]))
     download_attempts = []
-    def section(url, directory, start, end):
+    def section(url, directory, start, end, **kwargs):
         download_attempts.append(start)
         if len(download_attempts) == 1:
             raise RuntimeError("Transient download failure")
@@ -180,7 +180,7 @@ def test_pipeline_and_file_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr("clipper_studio.api.video_duration", lambda p: 40)
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **kwargs: [])
     render_attempts = []
-    def convert(source, output, *args, watermark):
+    def convert(source, output, *args, watermark, **kwargs):
         assert watermark.path.is_file()
         render_attempts.append(output)
         if len(render_attempts) == 1:
@@ -419,12 +419,12 @@ def test_queued_job_survives_new_client_and_worker_continues(monkeypatch, tmp_pa
         assert calls == [REPLAY_URL, "https://www.youtube.com/watch?v=puMjBYns9L0"]
 
 
-def test_delete_queued_during_autopilot(monkeypatch, tmp_path):
+def test_delete_queued_during_autopilot(monkeypatch, tmp_path, stub_export_validation):
     entered, release = threading.Event(), threading.Event()
     monkeypatch.setattr("clipper_studio.api.fetch_chat", lambda *a: ({"duration":600}, []))
     monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: (
         [{"start":10,"end":40}, {"start":100,"end":130}], []))
-    def section(*args):
+    def section(*args, **kwargs):
         entered.set()
         assert release.wait(5)
         return args[1] / "source.mp4"
@@ -538,7 +538,7 @@ def test_cancel_render_and_rerender_ignores_stale_work(monkeypatch, tmp_path, me
     entered, release = threading.Event(), threading.Event()
     downloads, conversions = [], []
 
-    def section(url, directory, start, end):
+    def section(url, directory, start, end, **kwargs):
         downloads.append(start)
         if len(downloads) == 1:
             entered.set()
@@ -585,7 +585,7 @@ def test_cancel_rerender_restores_previous_ready_render(monkeypatch, tmp_path, m
     entered, release = threading.Event(), threading.Event()
     downloads = []
 
-    def section(url, directory, start, end):
+    def section(url, directory, start, end, **kwargs):
         downloads.append(start)
         if not release.is_set():
             entered.set()
@@ -682,7 +682,7 @@ def test_parallel_renders_preserve_concurrent_review_updates(monkeypatch, tmp_pa
     entered = threading.Barrier(3)
     release = threading.Event()
 
-    def section(url, directory, *args):
+    def section(url, directory, *args, **kwargs):
         entered.wait(timeout=5)
         assert release.wait(5)
         return directory / "source.mp4"

@@ -45,9 +45,12 @@ from shorts_clipper.director import (STEP, DirectorOptions, plan_podcast_edit, E
                                      hook_title_ass, loudness, make_seamless_loop, mix_audio, normalize_loudness,
                                      plan_edit, plan_record, quality_check, remap_captions)
 from shorts_clipper.editing import MODE_DEFAULTS, authenticity_report, plan_source_edit, record_operations
+from shorts_clipper.duration import DurationPreset, MAX_DURATION, PRESET_RANGES
+from shorts_clipper.export import check_export, editorial_check
 from shorts_clipper.story import game_name, hook_language, streamer_name
 from shorts_clipper.voices import DELIVERY_CHOICES, MOODS, PERSONAS, SAMPLES, VOICE_CHOICES, narrate
-from shorts_clipper.video import detect_focal_x, make_vertical_clip, source_frame_rate, video_duration
+from shorts_clipper.video import (EXPORT_SOURCE_HEIGHTS, ExportPreset, detect_focal_x, make_vertical_clip,
+                                  source_frame_rate, source_size, video_duration)
 from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facecam,
                                     layout_facecam, save_source_still)
 from shorts_clipper.tracking import analyze_reaction, keyframe_expression, layout_options, plan_reframe, to_output_time
@@ -234,6 +237,7 @@ class JobRequest(BaseModel):
     caption_style: dict | None = None
     editing_mode: EditingMode = "full"
     director: DirectorSpec = Field(default_factory=DirectorSpec)
+    export_preset: ExportPreset = "full_hd"
 
     @field_validator("url")
     @classmethod
@@ -283,6 +287,8 @@ class RenderRequest(BaseModel):
     editing_mode: EditingMode = "full"
     director: DirectorSpec = Field(default_factory=DirectorSpec)
     podcast: PodcastSpec | None = None
+    duration_preset: DurationPreset | None = None
+    export_preset: ExportPreset | None = None
 
 
 class KeepRequest(BaseModel):
@@ -294,10 +300,12 @@ class MomentPatch(BaseModel):
     start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     end: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     podcast: PodcastSpec | None = None
+    duration_preset: DurationPreset | None = None
 
 
 class MomentRender(BaseModel):
     ids: list[str] | None = None
+    export_preset: ExportPreset | None = None
 
 
 class ThumbnailRequest(BaseModel):
@@ -512,14 +520,19 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     branding, logo = BrandingSettings.read(store.root), read_logo(store.root)
                 update(jid, generation, stage=f"{clip_label} · Downloading")
                 upload = upload_path(job)
+                approved = spec.get("approved_timeline", False)
                 editing_mode = spec.get("editing_mode", "full")
                 professional = editing_mode != "full"
-                source = (local_section(upload, work, spec["start"], spec["end"], professional=professional) if upload else
-                          download_section(job["url"], work, spec["start"], spec["end"]))
+                export_preset = spec.get("export_preset") or "full_hd"
+                source = (local_section(upload, work, spec["start"], spec["end"], professional=True) if upload else
+                          download_section(job["url"], work, spec["start"], spec["end"],
+                                           max_height=EXPORT_SOURCE_HEIGHTS[export_preset],
+                                           check=lambda: check_job(jid, generation)))
+                selected_duration = spec["end"] - spec["start"]
                 duration = min(video_duration(source), spec["end"] - spec["start"])
                 subtitles, captions = None, []
                 caption_language = None
-                fps = (source_frame_rate(source) or "30/1") if professional else None
+                fps = source_frame_rate(source) or "30/1"
                 director = DirectorOptions.from_dict(spec.get("director") or LEGACY_DIRECTOR)
                 podcast = is_podcast(job)
                 choice = PodcastSpec.model_validate(spec.get("podcast") or {}) if podcast else None
@@ -596,6 +609,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         reaction, tracking_result = None, {"status": "unavailable"}
                         logger.warning("Reaction tracking unavailable for %s/%s", jid, cid, exc_info=True)
                 trigger = reaction.trigger if reaction is not None else None
+                edit_trigger = trigger["trigger"] if trigger else None
+                if edit_trigger is None and spec.get("trigger") is not None:
+                    offset = spec["trigger"] - spec["start"]
+                    edit_trigger = offset if 0 <= offset < duration else None
                 if director.enabled:
                     set_stage(jid, generation, "ai_director", "processing",
                               stage=f"{clip_label} · AI Director planning edits")
@@ -609,8 +626,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                             plan, adaptive_style = plan_source_edit(
                                 levels if levels is not None else loudness(source, duration), transcript, duration,
                                 director, mode=editing_mode, category=spec.get("category"), peak=peak,
-                                trigger=trigger["trigger"] if trigger else None, spike_score=spec.get("score"),
-                                quote_time=teaser["start"] - spec["start"] if "start" in teaser else None,
+                                trigger=edit_trigger, spike_score=spec.get("score"),
+                                quote_time=teaser["start"] - spec["start"] if "start" in teaser else None, approved=approved,
                                 title_voice=lambda text, **limits: context["voice"](
                                     text, context["language"], voice=director.voice, delivery=director.delivery, **limits))
                             if len(plan.segments) > 1:
@@ -625,8 +642,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                                      voice=lambda text: context["voice"](text, context["language"],
                                                                                          voice=director.voice,
                                                                                          delivery=director.delivery,
-                                                                                         max_seconds=COMMENTARY_SECONDS))
-                            directed = cut_source(source, work / "directed.mp4", plan)
+                                                                                         max_seconds=COMMENTARY_SECONDS),
+                                                     approved=approved)
+                            directed = cut_source(source, work / "directed.mp4", plan, fps=fps, professional=True)
                         else:
                             plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
                                              duration, director, peak,
@@ -634,8 +652,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                              story_context(stream_metadata(jid, generation, job), spec,
                                                            caption_language or getattr(captions, "language", None), work,
                                                            store.root / "voices"),
-                                             trigger=trigger["trigger"] if trigger else None)
-                            directed = cut_source(source, work / "directed.mp4", plan)
+                                             trigger=edit_trigger, approved=approved,
+                                             source_bounds=spec.get("proposed_timeline", False))
+                            if len(plan.segments) > 1 or plan.segments[0].start != 0:
+                                directed = cut_source(source, work / "directed.mp4", plan, fps=fps, professional=True)
                     except Exception:
                         plan, directed, adaptive_style = None, None, None
                         director_result = {"status": "unavailable"}
@@ -766,8 +786,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     subtitles.write_text(ass, encoding="utf-8")
                 effects = ({"effects": effects_for(plan)} if plan else
                            {"effects": Effects(focal=keyframe_expression(camera_keys))} if camera_keys else {})
-                if professional:
-                    effects.update(export_fps=fps, silent_audio=not has_audio(render_source))
+                effects.update(export_fps=fps, silent_audio=not has_audio(render_source), export_preset=export_preset,
+                               use_hardware=spec.get("attempt", 1) == 1)
                 update(jid, generation, stage=f"{clip_label} · Checking authenticity")
                 authenticity = authenticity_report(job, spec, plan, transcript, shown, duration, style=adaptive_style,
                                                    hook=spec.get("thumbnail_text") or hook, tracking=tracking_result)
@@ -779,16 +799,17 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     options = {"facecam": camera} if camera is not None else {}
                     make_vertical_clip(render_source, video, 0, render_duration, spec["mode"], subtitles,
                                        watermark=watermark, **options, **effects)
+                    return watermark
 
                 update(jid, generation, stage=f"{clip_label} · Rendering")
                 if overlay is None:
-                    render_vertical()
+                    watermark = render_vertical()
                 else:
                     try:
-                        render_vertical(overlay)
+                        watermark = render_vertical(overlay)
                     except Exception:
                         result = {"status": "unavailable", "box": None}
-                        render_vertical()
+                        watermark = render_vertical()
                 mixed_audio = False
                 if plan and (not professional or plan.voiceover or plan.music or plan.sfx or plan.voice_clarity):
                     update(jid, generation, stage=f"{clip_label} · AI Director mixing audio")
@@ -810,7 +831,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         looped = work / "looped.mp4"
                         try:
                             plan.loop = make_seamless_loop(video, looped, shown, speech=edited_captions,
-                                                          **({"professional": True} if professional else {}))
+                                                          professional=True, export_preset=export_preset)
                             if plan.loop["status"] == "applied":
                                 looped.replace(video)
                         except (OSError, ValueError, KeyError, StopIteration, subprocess.CalledProcessError):
@@ -820,12 +841,24 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     try:
                         director_result = plan_record(plan, director, quality_check(
                             video, plan, shown, fixes, layout, tracking_result, export_fps=fps,
+                            export_preset=export_preset,
                             preserve_audio=professional and not (plan.voiceover or plan.music or plan.sfx or plan.voice_clarity)))
                     except Exception:
                         director_result = {"status": "unavailable"}
                         logger.warning("AI Director quality check failed for %s/%s", jid, cid, exc_info=True)
                     peak = plan.map_time(peak) if peak is not None else None
                 record_operations(authenticity, plan, mixed=mixed_audio)
+                update(jid, generation, stage=f"{clip_label} · Validating export")
+                export_qc = check_export(video, export_preset, selected_duration if approved else render_duration,
+                                         fps, watermark, source_size=source_size(source), approved=approved)
+                export_qc["editorial_checks"] = editorial_check(authenticity, director_result, tracking_result)
+                if export_qc["status"] == "failed":
+                    with store.lock:
+                        job = active_job(jid, generation)
+                        find_clip(job, cid).update(export_qc=export_qc, needs_review=True)
+                        store.save(job)
+                    failures = "; ".join(c["detail"] for c in export_qc["checks"] if c["status"] == "fail")
+                    raise RuntimeError(f"Export validation failed: {failures}")
                 update(jid, generation, stage=f"{clip_label} · Creating thumbnail")
                 thumbnail = work / "thumbnail.jpg"
                 try:
@@ -852,7 +885,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     else:
                         clip.pop("tracking_still_url", None)
                     clip["tracking_result"] = tracking_result
-                    clip["needs_review"] = bool(tracking_result.get("needs_review"))
+                    clip["needs_review"] = bool(tracking_result.get("needs_review") or export_qc["status"] == "needs_review")
+                    clip["export_qc"] = export_qc
                     clip["director_result"] = director_result
                     clip["director_stage"] = ("skipped" if not director.enabled else
                                               "failed" if director_result["status"] == "unavailable" else "completed")
@@ -1017,7 +1051,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                      (("mode", "crop"), ("captions", True), ("facecam", FacecamSpec().model_dump()),
                       ("tracking", TrackingSpec().model_dump()),
                       ("language", "auto"), ("caption_style", None), ("director", dict(LEGACY_DIRECTOR)),
-                      ("editing_mode", "full"))})
+                      ("editing_mode", "full"), ("export_preset", "full_hd"))})
+        clip.update(duration_preset=moment.get("duration_preset", "auto"),
+                    approved_timeline=bool(moment.get("approved_timeline") or
+                                           moment["end"] - moment["start"] >= MAX_DURATION - 1e-6),
+                    proposed_timeline=bool(moment.get("duration_options")))
+        if moment.get("trigger") is not None:
+            clip["trigger"] = moment["trigger"]
         if is_podcast(job):
             choice = {**(job["request"].get("podcast") or {}), **(moment.get("edits") or {})}
             clip.update(podcast=PodcastSpec.model_validate(choice).model_dump(),
@@ -1895,14 +1935,25 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 raise HTTPException(409, "Delete the rendered clip before changing this moment's status")
             start = request.start if request.start is not None else moment["start"]
             end = request.end if request.end is not None else moment["end"]
-            if request.start is not None or request.end is not None:
-                if not 0 <= start < end <= job["metadata"]["duration"] or end - start > 60 + 1e-6:
+            options = moment.get("duration_options")
+            if options and request.duration_preset is not None and request.start is None and request.end is None:
+                proposal = options.get(request.duration_preset)
+                if proposal is None:
+                    raise HTTPException(422, "No complete moment fits this duration preset. Try Auto or a different moment.")
+                start, end = proposal["start"], proposal["end"]
+            if request.start is not None or request.end is not None or request.duration_preset is not None:
+                if not 0 <= start < end <= job["metadata"]["duration"] or end - start > MAX_DURATION + 1e-6:
                     raise HTTPException(422, "Moment must be within the video and at most 60 seconds long")
+                preset = request.duration_preset or "auto"
+                minimum, maximum = PRESET_RANGES[preset]
+                if not minimum - 1e-6 <= end - start <= maximum + 1e-6:
+                    raise HTTPException(422, f"Choose a complete {minimum}–{maximum} second timeline for this preset.")
                 if moment.get("sources") == ["ai"]:
                     moment.setdefault("original_ai_range", {k: moment[k] for k in ("start", "end")})
                 elif moment.get("sources") == ["chat"]:
                     moment.setdefault("original_chat_range", {k: moment[k] for k in ("start", "end")})
-                moment.update(start=start, end=end, duration=end - start)
+                moment.update(start=start, end=end, duration=end - start, duration_preset=preset,
+                              approved_timeline=True, reviewed=True)
             if request.status is not None:
                 moment["status"] = request.status
             if request.podcast is not None:
@@ -1929,6 +1980,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             clips = [moment_clip(job, m, number + i) for i, m in enumerate(moments, 1)]
             for clip in clips:
                 clip["render_priority"] = True
+                if request.export_preset is not None:
+                    clip["export_preset"] = request.export_preset
             job["clips"].extend(clips)
             job.update(status="queued", stage="Queued for rendering", progress=0, error=None,
                        analysis_complete=True, processing_started=time.time())
@@ -1944,17 +1997,26 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             clip = find_clip(job, cid)
             if clip["status"] in ("rendering", "queued"):
                 raise HTTPException(409, "Wait for this highlight to finish rendering")
-            if request.end <= request.start or request.end - request.start > 60 or request.end > job["metadata"]["duration"]:
+            if request.end <= request.start or request.end - request.start > MAX_DURATION + 1e-6 or request.end > job["metadata"]["duration"]:
                 raise HTTPException(422, "Clip must be within the video and between 0 and 60 seconds long")
+            changed_range = (request.start, request.end) != (clip.get("start"), clip.get("end"))
+            preset = request.duration_preset or (None if changed_range else clip.get("duration_preset")) or "auto"
+            minimum, maximum = PRESET_RANGES[preset]
+            if not minimum - 1e-6 <= request.end - request.start <= maximum + 1e-6:
+                raise HTTPException(422, f"Choose a complete {minimum}–{maximum} second timeline for this preset.")
             if clip["status"] == "ready":
                 clip["previous_render"] = {key: clip[key] for key in (
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
                     "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url", "director",
                     "director_result", "tracking", "tracking_result", "tracking_still_url", "needs_review", "podcast") if key in clip}
                 clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language",
-                                                                             "authenticity")})
+                                                                             "authenticity", "duration_preset",
+                                                                             "approved_timeline", "export_preset", "export_qc")})
                 clip["previous_render"]["editing_mode"] = clip.get("editing_mode", "full")
             changes = request.model_dump(exclude={"podcast"})
+            changes["export_preset"] = request.export_preset or clip.get("export_preset") or "full_hd"
+            changes.update(duration_preset=preset, approved_timeline=(clip.get("approved_timeline") or changed_range
+                           or request.duration_preset is not None or request.end - request.start >= MAX_DURATION - 1e-6))
             current_mode = clip.get("editing_mode", "full")
             editing_mode = request.editing_mode if "editing_mode" in request.model_fields_set else current_mode
             changes["editing_mode"] = editing_mode
@@ -1967,6 +2029,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             clip.update(changes, status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
             clip.pop("authenticity", None)
+            clip.pop("export_qc", None)
             if job["status"] not in ACTIVE_STATUSES:
                 job.update(status="queued", stage="Queued re-render", progress=0, error=None,
                            processing_started=time.time())
@@ -1986,6 +2049,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 raise HTTPException(404, "File not found")
         extension = path.suffix
         return FileResponse(path, media_type="image/jpeg" if extension == ".jpg" else "video/mp4",
+                            headers={"Cache-Control": "no-store"} if extension == ".mp4" else None,
                             filename=f"{title_slug(job)}-highlight-{clip_number(job, clip):02d}{extension}" if download else None,
                             content_disposition_type="attachment" if download else "inline")
 

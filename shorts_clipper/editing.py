@@ -59,7 +59,7 @@ def source_quote(words, event=None):
 
 
 def plan_source_edit(levels, captions, duration, options, *, mode, category, peak=None, trigger=None,
-                     spike_score=None, title_voice=None, quote_time=None):
+                     spike_score=None, title_voice=None, quote_time=None, approved=False):
     """Keep the chosen highlight in source order, with cuts only in long, very quiet gaps."""
     words = transcript_words(captions)
     tone = edit_style(category, words, options.preset == "podcast")
@@ -77,7 +77,7 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
         protected.append((quote[1], quote[2]))
 
     segments, cursor, removed = [], 0.0, 0.0
-    if options.edits and timing.pause and words:
+    if options.edits and timing.pause and words and not approved:
         minimum = timing.pause - (.45 if mode == "enhanced" else 0)
         for a, b in find_silences(levels, words, 0, duration, protected, minimum=minimum):
             if max(levels[round(a / STEP):round(b / STEP)], default=0) > -45:
@@ -98,7 +98,7 @@ def plan_source_edit(levels, captions, duration, options, *, mode, category, pea
         if text:
             display_time = max(3., len(text.split()) / 2.5) if plan.commentary else 3.
             plan.hook = {"style": "source", "text": text, "duration": min(duration, display_time)}
-            available = MAX_OUTPUT - plan.duration - .45
+            available = 0. if approved else MAX_OUTPUT - plan.duration - .45
             voice_limit = available if plan.commentary else min(3., available)
             narration_lacks_time = options.voiceover and voice_limit < .5
             if title_voice and options.voiceover and voice_limit >= .5:
