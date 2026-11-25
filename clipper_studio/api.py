@@ -38,6 +38,7 @@ from shorts_clipper.branding import BrandingSettings, LOGO_LIMIT, normalize_logo
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, apply_caption_edits, caption_height, to_ass, transcribe
 from shorts_clipper.moments import _audio, analyze_media
 from shorts_clipper.podcast import analyze_podcast, transcribe_all, voice_features
+from shorts_clipper.scoring import SCORE_FIELDS, review_hook_fit
 from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source, source_track_kinds
 from shorts_clipper.speakers import frame_conversation
 from shorts_clipper.thumbnails import TEXT_LIMIT, choose_hook, generate_thumbnail
@@ -60,7 +61,7 @@ from .download_worker import run_download
 from .media_analysis import SEGMENTED_MIN_SECONDS, analyze_ranges
 from .scheduler import Scheduler
 from .spikes import detect_spikes
-from .ranking import add_chat_moments, chat_moment, merge_moments, refresh_suggestions
+from .ranking import add_chat_moments, chat_moment, merge_moments, rank_moments, refresh_suggestions
 from .stages import ANALYSIS_STAGES, RENDER_STAGES, RETRYABLE, AnalysisTracker, Checkpoints, Stage, mark_stage, stage_states
 
 
@@ -294,6 +295,13 @@ class MomentPatch(BaseModel):
     start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     end: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     podcast: PodcastSpec | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    selected_hook: str | None = Field(default=None, min_length=1, max_length=64)
+    mode: Literal["crop", "blur"] | None = None
+    captions: bool | None = None
+    layout: Literal["auto", "gameplay", "reaction", "split"] | None = None
+    framing: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    voiceover: bool | None = None
 
 
 class MomentRender(BaseModel):
@@ -341,6 +349,24 @@ def story_context(job, clip, caption_language, work, voices):
 
 def thumbnail_hook(job, clip, peak, captions=()):
     return choose_hook(captions, peak, clip.get("message_sample", ()), (job.get("metadata") or {}).get("title"))
+
+
+def rendered_media_info(path):
+    command = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+               "stream=width,height:format=duration", "-of", "json", str(path)]
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        try:
+            data, _ = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command)
+    info = json.loads(data)
+    stream = info["streams"][0]
+    return {"rendered_duration": float(info["format"]["duration"]),
+            "export_resolution": {"width": stream["width"], "height": stream["height"]}}
 
 
 class Store:
@@ -558,7 +584,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 plan, directed, director_result = None, None, {"status": "disabled"}
                 adaptive_style = None
                 peak = thumbnail_peak(spec, duration)
-                hook = "" if professional else thumbnail_hook(job, spec, peak, captions)
+                editorial_hook = director.hook_text if spec.get("selected_hook") else None
+                hook = "" if professional else editorial_hook or thumbnail_hook(job, spec, peak, captions)
                 tracking = TrackingSpec.model_validate(spec.get("tracking") or {})
                 facecam_options = (FacecamSpec(enabled=False) if podcast else
                                    FacecamSpec.model_validate(spec.get("facecam", {})))
@@ -596,6 +623,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         reaction, tracking_result = None, {"status": "unavailable"}
                         logger.warning("Reaction tracking unavailable for %s/%s", jid, cid, exc_info=True)
                 trigger = reaction.trigger if reaction is not None else None
+                analyzed_trigger = spec.get("trigger")
+                trigger_offset = (analyzed_trigger - spec["start"] if isinstance(analyzed_trigger, (int, float))
+                                  and spec["start"] <= analyzed_trigger < spec["end"] else
+                                  trigger["trigger"] if trigger else None)
                 if director.enabled:
                     set_stage(jid, generation, "ai_director", "processing",
                               stage=f"{clip_label} · AI Director planning edits")
@@ -609,7 +640,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                             plan, adaptive_style = plan_source_edit(
                                 levels if levels is not None else loudness(source, duration), transcript, duration,
                                 director, mode=editing_mode, category=spec.get("category"), peak=peak,
-                                trigger=trigger["trigger"] if trigger else None, spike_score=spec.get("score"),
+                                trigger=trigger_offset, spike_score=spec.get("score"),
                                 quote_time=teaser["start"] - spec["start"] if "start" in teaser else None,
                                 title_voice=lambda text, **limits: context["voice"](
                                     text, context["language"], voice=director.voice, delivery=director.delivery, **limits))
@@ -628,13 +659,20 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                                                                          max_seconds=COMMENTARY_SECONDS))
                             directed = cut_source(source, work / "directed.mp4", plan)
                         else:
+                            quote_span = spec.get("hook_quote_spans", {}).get(editorial_hook) if director.hook else None
+                            if quote_span:
+                                quote_start, quote_end = (t - spec["start"] for t in quote_span)
+                                quote_span = (quote_start, quote_end) if 0 <= quote_start < quote_end <= duration else None
                             plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
                                              duration, director, peak,
                                              spec.get("score"), spec.get("thumbnail_text") or hook,
                                              story_context(stream_metadata(jid, generation, job), spec,
                                                            caption_language or getattr(captions, "language", None), work,
                                                            store.root / "voices"),
-                                             trigger=trigger["trigger"] if trigger else None)
+                                             trigger=trigger_offset, quote_span=quote_span)
+                            if director.hook and editorial_hook and plan.hook is None:
+                                plan.hook = {"style": "source", "text": editorial_hook,
+                                             "duration": min(3., plan.duration)}
                             directed = cut_source(source, work / "directed.mp4", plan)
                     except Exception:
                         plan, directed, adaptive_style = None, None, None
@@ -834,6 +872,11 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     logger.warning("Could not style thumbnail for %s/%s; using the first frame", jid, cid)
                     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(video), "-frames:v", "1",
                                     "-vf", "scale=270:480", str(thumbnail)], check=True)
+                output = {}
+                try:
+                    output = rendered_media_info(video)
+                except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
+                    logger.debug("Could not inspect highlight output for %s/%s", jid, cid, exc_info=True)
                 with store.lock:
                     job = active_job(jid, generation)
                     clip = find_clip(job, cid)
@@ -860,7 +903,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     revision = str(time.time_ns())
                     clip.update(status="ready", rendered_at=int(revision), file_url=base + "/video",
                                 download_url=base + "/download", thumbnail_url=base + "/thumbnail",
-                                thumbnail_version=revision, thumbnail_hook=hook, caption_language=caption_language)
+                                thumbnail_version=revision, thumbnail_hook=hook, caption_language=caption_language,
+                                **output)
                     clip.pop("previous_render", None)
                     clip.pop("director_retry", None)
                     store.save(job)
@@ -1013,11 +1057,23 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     def moment_clip(job, moment, number):
         clip = {k: moment[k] for k in ("start", "end", "peak", "title", "description", "category",
                                        "sources", "score", "message_sample")}
+        clip.update({key: moment[key] for key in SCORE_FIELDS if key in moment})
         clip.update({k: job["request"].get(k, default) for k, default in
                      (("mode", "crop"), ("captions", True), ("facecam", FacecamSpec().model_dump()),
                       ("tracking", TrackingSpec().model_dump()),
                       ("language", "auto"), ("caption_style", None), ("director", dict(LEGACY_DIRECTOR)),
                       ("editing_mode", "full"))})
+        render_options = moment.get("render_options", {})
+        clip.update({key: render_options[key] for key in ("mode", "captions") if key in render_options})
+        if "layout" in render_options or "framing" in render_options:
+            layout = render_options.get("layout", clip["tracking"].get("layout", "auto"))
+            x = render_options.get("framing", clip["tracking"].get("x"))
+            clip["tracking"] = {**clip["tracking"], "enabled": True, "layout": layout,
+                                "x": x, "follow": "fixed" if x is not None else "auto"}
+        if "voiceover" in render_options or moment.get("selected_hook"):
+            clip["director"] = {**clip["director"],
+                                "voiceover": render_options.get("voiceover", clip["director"].get("voiceover", False)),
+                                "hook_text": moment.get("selected_hook") or clip["director"].get("hook_text")}
         if is_podcast(job):
             choice = {**(job["request"].get("podcast") or {}), **(moment.get("edits") or {})}
             clip.update(podcast=PodcastSpec.model_validate(choice).model_dump(),
@@ -1297,7 +1353,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
 
                 moments = analyze_ranges(duration, count, lead, language, fetch=fetch, checkpoint=tracking.run,
                                          expect=tracking.expect, progress=progress, check=check,
-                                         podcast=podcast, speakers=speakers)
+                                         podcast=podcast, speakers=speakers, data_dir=store.root)
             else:
                 cache.root.mkdir(exist_ok=True)
                 directory = cache.file("source")
@@ -1318,7 +1374,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                                                    lambda: [a.tolist() for a in _audio(path, length)]))
                 else:
                     moments = analyze_media(audio, video, duration, clips=count, lead=lead, language=language,
-                                            progress=progress, checkpoint=tracking.run, expect=tracking.expect)
+                                            progress=progress, checkpoint=tracking.run, expect=tracking.expect,
+                                            data_dir=store.root)
                     if audio is not None and video is None and "video_analysis" not in tracking.frozen:
                         publish("video_analysis", "processing")
                         tracking.errors["video_analysis"].add("source")
@@ -1373,6 +1430,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                else "No viral moments found")
                 if automatic and not job["request"].get("review", False):
                     slots = max(0, job["request"]["clips"] - len(job["clips"]))
+                    if any("score_breakdown" in m for m in job.get("ai_candidates", [])):
+                        slots = 0
                     new = [m for m in job["moments"] if m["id"] not in existing and "chat" in m["sources"]]
                     number = max((clip_number(job, clip) for clip in job["clips"]), default=0)
                     renders = [moment_clip(job, m, number + i) for i, m in enumerate(new[:slots], 1)]
@@ -1457,6 +1516,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 moments = merge_moments(ai, chat, duration, lead)
                 new_moments, clips = moments, []
             if not job["request"].get("review", False) and len(clips) < count:
+                editorial = any("score_breakdown" in m for m in ai)
+                new_moments = [m for m in new_moments if m.get("score_tier") != "hidden"
+                               and (not editorial or "ai" in m["sources"])]
                 number = max((clip_number(job, clip) for clip in clips), default=0)
                 clips.extend(moment_clip(job, moment, number + i)
                              for i, moment in enumerate(new_moments[:count - len(clips)], 1))
@@ -1893,6 +1955,16 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             moment = find_moment(job, mid)
             if moment["status"] == "rendered" and request.status is not None:
                 raise HTTPException(409, "Delete the rendered clip before changing this moment's status")
+            render_fields = ("mode", "captions", "layout", "framing", "voiceover")
+            render_options = {key: getattr(request, key) for key in render_fields if key in request.model_fields_set
+                              and (key == "framing" or getattr(request, key) is not None)}
+            editorial_changes = request.title is not None or request.selected_hook is not None or render_options
+            if moment["status"] == "rendered" and editorial_changes:
+                raise HTTPException(409, "Delete the rendered clip before editing its review settings")
+            if request.selected_hook is not None and request.selected_hook not in moment.get("hooks", ()):
+                raise HTTPException(422, "Choose one of the suggested hooks")
+            if request.title is not None and not request.title.strip():
+                raise HTTPException(422, "Enter a title")
             start = request.start if request.start is not None else moment["start"]
             end = request.end if request.end is not None else moment["end"]
             if request.start is not None or request.end is not None:
@@ -1909,7 +1981,18 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if not is_podcast(job):
                     raise HTTPException(422, "Podcast options apply to podcast jobs only")
                 moment["edits"] = request.podcast.model_dump()
-            if request.start is not None or request.end is not None or request.status is not None:
+            if request.title is not None:
+                moment["title"] = request.title.strip()
+            if request.selected_hook is not None:
+                moment["selected_hook"] = request.selected_hook
+            if request.start is not None or request.end is not None or request.selected_hook is not None:
+                old_score = moment.get("score")
+                review_hook_fit(moment, store.root)
+                if moment.get("score") != old_score:
+                    rank_moments(job["moments"])
+            if render_options:
+                moment.setdefault("render_options", {}).update(render_options)
+            if request.start is not None or request.end is not None or request.status is not None or editorial_changes:
                 moment["reviewed"] = True
             store.save(job)
         return moment
@@ -1952,7 +2035,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url", "director",
                     "director_result", "tracking", "tracking_result", "tracking_still_url", "needs_review", "podcast") if key in clip}
                 clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language",
-                                                                             "authenticity")})
+                                                                             "authenticity", "rendered_duration", "export_resolution")})
                 clip["previous_render"]["editing_mode"] = clip.get("editing_mode", "full")
             changes = request.model_dump(exclude={"podcast"})
             current_mode = clip.get("editing_mode", "full")
@@ -1962,11 +2045,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 changes["director"] = clip["director"]
             else:
                 changes["director"] = director_config(editing_mode, request.director)
+                if clip.get("selected_hook") and "hook_text" not in request.director.model_fields_set:
+                    changes["director"]["hook_text"] = (clip.get("director") or {}).get("hook_text")
             if request.podcast is not None and is_podcast(job):
                 changes["podcast"] = request.podcast.model_dump()
             clip.update(changes, status="queued", error=None, file_url=None,
                         download_url=None, thumbnail_url=None, render_priority=True)
             clip.pop("authenticity", None)
+            clip.pop("rendered_duration", None)
+            clip.pop("export_resolution", None)
             if job["status"] not in ACTIVE_STATUSES:
                 job.update(status="queued", stage="Queued re-render", progress=0, error=None,
                            processing_started=time.time())

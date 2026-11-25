@@ -297,7 +297,7 @@ def score_clip(levels, words, duration, peak, hook_strength, spike_score, cut_se
 # ---------------------------------------------------------------- planning
 
 def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, spike_score=None, hook_text=None,
-              story=None, trigger=None) -> Plan:
+              story=None, trigger=None, quote_span=None) -> Plan:
     """Plan the edit. With a `story` context (streamer, game, language, chat) and the story option on,
     the clip opens on a written storytelling hook and is re-cut to build-up, event, reaction and ending."""
     words = transcript_words(captions)
@@ -335,6 +335,14 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         room = MAX_OUTPUT - (intro["duration"] if intro else 0.0)
         if end - main_start > room and peak is not None:
             end = min(end, max(peak + 2.5, main_start + room))
+    if quote_span:
+        quote_start, quote_end = quote_span
+        main_start = min(main_start, max(0.0, quote_start - 0.1))
+        end = max(end, quote_end)
+        protect.append(quote_span)
+        opener_duration = intro["duration"] if intro else hook[1] - hook[0] if hook else 0.0
+        if quote_end - main_start + opener_duration > MAX_OUTPUT:
+            hook = intro = None
     cuts = find_silences(levels, words, main_start, end, protect) if options.edits else []
     pieces, cursor = [], main_start
     for a, b in cuts:

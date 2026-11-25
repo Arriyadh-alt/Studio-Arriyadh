@@ -68,6 +68,61 @@ def test_review_and_endpoints(monkeypatch, tmp_path, analysis):
         assert m["status"] == "suggested" and m["clip_id"] is None
 
 
+def test_review_metadata_and_settings_reach_queued_clip(monkeypatch, tmp_path, analysis):
+    hooks = ["Look at the gate", "Listen for the latch", "Watch the screen at 1:45"]
+    fields = dict(hooks=hooks, selected_hook=hooks[0], trigger=105.,
+                  hook_anchors={hooks[0]: 104., hooks[1]: 105., hooks[2]: 105.},
+                  score_breakdown={"hook": 77, "story": 82}, score_penalties={}, score_tier="review",
+                  score_explanation={"hook": "A quote sets up the event."})
+    monkeypatch.setattr("clipper_studio.api.analyze_media", lambda *a, **k: [proposal() | fields])
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        app.state.pending.join()
+        base = f"/api/jobs/{jid}"
+        m = client.get(base).json()["moments"][0]
+        endpoint = f"{base}/moments/{m['id']}"
+        assert client.patch(endpoint, json={"selected_hook": "invented"}).status_code == 422
+        response = client.patch(endpoint, json={"title": "The gate opens", "selected_hook": hooks[1],
+                                               "status": "selected", "captions": False, "mode": "blur",
+                                               "layout": "split", "framing": .25, "voiceover": True})
+        assert response.status_code == 200
+        trimmed = client.patch(endpoint, json={"start": 106})
+        assert trimmed.json()["score"] == 68
+        assert trimmed.json()["score_penalties"] == {"misleading_hook": 12}
+        restored = client.patch(endpoint, json={"start": 100})
+        assert restored.json()["score"] == 80 and restored.json()["score_penalties"] == {}
+        monkeypatch.setattr(app.state.pending, "put", lambda *a, **k: None)
+        assert client.post(f"{base}/moments/render").status_code == 202
+        clip = client.get(base).json()["clips"][0]
+        assert clip["score"] == 80 and clip["score_breakdown"] == fields["score_breakdown"]
+        assert clip["trigger"] == 105 and clip["title"] == "The gate opens"
+        assert clip["selected_hook"] == clip["director"]["hook_text"] == hooks[1]
+        assert clip["director"]["voiceover"] and not clip["captions"] and clip["mode"] == "blur"
+        assert clip["tracking"]["layout"] == "split" and clip["tracking"]["x"] == .25
+
+
+def test_editing_hook_range_reranks_moments(monkeypatch, tmp_path, analysis):
+    hook = "Listen for the latch"
+    first = proposal() | dict(hooks=[hook], selected_hook=hook, hook_anchors={hook: 105},
+                              score_breakdown={"hook": 80}, score_penalties={}, score_tier="review")
+    second = proposal(74) | dict(start=200, end=240, peak=218)
+    monkeypatch.setattr("clipper_studio.api.analyze_media", lambda *a, **k: [first, second])
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+        app.state.pending.join()
+        base = f"/api/jobs/{jid}"
+        top, runner_up = client.get(base).json()["moments"]
+        assert (top["rank"], runner_up["rank"]) == (1, 2)
+        endpoint = f"{base}/moments/{top['id']}"
+        trimmed = client.patch(endpoint, json={"start": 106}).json()
+        assert (trimmed["score"], trimmed["rank"]) == (68, 2)
+        assert client.get(base).json()["moments"][0]["id"] == runner_up["id"]
+        restored = client.patch(endpoint, json={"start": 100}).json()
+        assert (restored["score"], restored["rank"]) == (80, 1)
+
+
 @pytest.mark.parametrize("source", ["ai", "chat", "empty", "chatless_empty", "both_fail"])
 def test_source_fallbacks(monkeypatch, tmp_path, analysis, source):
     def fail_chat(*args):

@@ -548,3 +548,12 @@ def test_plan_keeps_the_reaction_trigger_from_being_cut():
     assert not any(s.start <= 10.5 and s.end >= 20 for s in plain.segments)
     kept = plan_edit(*args, peak=20, trigger=11)
     assert any(s.start <= 10.2 and s.end >= 20 for s in kept.segments)
+
+
+def test_plan_keeps_the_selected_quote_before_the_reaction_without_captions():
+    audio = levels(30, quiet=[(0, 2)], loud=[(18, 20)])
+    opts = DirectorOptions(story=False)
+    quote = (.4, 1.3)
+    plan = plan_edit(audio, [], 30, opts, peak=19, trigger=14, hook_text="The gate opens", quote_span=quote)
+    assert any(s.role == "main" and s.start <= quote[0] and s.end >= quote[1] for s in plan.segments)
+    assert plan.map_time(quote[0]) < plan.map_time(19)

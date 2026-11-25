@@ -15,12 +15,24 @@ def test_agreement(chat):
     result = merge_moments([moment()], [chat], 600, 18)
     assert len(result) == 1
     m = result[0]
-    assert m["sources"] == ["ai", "chat"] and m["score"] == 90
+    assert m["sources"] == ["ai", "chat"] and m["score"] == m["ai_score"] == 70
     assert m["alternatives"]["ai"] == {"start": 100, "end": 140}
     assert m["alternatives"]["chat"]["end"] == chat["end"]
     assert m["start"] == 100 and m["end"] == 160
     assert m["start"] <= m["peak"] <= m["end"] and m["duration"] <= 60
     assert "chat" in m["reason"]
+
+
+def test_editorial_trigger_and_range_survive_chat_and_break_ties():
+    ai = [moment(100, 140, 118), {
+        **moment(200, 239, 221), "trigger": 205, "reaction": {"trigger_time": 205, "verified": True},
+        "score_breakdown": {"hook": 65}, "score_tier": "review",
+    }]
+    merged, plain = merge_moments(ai, [moment(200, 254, 226, 90)], 600, 18)
+    assert merged["score"] == plain["score"] == 70
+    assert merged["sources"] == ["ai", "chat"] and merged["rank"] == 1
+    assert merged["end"] == 239 and merged["trigger"] == merged["reaction"]["trigger_time"] == 205
+    assert merged["score_breakdown"] == {"hook": 65}
 
 
 def test_separate_ranked_and_empty():

@@ -2,6 +2,8 @@
 
 import uuid
 
+from shorts_clipper.scoring import SCORE_FIELDS
+
 from .spikes import reaction_category
 
 
@@ -79,7 +81,7 @@ def _retry_candidates(protected, ai, chat, duration, lead, *, clips=()):
                 or any(_overlaps(clip, candidate) for clip in clips))
 
     claimed = {signature for moment in protected if (signature := _chat_signature(moment)) is not None}
-    return _rank(_merge_candidates(ai, chat, duration, lead, conflicts=conflicts, claimed=claimed, disjoint=True))
+    return rank_moments(_merge_candidates(ai, chat, duration, lead, conflicts=conflicts, claimed=claimed, disjoint=True))
 
 
 def add_chat_moments(existing, chat, duration, lead, *, ai=None):
@@ -118,12 +120,12 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
     previous_order = {moment["id"]: i for i, moment in enumerate(existing)}
     result = [*fresh, *(dict(moment) for moment in protected)]
     result.sort(key=lambda m: previous_order.get(m["id"], len(existing)))
-    return _rank(result)
+    return rank_moments(result)
 
 
 def merge_moments(ai, chat, duration, lead):
     """Match overlap or nearby peaks, retaining source proposals and AI timing."""
-    return _rank(_merge_candidates(ai, chat, duration, lead))
+    return rank_moments(_merge_candidates(ai, chat, duration, lead))
 
 
 def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: False, claimed=None, disjoint=False):
@@ -139,7 +141,8 @@ def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: Fals
                 **{k: item.get(k, "") for k in ("title", "description", "reason", "transcript")},
                 "category": item.get("category", "reaction"), "signals": item.get("signals", {}),
                 "message_sample": item.get("message_sample", []), "status": "suggested", "clip_id": None,
-                **({"podcast": item["podcast"]} if item.get("podcast") else {})}
+                **({"podcast": item["podcast"]} if item.get("podcast") else {}),
+                **{key: item[key] for key in SCORE_FIELDS if key in item}}
 
     result = [normalize(a, "ai") for a in ai]
     ai_moments = [a for a in result if not conflicts(a)]
@@ -183,18 +186,20 @@ def _corroborate(a, c, duration, lead):
     alternatives = {"ai": {k: a[k] for k in ("start", "end")},
                     "chat": {k: c[k] for k in ("start", "end")}}
     # Chat peak is delayed engagement; the AI proposal anchors the true event.
-    start = max(0., min(a["start"], a["peak"] - lead))
-    end = min(duration, max(a["end"], c["end"]), start + 60)
+    start, end = a["start"], a["end"]
+    if "score_breakdown" not in a:
+        start = max(0., min(start, a["peak"] - lead))
+        end = min(duration, max(end, c["end"]), start + 60)
     if end < a["peak"]:
         end = min(duration, a["peak"] + 1)
         start = max(0., end - 60)
     return dict(a, alternatives=alternatives, sources=["ai", "chat"], start=start, end=end, duration=end - start,
-                chat_score=c["score"], score=min(100, max(a["score"], c["score"]) + 10),
+                chat_score=c["score"],
                 reason=a["reason"] + "; corroborated by chat: " + c["reason"], message_sample=c["message_sample"])
 
 
-def _rank(moments):
-    moments.sort(key=lambda m: -m["score"])
+def rank_moments(moments):
+    moments.sort(key=lambda m: (-m["score"], -(m.get("chat_score") or 0) if "ai" in m["sources"] else 0))
     for rank, moment in enumerate(moments, 1):
         moment["rank"] = rank
     return moments
