@@ -61,7 +61,7 @@ from .download_worker import run_download
 from .media_analysis import SEGMENTED_MIN_SECONDS, analyze_ranges
 from .scheduler import Scheduler
 from .spikes import detect_spikes
-from .ranking import add_chat_moments, chat_moment, merge_moments, refresh_suggestions
+from .ranking import add_chat_moments, chat_moment, merge_moments, rank_moments, refresh_suggestions
 from .stages import ANALYSIS_STAGES, RENDER_STAGES, RETRYABLE, AnalysisTracker, Checkpoints, Stage, mark_stage, stage_states
 
 
@@ -1986,7 +1986,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if request.selected_hook is not None:
                 moment["selected_hook"] = request.selected_hook
             if request.start is not None or request.end is not None or request.selected_hook is not None:
+                old_score = moment.get("score")
                 review_hook_fit(moment, store.root)
+                if moment.get("score") != old_score:
+                    rank_moments(job["moments"])
             if render_options:
                 moment.setdefault("render_options", {}).update(render_options)
             if request.start is not None or request.end is not None or request.status is not None or editorial_changes:

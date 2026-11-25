@@ -81,7 +81,7 @@ def _retry_candidates(protected, ai, chat, duration, lead, *, clips=()):
                 or any(_overlaps(clip, candidate) for clip in clips))
 
     claimed = {signature for moment in protected if (signature := _chat_signature(moment)) is not None}
-    return _rank(_merge_candidates(ai, chat, duration, lead, conflicts=conflicts, claimed=claimed, disjoint=True))
+    return rank_moments(_merge_candidates(ai, chat, duration, lead, conflicts=conflicts, claimed=claimed, disjoint=True))
 
 
 def add_chat_moments(existing, chat, duration, lead, *, ai=None):
@@ -120,12 +120,12 @@ def add_chat_moments(existing, chat, duration, lead, *, ai=None):
     previous_order = {moment["id"]: i for i, moment in enumerate(existing)}
     result = [*fresh, *(dict(moment) for moment in protected)]
     result.sort(key=lambda m: previous_order.get(m["id"], len(existing)))
-    return _rank(result)
+    return rank_moments(result)
 
 
 def merge_moments(ai, chat, duration, lead):
     """Match overlap or nearby peaks, retaining source proposals and AI timing."""
-    return _rank(_merge_candidates(ai, chat, duration, lead))
+    return rank_moments(_merge_candidates(ai, chat, duration, lead))
 
 
 def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: False, claimed=None, disjoint=False):
@@ -198,7 +198,7 @@ def _corroborate(a, c, duration, lead):
                 reason=a["reason"] + "; corroborated by chat: " + c["reason"], message_sample=c["message_sample"])
 
 
-def _rank(moments):
+def rank_moments(moments):
     moments.sort(key=lambda m: (-m["score"], -(m.get("chat_score") or 0) if "ai" in m["sources"] else 0))
     for rank, moment in enumerate(moments, 1):
         moment["rank"] = rank
