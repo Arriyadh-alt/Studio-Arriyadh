@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from .captions import STOPWORDS, Caption, chunk_words, literal_text, style_font, _classic_ass, caption_height as measure_caption_height
-from .video import hdr_to_sdr, professional_video_options
+from .video import EXPORT_SIZES, hdr_to_sdr, professional_video_options
 
 STEP = 0.1
 FPS = 30
@@ -297,7 +297,7 @@ def score_clip(levels, words, duration, peak, hook_strength, spike_score, cut_se
 # ---------------------------------------------------------------- planning
 
 def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, spike_score=None, hook_text=None,
-              story=None, trigger=None) -> Plan:
+              story=None, trigger=None, *, approved=False, source_bounds=False) -> Plan:
     """Plan the edit. With a `story` context (streamer, game, language, chat) and the story option on,
     the clip opens on a written storytelling hook and is re-cut to build-up, event, reaction and ending."""
     words = transcript_words(captions)
@@ -312,9 +312,10 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         hook = None
     main_start, end = 0.0, duration
     if arc:
-        main_start, end = arc["start"], arc["end"]
+        if not (approved or source_bounds):
+            main_start, end = arc["start"], arc["end"]
         peak = arc["event"]
-    elif options.edits:
+    elif options.edits and not (approved or source_bounds):
         active = [i * STEP for i in range(min(len(z), int(3 / STEP))) if z[i] > -0.5]
         first_word = words[0].start if words else None
         candidates = [t for t in (first_word, active[0] if active else None) if t is not None]
@@ -324,10 +325,13 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     if trigger is not None and peak is not None and trigger < peak:
         protect.append((trigger - 0.8, peak))  # keep the event that caused the reaction on screen
     intro = None
-    if arc:
+    if arc and not approved:
         intro = _story_intro(story, options, words, arc, duration)
         over = intro["duration"] + end - main_start - MAX_OUTPUT
-        if over > 0:
+        if over > 0 and source_bounds:
+            hook_text = options.hook_text or intro["options"][0]
+            intro = None
+        elif over > 0:
             main_start = min(main_start + over, max(main_start, arc["event"] - 3.0))
             end = min(end, main_start + MAX_OUTPUT - intro["duration"])
     if trigger is not None and trigger - 0.8 < main_start:
@@ -335,7 +339,7 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         room = MAX_OUTPUT - (intro["duration"] if intro else 0.0)
         if end - main_start > room and peak is not None:
             end = min(end, max(peak + 2.5, main_start + room))
-    cuts = find_silences(levels, words, main_start, end, protect) if options.edits else []
+    cuts = find_silences(levels, words, main_start, end, protect) if options.edits and not approved else []
     pieces, cursor = [], main_start
     for a, b in cuts:
         if a - cursor >= 0.6:
@@ -345,7 +349,9 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         pieces.append(Segment(cursor, end))
     elif pieces:
         pieces[-1].end = end
-    segments = ([Segment(hook[0], hook[1], "hook")] if hook else []) + pieces
+    if source_bounds and hook and sum(s.length for s in pieces) + hook[1] - hook[0] > MAX_OUTPUT:
+        hook = None
+    segments = ([Segment(hook[0], hook[1], "hook")] if hook and not approved else []) + pieces
     if intro:
         segments.insert(0, Segment(main_start, main_start + intro["duration"], "intro"))
     over = sum(s.length for s in segments) - MAX_OUTPUT
@@ -372,13 +378,16 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         plan.sfx.append([0.15, "boing"] if intro["category"] in ("funny", "fail", "karma") else
                         [max(0.0, boundary - 1.35), "riser"])
         plan.sfx.append([max(0.0, boundary - 0.25), "whoosh"])
-    if hook:
+    if hook and not approved:
         plan.hook = {"source_start": round(hook[0], 2), "source_end": round(hook[1], 2),
                      "duration": round(hook[1] - hook[0], 2), "text": hook_text}
         plan.zooms.append([0.0, hook[1] - hook[0], 0.16, 0.25, "hook"])
         boundary = hook[1] - hook[0]
         plan.flashes.append(boundary)
         plan.sfx.append([max(0.0, boundary - 0.25), "whoosh"])
+    elif (approved or source_bounds) and options.hook and (options.hook_text or hook_text):
+        plan.hook = {"style": "source", "duration": min(duration, 3.),
+                     "text": options.hook_text or hook_text}
     if options.edits:
         mains = [(o, s) for o, s in zip(offsets, segments) if s.role == "main"]
         for index, (offset, segment) in enumerate(mains[1:], 1):
@@ -416,6 +425,8 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     plan.score, plan.suggestions = score_clip(levels, words, duration, peak, strength if hook or arc else
                                               min(1.0, max(0.0, float(np.mean(z[:30])) + 0.5) / 2),
                                               spike_score, plan.removed + main_start)
+    if approved and options.voiceover:
+        plan.suggestions.append("Voice-over intro skipped to preserve the approved timeline.")
     return plan
 
 
@@ -423,18 +434,19 @@ IMPORTANT = re.compile(r"\b(never|always|nobody|everyone|biggest|worst|best|secr
                        r"million|billion|percent|first|last|only|most|\d[\d,.%]*)\b", re.I)
 
 
-def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook=None, voice=None) -> Plan:
+def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook=None, voice=None, *,
+                      approved=False) -> Plan:
     """Spoken-word edit: keep natural delivery, trim only long pauses, open on the clip's strongest line,
     use subtle zooms and no sound effects. `hook` = clip-relative {start, end, text}. With `options.commentary`
     (Version B) the clip opens on a clearly labelled AI commentary card; the original voices are never replaced."""
     words = transcript_words(captions)
     main_start, end = 0.0, duration
-    if words:
+    if words and not approved:
         if words[0].start < 3.0:
             main_start = max(0.0, words[0].start - 0.3)
         end = min(duration, max(words[-1].end + 0.6, main_start + 1.0))
     cuts = []
-    if options.edits:
+    if options.edits and not approved:
         for a, b in find_silences(levels, words, main_start, end, minimum=1.2):
             a, b = a + 0.15, b - 0.15  # keep ~0.35 s of breath either side
             if b - a >= 0.4:
@@ -449,13 +461,13 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
     elif pieces:
         pieces[-1].end = end
     teaser = None
-    if options.hook and hook and hook.get("end", 0) > hook.get("start", 0):
+    if not approved and options.hook and hook and hook.get("end", 0) > hook.get("start", 0):
         a, b = max(0.0, float(hook["start"])), min(duration, float(hook["end"]))
         if a >= main_start + 4.0 and b - a >= 1.2:
             teaser = (a, min(b, a + 4.5))
     segments = ([Segment(*teaser, "hook")] if teaser else []) + pieces
     intro = None
-    if options.commentary:
+    if options.commentary and not approved:
         from .story import intro_length
         spoken, seconds = None, None
         if voice is not None:
@@ -502,6 +514,11 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
     elif not intro and options.hook and (options.hook_text or (hook or {}).get("text")):
         plan.hook = {"source_start": round(main_start, 2), "source_end": round(main_start, 2), "duration": 2.5,
                      "text": options.hook_text or hook["text"]}
+    if approved and options.commentary:
+        plan.commentary = {"text": options.commentary, "label": COMMENTARY_LABEL, "voiced": False,
+                           "duration": min(duration, 5.)}
+        plan.hook = {"style": "commentary", "text": f"{COMMENTARY_LABEL}: {options.commentary}",
+                     "duration": plan.commentary["duration"]}
     mains = [(o, s) for o, s in zip(plan.offsets(), plan.segments) if s.role == "main"]
     for index, (o, segment) in enumerate(mains[1:], 1):
         if index % 2 and segment.length > 1.5:
@@ -884,7 +901,8 @@ def _loop_audio_bridge(video, audio, video_end, speech):
             f"afade=ss={guard}:ns={ramp}:c=hsin,afade=t=out:ss={end - guard - ramp}:ns={ramp}:c=hsin[loop_audio]")
 
 
-def make_seamless_loop(video: Path, output: Path, captions=(), *, speech=None, professional=False) -> dict:
+def make_seamless_loop(video: Path, output: Path, captions=(), *, speech=None, professional=False,
+                       export_preset=None) -> dict:
     """Dissolve into the composed first frame without moving the opener, captions, or payoff."""
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                              "stream=codec_type,nb_frames,duration,avg_frame_rate,sample_rate,channels,start_time",
@@ -909,7 +927,7 @@ def make_seamless_loop(video: Path, output: Path, captions=(), *, speech=None, p
     bridge = _loop_audio_bridge(video, audio, end, captions if speech is None else speech) if audio else None
     if bridge:
         graph += ";" + bridge
-    quality = professional_video_options() if professional else ["-crf", "17"]
+    quality = professional_video_options(export_preset=export_preset) if professional else ["-crf", "17"]
     command = ["ffmpeg", "-y", "-v", "error", "-i", str(video), "-filter_complex", graph, "-map", "[out]",
                "-vsync", "0", "-c:v", "libx264", "-preset", "veryfast", *quality, "-pix_fmt", "yuv420p"]
     if audio:
@@ -1015,7 +1033,7 @@ def measure(video: Path, audio_only=False) -> dict:
 
 
 def quality_check(video: Path, plan: Plan, captions, fixes=(), layout=None, tracking=None, *, export_fps=None,
-                  preserve_audio=False) -> list:
+                  preserve_audio=False, export_preset=None) -> list:
     checks = []
 
     def add(name, status, detail):
@@ -1029,7 +1047,7 @@ def quality_check(video: Path, plan: Plan, captions, fixes=(), layout=None, trac
         num, _, den = (video_stream.get("avg_frame_rate") or "0/1").partition("/")
         fps = float(num) / float(den or 1) if float(den or 1) else 0
         duration = float(info.get("format", {}).get("duration", 0))
-        size_ok = (video_stream.get("width"), video_stream.get("height")) == (1080, 1920)
+        size_ok = (video_stream.get("width"), video_stream.get("height")) == EXPORT_SIZES[export_preset or "full_hd"]
         ok = size_ok and video_stream.get("codec_name") == "h264" and audio_stream is not None and duration <= MAX_OUTPUT + 0.2
         detail = (f"{video_stream.get('width')}×{video_stream.get('height')} · {fps:.2f} fps · {duration:.1f} s · "
                   f"{video_stream.get('codec_name')}/{audio_stream.get('codec_name') if audio_stream else 'no audio'}")
@@ -1038,7 +1056,8 @@ def quality_check(video: Path, plan: Plan, captions, fixes=(), layout=None, trac
             color_ok = all(video_stream.get(key) == "bt709" for key in ("color_space", "color_transfer", "color_primaries"))
             ok = (ok and audio_stream.get("codec_name") == "aac" and audio_stream.get("sample_rate") == "48000" and
                   abs(fps - float(Fraction(export_fps))) < .01 and color_ok and video_stream.get("pix_fmt") == "yuv420p" and
-                  12_000_000 <= bitrate <= 20_000_000 and "mp4" in info.get("format", {}).get("format_name", "").split(","))
+                  (export_preset is not None or 12_000_000 <= bitrate <= 20_000_000)
+                  and "mp4" in info.get("format", {}).get("format_name", "").split(","))
             detail += f" · {bitrate / 1_000_000:.1f} Mbps · {video_stream.get('color_space', 'unknown color')} · {video_stream.get('pix_fmt')}"
         add("Format", "pass" if ok else "warn", detail)
     except (subprocess.CalledProcessError, ValueError, OSError) as error:

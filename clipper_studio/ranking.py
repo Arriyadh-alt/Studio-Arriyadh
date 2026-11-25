@@ -139,6 +139,8 @@ def _merge_candidates(ai, chat, duration, lead, *, conflicts=lambda moment: Fals
                 **{k: item.get(k, "") for k in ("title", "description", "reason", "transcript")},
                 "category": item.get("category", "reaction"), "signals": item.get("signals", {}),
                 "message_sample": item.get("message_sample", []), "status": "suggested", "clip_id": None,
+                **({"duration_options": item["duration_options"]} if item.get("duration_options") else {}),
+                **({"trigger": item["trigger"]} if item.get("trigger") is not None else {}),
                 **({"podcast": item["podcast"]} if item.get("podcast") else {})}
 
     result = [normalize(a, "ai") for a in ai]
@@ -183,8 +185,11 @@ def _corroborate(a, c, duration, lead):
     alternatives = {"ai": {k: a[k] for k in ("start", "end")},
                     "chat": {k: c[k] for k in ("start", "end")}}
     # Chat peak is delayed engagement; the AI proposal anchors the true event.
-    start = max(0., min(a["start"], a["peak"] - lead))
-    end = min(duration, max(a["end"], c["end"]), start + 60)
+    if a.get("duration_options"):
+        start, end = a["start"], a["end"]
+    else:
+        start = max(0., min(a["start"], a["peak"] - lead))
+        end = min(duration, max(a["end"], c["end"]), start + 60)
     if end < a["peak"]:
         end = min(duration, a["peak"] + 1)
         start = max(0., end - 60)

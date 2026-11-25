@@ -29,7 +29,7 @@ def test_legacy_defaults(tmp_path):
 
 
 @pytest.mark.parametrize('scenario', ['detected','manual','none','failure','render_failure','disabled','still_failure','captioned','bottom_captioned','long_captioned'])
-def test_worker(tmp_path, monkeypatch, scenario):
+def test_worker(tmp_path, monkeypatch, scenario, stub_export_validation):
     from shorts_clipper.captions import Caption, Transcript
     monkeypatch.setattr('clipper_studio.api.transcribe', lambda source, **kwargs: Transcript([Caption(0, 1, 'Halo dunia!')], 'id'))
     if scenario=='long_captioned':
@@ -37,7 +37,7 @@ def test_worker(tmp_path, monkeypatch, scenario):
     monkeypatch.setattr('clipper_studio.api.fetch_metadata', lambda *a: {'duration':60})
     monkeypatch.setattr('clipper_studio.api.fetch_chat', lambda *a: ({'duration':60}, []))
     monkeypatch.setattr('clipper_studio.api.detect_spikes', lambda *a,**k: ([{'start':0,'end':10}], []))
-    monkeypatch.setattr('clipper_studio.api.download_section', lambda url,work,*a: work/'source.mp4')
+    monkeypatch.setattr('clipper_studio.api.download_section', lambda url,work,*a,**kw: work/'source.mp4')
     monkeypatch.setattr('clipper_studio.api.video_duration', lambda *a: 10)
     def still(source, output, *a):
         if scenario=='still_failure':

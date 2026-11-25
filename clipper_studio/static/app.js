@@ -10,7 +10,26 @@ const keeping = new Map();
 let chartKey;
 const locked = clip => ['queued','rendering'].includes(clip.status);
 const queueLabel = position => position ? `Queued (position ${position})` : 'Queued';
-const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([current?.rights?.confirmed,clip.podcast,clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.editing_mode,clip.authenticity,clip.director,clip.director_result,clip.tracking,clip.tracking_result,clip.tracking_still_url,clip.needs_review])}`;
+const clipVersion = clip => `${clip.status}:${clip.start}:${clip.end}:${clip.mode}:${clip.captions}:${clip.attempt || 0}:${clip.queue_position || 0}:${JSON.stringify([current?.rights?.confirmed,clip.podcast,clip.facecam,clip.facecam_result,clip.source_still_url,clip.rendered_at,clip.language,clip.caption_style,clip.caption_language,clip.editing_mode,clip.authenticity,clip.director,clip.director_result,clip.tracking,clip.tracking_result,clip.tracking_still_url,clip.needs_review,clip.duration_preset,clip.export_preset,clip.export_qc])}`;
+const durationPresets = {
+  auto:['Auto Intelligent Duration (max 60s)',0,60],
+  quick:['Quick Viral Moment (15–25s)',15,25],
+  standard:['Standard Highlight (25–40s)',25,40],
+  story:['Story-Driven Highlight (40–55s)',40,55],
+  extended:['Extended Highlight (55–60s)',55,60]
+};
+const exportPresets = {full_hd:['Full HD — 1080 × 1920 (default)'],standard:['Standard — 720 × 1280'],preview:['Preview — 360 × 640 proxy']};
+const presetOptions = (presets,selected) => Object.entries(presets).map(([value,[label]])=>`<option value="${value}" ${selected===value?'selected':''}>${label}</option>`).join('');
+globalThis.TimelineControls = {durations: selected=>presetOptions(durationPresets,selected),
+  exports: selected=>presetOptions(exportPresets,selected)};
+
+function exportQcHtml(qc) {
+  if(!qc) return '';
+  const measurements=qc.width?`${qc.width} × ${qc.height} · ${qc.duration.toFixed(2)}s rendered`:'No readable video';
+  const status=qc.status==='passed'?'Technical checks passed':qc.status==='failed'?'Technical checks failed':'Technical checks need review';
+  const list=checks=>`<ul>${checks.map(check=>`<li><strong>${escapeHtml(check.check)} (${escapeHtml(check.status)})</strong>: ${escapeHtml(check.detail)}</li>`).join('')}</ul>`;
+  return `<details><summary>${status} · ${measurements}</summary>${list(qc.checks)}<strong>Editorial review required</strong>${list(qc.editorial_checks||[])}<p class="hint">Play the rendered preview to confirm lip sync and editorial quality. Download delivers the same render shown in this player.</p></details>`;
+}
 const facecamDefaults = value => ({enabled:true,position:'auto',size:.42,box:null,...value});
 const renderedOffset = (clip, offset) => {
   const timeline=clip.director_result?.edits?.timeline;
@@ -183,9 +202,10 @@ function timestamp(value) {
   const h = Math.floor(total / 3600), m = Math.floor(total % 3600 / 60), s = total % 60;
   return `${h ? h + ':' : ''}${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
+const exactTime = value => Number.isInteger(value) ? timestamp(value) : String(value);
 function parseTime(value) {
   const text = value.trim();
-  if (!/^\d+(?::[0-5]\d){1,2}(?:\.\d+)?$/.test(text)) throw Error('Use MM:SS or HH:MM:SS for clip times.');
+  if (!/^\d+(?::[0-5]\d){0,2}(?:\.\d+)?$/.test(text)) throw Error('Use seconds, MM:SS or HH:MM:SS for clip times.');
   return text.split(':').reduce((sum, part) => sum * 60 + Number(part), 0);
 }
 function notice(message, selector = '#notice') {
@@ -246,7 +266,7 @@ function chart(job) {
   $('#chart').innerHTML = `<svg viewBox="-22 0 ${width+44} 138" preserveAspectRatio="none" aria-label="Chat activity over time">${bars}${marks}</svg><div class="axis"><span>00:00</span><span>${timestamp(duration/2)}</span><span>${timestamp(duration)}</span></div>`;
 }
 function clipHtml(clip,index) {
-  const draft = drafts.get(clip.id) || {start:timestamp(clip.start),end:timestamp(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),tracking:TrackingControls.defaults(clip.tracking),editing_mode:editingMode(clip),director:directorDefaults(clip.director,editingMode(clip)),podcast:PodcastControls.defaults(clip),...CaptionControls.options(clip)};
+  const draft = drafts.get(clip.id) || {start:exactTime(clip.start),end:exactTime(clip.end),mode:clip.mode,captions:clip.captions,facecam:facecamDefaults(clip.facecam),tracking:TrackingControls.defaults(clip.tracking),editing_mode:editingMode(clip),director:directorDefaults(clip.director,editingMode(clip)),podcast:PodcastControls.defaults(clip),...CaptionControls.options(clip)};
   const disabled = locked(clip) ? 'disabled' : '';
   const number = clip.number ?? index+1;
   const timeField = field => `<label>${field === 'start' ? 'Start' : 'End'}<input class="time" data-field="${field}" value="${escapeHtml(draft[field])}" aria-label="${field} time" inputmode="text" autocomplete="off"></label><div class="nudges">${[-5,-1,1,5].map(n=>`<button type="button" data-nudge="${n}" data-field="${field}" aria-label="${field} ${n>0?'plus':'minus'} ${Math.abs(n)} seconds">${n>0?'+':''}${n}s</button>`).join('')}</div>`;
@@ -256,9 +276,13 @@ function clipHtml(clip,index) {
     <div class="clip-body">${clip.title?`<h3>${escapeHtml(clip.title)}</h3>`:''}${clip.sources?.length?`<p class="moment-source">${escapeHtml(clip.sources.length>1?'AI + Chat':clip.sources[0]==='ai'?'AI Analysis':'Chat Analysis')}</p>`:''}<div class="clip-meta"><span class="score">↗ ${clip.sources?.length?`${Math.round(clip.score)} / 100 Viral Potential`:`${clip.score.toFixed(2)} spike score`}</span><span>${timestamp(clip.end-clip.start)} clip</span></div><p class="hint">${clip.onset!=null?`Onset ${timestamp(clip.onset)} · `:''}Peak ${timestamp(clip.peak)}</p>
     ${PodcastControls.isPodcastClip(clip)?PodcastControls.summary(clip):`<div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>`}
     ${clip.error ? `<p class="error">${escapeHtml(clip.error)}${clip.status==='failed'?'<br>Adjust the settings below or try Re-render again.':''}</p>` : ''}
+    ${exportQcHtml(clip.export_qc)}
     ${authenticityHtml(clip.authenticity)}
     ${clip.status==='ready' ? `<form class="thumbnail-editor"><label>Thumbnail text<input name="text" maxlength="64" value="${escapeHtml(clip.thumbnail_text)}" placeholder="${escapeHtml(clip.thumbnail_hook || 'Automatic hook')}" autocomplete="off"></label><p class="hint">Leave blank to use the automatic hook.</p><div class="actions"><button type="submit">Regenerate ↻</button><a class="button thumbnail-download">Download JPG ↓</a></div><p class="hint thumbnail-status" role="status" hidden></p></form>` : ''}
     <form class="review"><div class="time-grid"><div>${timeField('start')}</div><div>${timeField('end')}</div></div>
+      <div class="render-options"><label>Duration preset<select data-field="duration_preset">${presetOptions(durationPresets,draft.duration_preset||clip.duration_preset||'auto')}</select></label>
+      <label>Export quality<select data-field="export_preset">${presetOptions(exportPresets,draft.export_preset||clip.export_preset||'full_hd')}</select></label></div>
+      <p class="hint">Set a complete start and end for the duration preset. Re-render from source to switch a proxy to final quality.</p>
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
       ${PodcastControls.clipHtml(clip,draft,disabled)}
       ${directorHtml(clip,draft)}
@@ -461,7 +485,7 @@ $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
     const source=await PodcastControls.source();
-    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},editing_mode:jobMode.value,director:readJobDirector(),...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},editing_mode:jobMode.value,director:readJobDirector(),export_preset:$('#export-preset').value,...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
@@ -472,20 +496,24 @@ function saveDraft(node, profiles=drafts.get(node.dataset.id)?.profiles) {
   const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
   const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
   drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),editing_mode:$('[data-field=editing_mode]',node).value,director:readDirector(node),profiles,podcast:PodcastControls.read(node,clip),...CaptionControls.read(node)});
+  Object.assign(drafts.get(node.dataset.id), {duration_preset:$('[data-field=duration_preset]',node).value,export_preset:$('[data-field=export_preset]',node).value});
   draftFeedback(node);
 }
 function draftFeedback(node) {
   const clip=current.clips.find(c=>c.id===node.dataset.id), draft=drafts.get(clip.id);
   let error='',changed=false,length=clip.end-clip.start;
   if(draft) {
-    changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||draft.editing_mode!==editingMode(clip)||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director,editingMode(clip)))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking))||JSON.stringify(draft.podcast)!==JSON.stringify(PodcastControls.defaults(clip));
+    changed=draft.start!==exactTime(clip.start)||draft.end!==exactTime(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||draft.editing_mode!==editingMode(clip)||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director,editingMode(clip)))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking))||JSON.stringify(draft.podcast)!==JSON.stringify(PodcastControls.defaults(clip));
     changed=changed||JSON.stringify({language:draft.language,caption_style:draft.caption_style})!==JSON.stringify(CaptionControls.options(clip));
+    changed=changed||draft.duration_preset!==(clip.duration_preset||'auto')||draft.export_preset!==(clip.export_preset||'full_hd');
     try {
       const start=parseTime(draft.start),end=parseTime(draft.end); length=end-start;
       const f=draft.facecam,b=f?.box;
       if(!f || !Number.isFinite(f.size) || f.size<.25 || f.size>.6 || !['auto','top-left','top-right','bottom-left','bottom-right'].includes(f.position))throw Error('Choose valid facecam settings.');
       if(b && (![b.x,b.y,b.w,b.h].every(Number.isFinite) || b.x<0 || b.y<0 || b.w<=0 || b.h<=0 || b.x+b.w>1 || b.y+b.h>1))throw Error('Camera area must fit inside the source frame.');
-      if(end<=start || length>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
+      if(end<=start || length>60+1e-6 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
+      const [,minimum,maximum]=durationPresets[draft.duration_preset];
+      if(length<minimum-1e-6 || length>maximum+1e-6)throw Error(`Choose a complete ${minimum}–${maximum} second timeline for this preset.`);
     } catch(e) {error=e.message;length=null;}
   }
   $('.clip-meta span:last-child',node).textContent=length===null?'Invalid clip length':`${timestamp(length)} clip`;
@@ -553,7 +581,7 @@ $('#clips').addEventListener('click',async event=>{
     notice('');
     if(button.dataset.nudge) {
       const input=$(`input[data-field=${button.dataset.field}]`,node);
-      input.value=timestamp(Math.min(current.metadata.duration,Math.max(0,parseTime(input.value)+Number(button.dataset.nudge)))); saveDraft(node);
+      input.value=exactTime(Math.min(current.metadata.duration,Math.max(0,parseTime(input.value)+Number(button.dataset.nudge)))); saveDraft(node);
       const video = $('video',node), clip = current.clips.find(clip=>clip.id===cid);
       if (video && clip && Number.isFinite(video.duration)) {
         const offset = renderedOffset(clip, parseTime(input.value) - clip.start - (button.dataset.field==='end' ? 2 : 0));
@@ -612,8 +640,9 @@ $('#clips').addEventListener('submit',async event=>{
   try {
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
-    if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),editing_mode:draft.editing_mode,director:draft.director,podcast:draft.podcast,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
+    const clip=current.clips.find(c=>c.id===cid);
+    const chosenDuration=draft.duration_preset!==(clip.duration_preset||'auto') || start!==clip.start || end!==clip.end;
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,clip.start,start,end),editing_mode:draft.editing_mode,director:draft.director,podcast:draft.podcast,language:draft.language,caption_style:draft.caption_style,export_preset:draft.export_preset,...(chosenDuration?{duration_preset:draft.duration_preset}:{})}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
 // A picked target's time is relative to the rendered section; keep it on the same frame when Start moves.

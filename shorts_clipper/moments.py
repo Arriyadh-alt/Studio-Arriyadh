@@ -12,6 +12,8 @@ import urllib.request
 
 import numpy as np
 
+from .duration import MAX_DURATION, boundary_options
+
 
 def _frames(path, options, size, limit):
     """Read at most one analysis frame at a time; always reap ffmpeg."""
@@ -193,9 +195,9 @@ def analyze_signals(audio, visual, duration, clips, lead, transcribe_window, pro
         expect("transcript_generation", len(peaks))
     for index, peak in enumerate(peaks):
         progress(.55 + .4 * index / len(peaks), "Transcribing candidate moments")
-        lo, hi = max(0, peak - lead - 5), min(duration, peak + 42)
+        observed = max(0, peak - lead - 5), min(duration, peak + 42)
         try:
-            words = transcribe_window(lo, hi)
+            words = transcribe_window(*observed)
         except Exception:
             words = []
         target = max(0, peak - lead)
@@ -220,13 +222,21 @@ def analyze_signals(audio, visual, duration, clips, lead, transcribe_window, pro
             if trigger is not None and trigger < start + 1:
                 start = max(0.0, trigger - 2)
         start = min(float(start), max(0, duration - 20))
-        limit = min(duration, start + 60)
+        limit = min(duration, start + MAX_DURATION)
         end = limit
         for second in range(math.ceil(max(start + 20, peak + 4)), math.floor(limit) + 1):
             speaking = any(w["start"] < second + .4 and w["end"] > second for w in words)
             if not speaking and (second >= len(levels) or np.mean(audio_signal[second:second + 2]) < .2):
                 end = float(second)
                 break
+        options = boundary_options(words, np.maximum(audio_signal, visual * .65) if visual is not None
+                                   else audio_signal, duration, (start, end), peak, trigger, observed=observed)
+        if (auto := options.get("auto")) and (auto["end"] >= end or any(
+                w["start"] < end < w["end"] or w["start"] < start < w["end"] for w in words)):
+            start, end = auto["start"], auto["end"]
+        elif not auto and any(w["start"] < start < w["end"] or w["start"] < end < w["end"] for w in words):
+            continue
+        options["auto"] = {"start": start, "end": end}
         selected = [w for w in words if start <= w["start"] < end]
         transcript = " ".join(w["word"].strip() for w in selected)
         cue_patterns = {"funny": r"\b(?:haha\w*|wkwk\w*|lol|laughter|ngakak)\b",
@@ -259,7 +269,8 @@ def analyze_signals(audio, visual, duration, clips, lead, transcribe_window, pro
         moment = {"start": start, "end": end, "peak": float(peak), "score": score, "category": category,
                   "title": (category.title() + (f': "{phrase[:45]}"' if phrase else " streamer reaction"))[:60],
                   "description": f"A {category} moment with a sudden streamer reaction.",
-                  "reason": " + ".join(reasons), "signals": signals, "transcript": transcript[:500]}
+                  "reason": " + ".join(reasons), "signals": signals, "transcript": transcript[:500],
+                  "duration_options": options}
         if trigger is not None:
             moment["trigger"] = trigger
         _refine(moment)

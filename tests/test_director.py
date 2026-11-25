@@ -403,15 +403,15 @@ def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_p
     monkeypatch.setattr("clipper_studio.api.detect_spikes",
                         lambda *a, **k: ([{"start": 10, "end": 22, "peak": 18.5, "score": 3.0}], []))
     monkeypatch.setattr("clipper_studio.api.download_section",
-                        lambda url, directory, *a: Path(shutil.copy(source, directory / "source.mp4")))
+                        lambda url, directory, *a, **kw: Path(shutil.copy(source, directory / "source.mp4")))
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **k: Transcript(list(captions), "en"))
     monkeypatch.setattr("clipper_studio.api.generate_thumbnail", lambda video, output, text, peak: output.write_bytes(b"jpg"))
     monkeypatch.setattr("clipper_studio.api.detect_facecam", lambda *a: None)
     loop_inputs = []
 
-    def record_loop(video, output, visible, *, speech):
+    def record_loop(video, output, visible, *, speech, **kwargs):
         loop_inputs.append((visible, speech))
-        return make_seamless_loop(video, output, visible, speech=speech)
+        return make_seamless_loop(video, output, visible, speech=speech, **kwargs)
 
     monkeypatch.setattr("clipper_studio.api.make_seamless_loop", record_loop)
     app = create_app(tmp_path, render_workers=1)
@@ -515,7 +515,7 @@ def test_api_story_voiceover_and_channel_for_older_jobs(monkeypatch, tmp_path, s
     monkeypatch.setattr("clipper_studio.api.detect_spikes",
                         lambda *a, **k: ([{"start": 10, "end": 22, "peak": 18.5, "score": 3.0}], []))
     monkeypatch.setattr("clipper_studio.api.download_section",
-                        lambda url, directory, *a: Path(shutil.copy(source, directory / "source.mp4")))
+                        lambda url, directory, *a, **kw: Path(shutil.copy(source, directory / "source.mp4")))
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p, **k: Transcript(list(captions), "en"))
     monkeypatch.setattr("clipper_studio.api.generate_thumbnail", lambda video, output, text, peak: output.write_bytes(b"jpg"))
     monkeypatch.setattr("clipper_studio.api.detect_facecam", lambda *a: None)

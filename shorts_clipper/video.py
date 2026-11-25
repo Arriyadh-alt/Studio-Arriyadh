@@ -1,12 +1,14 @@
 """Cut a time range and convert it to 9:16 vertical video with ffmpeg."""
 
 import json
+import logging
 import math
 import shutil
 import subprocess
 from fractions import Fraction
 from pathlib import Path
 from statistics import median
+from typing import Literal
 
 import cv2
 
@@ -14,6 +16,10 @@ from .facecam import FacecamOverlay
 from .captions import FONT_DIR
 
 WIDTH, HEIGHT = 1080, 1920
+ExportPreset = Literal["preview", "standard", "full_hd"]
+EXPORT_SIZES = {"preview": (360, 640), "standard": (720, 1280), "full_hd": (WIDTH, HEIGHT)}
+EXPORT_SOURCE_HEIGHTS = {"preview": 720, "standard": 1440, "full_hd": 2160}
+logger = logging.getLogger(__name__)
 
 FILTERS = {
     # Default when face sampling finds no focal point.
@@ -52,10 +58,10 @@ def source_frame_rate(source: Path) -> str | None:
     return None
 
 
-def professional_video_options() -> list[str]:
-    return ["-b:v", "16M", "-minrate", "16M", "-maxrate", "16M", "-bufsize", "16M",
-            "-x264-params", "nal-hrd=cbr", "-colorspace", "bt709", "-color_primaries", "bt709",
-            "-color_trc", "bt709", "-color_range", "tv"]
+def professional_video_options(*, export_preset=None) -> list[str]:
+    quality = (["-crf", "23" if export_preset == "preview" else "19"] if export_preset else
+               ["-b:v", "16M", "-minrate", "16M", "-maxrate", "16M", "-bufsize", "16M", "-x264-params", "nal-hrd=cbr"])
+    return [*quality, "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
 
 
 def hdr_to_sdr(source: Path) -> str:
@@ -105,7 +111,7 @@ def detect_focal_x(source: Path, start: float, end: float) -> float:
         capture.release()
 
 
-def _source_size(source: Path) -> tuple[int, int] | None:
+def source_size(source: Path) -> tuple[int, int] | None:
     capture = cv2.VideoCapture(str(source))
     try:
         size = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -116,7 +122,7 @@ def _source_size(source: Path) -> tuple[int, int] | None:
 
 def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
     """Paint the streamer's own cam out of the gameplay picture so it only shows once, in the overlay."""
-    size = _source_size(source)
+    size = source_size(source)
     if size is None:
         return ""
     w, h = size
@@ -135,7 +141,7 @@ def _hide_facecam(source: Path, box, margin: float = 0.01) -> str:
     return f"split[hidemain][hidecam];[hidecam]{fill}[hidden];[hidemain][hidden]overlay={x0}:{y0},"
 
 
-def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False, watermark=None) -> list:
+def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False, watermark=None, export_preset=None) -> list:
     if mode not in FILTERS:
         raise ValueError(f"Unknown mode {mode!r}; choose from {', '.join(FILTERS)}")
     if end <= start:
@@ -196,26 +202,51 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
         watermark_input = ["-i", str(watermark.path)]
         filters += f"[composed];[composed][1:v]overlay={watermark.x}:{watermark.y}:eof_action=repeat"
     if export_fps:
-        filters += ",scale=iw:ih:out_color_matrix=bt709:out_range=tv,format=yuv420p"
+        width, height = EXPORT_SIZES[export_preset] if export_preset else ("iw", "ih")
+        filters += f",scale={width}:{height}:out_color_matrix=bt709:out_range=tv,format=yuv420p"
     silent_input = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"] if silent_audio else []
-    quality = [*professional_video_options(), "-r", export_fps] if export_fps else ["-crf", "20"]
+    quality = [*professional_video_options(export_preset=export_preset), "-r", export_fps] if export_fps else ["-crf", "20"]
     audio = ["-b:a", "192k", "-ar", "48000"] if export_fps else ["-b:a", "128k"]
     return [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{start:.3f}", "-i", str(source), *watermark_input, *silent_input, "-t", f"{end - start:.3f}",
-        "-filter_complex", filters,
-        "-c:v", "libx264", "-preset", "medium", *quality, "-pix_fmt", "yuv420p",
+        *(["-filter_complex_threads", "2"] if export_preset else []), "-filter_complex", filters,
+        "-c:v", "libx264", "-preset", "veryfast" if export_preset == "preview" else "medium",
+        *quality, "-pix_fmt", "yuv420p", *(["-threads:v", "4"] if export_preset else []),
         "-c:a", "aac", *audio,
         "-movflags", "+faststart",
         str(output),
     ]
 
 
-def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False, watermark=None) -> Path:
+def hardware_export_command(command, preset):
+    if Path("/dev/nvidiactl").exists():
+        video = ["h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0"]
+    elif Path("/dev/dri").is_dir() and any(Path("/dev/dri").glob("renderD*")):
+        video = ["h264_qsv", "-preset", "medium", "-global_quality", "19"]
+    else:
+        return None
+    if preset == "preview":
+        return None
+    start, end = command.index("-c:v") + 1, command.index("-crf") + 2
+    return [*command[:start], *video, *command[end:]]
+
+
+def make_vertical_clip(source: Path, output: Path, start: float, end: float, mode: str = "crop", captions: Path | None = None, facecam: FacecamOverlay | None = None, effects=None, *, export_fps=None, silent_audio=False, watermark=None, export_preset=None, use_hardware=True) -> Path:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not found on PATH; install it first")
     output.parent.mkdir(parents=True, exist_ok=True)
-    if watermark is not None:
+    if export_preset is not None:
+        command = build_ffmpeg_command(source, output, start, end, mode, captions, facecam, effects,
+                                       export_fps=export_fps or source_frame_rate(source) or "30/1",
+                                       silent_audio=silent_audio, watermark=watermark, export_preset=export_preset)
+        hardware = hardware_export_command(command, export_preset) if use_hardware else None
+        if hardware:
+            result = subprocess.run(hardware, capture_output=True)
+            if result.returncode == 0:
+                return output
+            logger.info("Hardware encoder unavailable; retrying with libx264")
+    elif watermark is not None:
         command = build_ffmpeg_command(source, output, start, end, mode, captions, facecam, effects,
                                        export_fps=export_fps, silent_audio=silent_audio, watermark=watermark)
     elif export_fps:
