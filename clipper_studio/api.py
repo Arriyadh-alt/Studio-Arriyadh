@@ -584,7 +584,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 plan, directed, director_result = None, None, {"status": "disabled"}
                 adaptive_style = None
                 peak = thumbnail_peak(spec, duration)
-                hook = "" if professional else spec.get("selected_hook") or thumbnail_hook(job, spec, peak, captions)
+                editorial_hook = director.hook_text if spec.get("selected_hook") else None
+                hook = "" if professional else editorial_hook or thumbnail_hook(job, spec, peak, captions)
                 tracking = TrackingSpec.model_validate(spec.get("tracking") or {})
                 facecam_options = (FacecamSpec(enabled=False) if podcast else
                                    FacecamSpec.model_validate(spec.get("facecam", {})))
@@ -665,8 +666,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                                            caption_language or getattr(captions, "language", None), work,
                                                            store.root / "voices"),
                                              trigger=trigger_offset)
-                            if director.hook and spec.get("selected_hook") and plan.hook is None:
-                                plan.hook = {"style": "source", "text": director.hook_text,
+                            if director.hook and editorial_hook and plan.hook is None:
+                                plan.hook = {"style": "source", "text": editorial_hook,
                                              "duration": min(3., plan.duration)}
                             directed = cut_source(source, work / "directed.mp4", plan)
                     except Exception:
@@ -2037,6 +2038,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 changes["director"] = clip["director"]
             else:
                 changes["director"] = director_config(editing_mode, request.director)
+                if clip.get("selected_hook") and "hook_text" not in request.director.model_fields_set:
+                    changes["director"]["hook_text"] = (clip.get("director") or {}).get("hook_text")
             if request.podcast is not None and is_podcast(job):
                 changes["podcast"] = request.podcast.model_dump()
             clip.update(changes, status="queued", error=None, file_url=None,

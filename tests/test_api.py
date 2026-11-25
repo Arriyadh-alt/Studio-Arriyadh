@@ -452,6 +452,26 @@ def test_delete_queued_during_autopilot(monkeypatch, tmp_path):
         assert [c["number"] for c in job["clips"]] == [1]
 
 
+def test_rerender_editorial_thumbnail_uses_edited_hook(tmp_path, monkeypatch, media):
+    hooks = []
+
+    def thumbnail(video, output, text, peak):
+        hooks.append(text)
+        output.write_bytes(b"jpg")
+
+    monkeypatch.setattr("clipper_studio.api.generate_thumbnail", thumbnail)
+    app = create_app(tmp_path)
+    job = saved_job("test")
+    job["clips"][0].update(selected_hook="Watch the gate", director={"hook_text": "Watch the gate"})
+    app.state.store.save(job)
+    with TestClient(app) as client:
+        endpoint = "/api/jobs/test/clips/first/render"
+        assert client.post(endpoint, json={"start": 10, "end": 40, "captions": False,
+                                          "director": {"enabled": False, "hook_text": "Listen for the latch"}}).status_code == 202
+        app.state.pending.join()
+        assert hooks == ["Listen for the latch"]
+
+
 def test_rerender_ready_while_running(tmp_path):
     app = create_app(tmp_path)
     client = TestClient(app)
