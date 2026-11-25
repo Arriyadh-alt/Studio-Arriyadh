@@ -13,14 +13,14 @@ UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 
 def source_track_kinds(path: Path) -> set[str]:
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
-                             "-of", "json", str(path)], check=True, capture_output=True, text=True)
+                             "-of", "json", str(path)], check=True, capture_output=True, text=True, timeout=30)
     return {stream["codec_type"] for stream in json.loads(result.stdout).get("streams", [])}
 
 
 def probe_source(path: Path) -> dict:
     """Duration and title for an uploaded file; raises ValueError for files without audio and video."""
     result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type",
-                             "-of", "json", str(path)], capture_output=True, text=True)
+                             "-of", "json", str(path)], capture_output=True, text=True, timeout=30)
     if result.returncode:
         raise ValueError("This file is not a playable video")
     info = json.loads(result.stdout or "{}")
@@ -48,7 +48,8 @@ def local_analysis_media(source: Path, output_dir: Path) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     audio, video = output_dir / "analysis_audio.m4a", output_dir / "analysis_video.mp4"
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-vn", "-ac", "1", "-ar", "16000",
-                    "-c:a", "aac", "-b:a", "64k", str(audio)], check=True, capture_output=True)
+                    "-c:a", "aac", "-b:a", "64k", str(audio)], check=True, capture_output=True, timeout=600)
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(source), "-an", "-vf", "scale=-2:160",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", str(video)], check=True, capture_output=True)
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", str(video)], check=True, capture_output=True,
+                   timeout=1800)
     return audio, video

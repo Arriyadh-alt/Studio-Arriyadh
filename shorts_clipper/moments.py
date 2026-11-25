@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import subprocess
 import tempfile
 import urllib.request
@@ -21,14 +22,16 @@ def _frames(path, options, size, limit):
             while True:
                 data = bytearray()
                 while len(data) < size:
-                    part = process.stdout.read(size - len(data))
+                    if not select.select([process.stdout], [], [], 45)[0]:
+                        raise TimeoutError("FFmpeg stopped producing analysis frames.")
+                    part = os.read(process.stdout.fileno(), size - len(data))
                     if not part:
                         break
                     data.extend(part)
                 if not data:
                     break
                 yield bytes(data)
-            if process.wait():
+            if process.wait(timeout=10):
                 errors.seek(0)
                 raise RuntimeError(errors.read(4096).decode(errors="replace"))
         finally:
@@ -99,7 +102,7 @@ def _transcribe(audio, start, end, language):
         wav = Path(directory) / "window.wav"
         subprocess.run(["ffmpeg", "-v", "error", "-ss", str(start), "-i", str(audio),
                         "-t", str(end - start), "-ac", "1", "-ar", "16000", str(wav)],
-                       check=True, capture_output=True)
+                       check=True, capture_output=True, timeout=90)
         return [{"start": start + w.start, "end": start + w.end, "word": w.word}
                 for caption in transcribe(wav, language=language) for w in caption.words]
 

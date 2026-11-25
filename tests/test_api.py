@@ -398,12 +398,11 @@ def test_queued_job_survives_new_client_and_worker_continues(monkeypatch, tmp_pa
             second = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":"https://m.youtube.com/watch?v=puMjBYns9L0"}).json()["id"]
             assert first != second
             refreshed = TestClient(app)
-            assert refreshed.get(f"/api/jobs/{first}").json()["status"] == "running"
-            queued = wait_job(refreshed, second, lambda job: job["metadata"] is not None and job["queue_position"] == 1)
-            assert queued["status"] == "queued"
-            assert queued["stage"] == "Queued (position 1)"
+            for jid in (first, second):
+                published = wait_job(refreshed, jid, lambda job: job["status"] == "completed")
+                assert published["chat_pending"] and published["queue_position"] is None
             recent = {job["id"]: job for job in refreshed.get("/api/jobs?summary=true").json()}
-            assert recent[second]["queue_position"] == 1
+            assert recent[second]["queue_position"] is None
             assert "clips" not in recent[second] and "activity" not in recent[second]
             assert calls == [REPLAY_URL]
         finally:
@@ -520,8 +519,9 @@ def test_analysis_does_not_block_rerender_or_no_chat(monkeypatch, tmp_path, meta
             assert ready["clips"][0]["rendered_at"]
             assert not release.is_set()
             queued = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=ccccccccccc"}).json()["id"]
-            waiting = wait_job(client, queued, lambda job: job["metadata"] is not None and job["queue_position"] == 1)
-            assert waiting["stage"] == "Queued (position 1)"
+            waiting = wait_job(client, queued, lambda job: job["stage"] == "Waiting for chat analysis")
+            assert waiting["queue_position"] is None
+            assert fetched == ["https://www.youtube.com/watch?v=aaaaaaaaaaa"]
             assert client.post(f"/api/jobs/{queued}/cancel").status_code == 200
             assert client.post(f"/api/jobs/{slow}/cancel").status_code == 200
         finally:

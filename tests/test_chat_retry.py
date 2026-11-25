@@ -1,11 +1,26 @@
+import time
+
+import pytest
 from fastapi.testclient import TestClient
 
 from clipper_studio.api import create_app
-from clipper_studio.chat import DownloadCancelled
+from clipper_studio.chat import (CHAT_PROCESSING_ERROR, CHAT_TIMEOUT_ERROR, DownloadCancelled, _download_replay,
+                                 fetch_chat, fetch_metadata)
+from clipper_studio.spikes import detect_spikes
+from test_api import media, saved_job
 from test_chat import REPLAY_URL, replay_line, stub_yt_dlp
 
 
-def test_chat_retry_retains_more_complete_buckets(stub_yt_dlp, tmp_path):
+def test_chat_retry_retains_more_complete_buckets(stub_yt_dlp, tmp_path, monkeypatch, media):
+    monkeypatch.setattr("clipper_studio.api.fetch_metadata", fetch_metadata)
+
+    def download(operation, args, kwargs=None, *, timeout, check):
+        if operation == "metadata":
+            return fetch_metadata(*args, **kwargs)
+        assert operation == "replay"
+        return _download_replay(*args, lambda _: check())
+
+    monkeypatch.setattr("clipper_studio.chat.run_download", download)
     app = create_app(tmp_path)
     with TestClient(app) as client:
         jid = client.post("/api/jobs", json={"url": REPLAY_URL, "ai_analysis": False}).json()["id"]
@@ -38,3 +53,44 @@ def test_chat_retry_retains_more_complete_buckets(stub_yt_dlp, tmp_path):
         job = app.state.store.get(jid)
         assert job["message_count"] == 5
         assert buckets.read_bytes() != previous_buckets
+
+
+@pytest.mark.parametrize("scoring_times_out", [False, True])
+def test_chat_retry_scores_partial_replay_after_teardown_grace(tmp_path, monkeypatch, scoring_times_out):
+    watchdog = None
+
+    def fetch(url, directory, info, budget):
+        nonlocal watchdog
+        watchdog = budget
+        return fetch_chat(url, directory, info, budget)
+
+    def download(operation, args, kwargs=None, *, timeout, check):
+        if operation == "metadata":
+            return {"duration": 600, "was_live": True, "subtitles": {"live_chat": [{}]}}
+        assert operation == "replay"
+        (args[1] / "replay.live_chat.json.part").write_bytes(
+            b"".join(replay_line(i, 100 + i, "Viewer") for i in range(5)))
+        watchdog.stopped = True
+        check()
+
+    def score(*args, **kwargs):
+        time.sleep(.3)
+        return detect_spikes(*args, **kwargs)
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", fetch)
+    monkeypatch.setattr("clipper_studio.chat.run_download", download)
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", score)
+    monkeypatch.setattr("clipper_studio.api.CHAT_FINISH_GRACE", .02)
+    if scoring_times_out:
+        monkeypatch.setattr("clipper_studio.chat.CHAT_PROCESSING_SECONDS", .05)
+    app = create_app(tmp_path)
+    jid = "chatwatchdogretry"
+    app.state.store.save(dict(saved_job(jid), moments=[]))
+    with TestClient(app) as client:
+        assert client.post(f"/api/jobs/{jid}/chat/retry").status_code == 202
+        app.state.pending.join()
+        job = app.state.store.get(jid)
+    assert job["stages"]["chat_analysis"]["status"] == "partially_completed"
+    assert job["chat_error"] == (CHAT_PROCESSING_ERROR if scoring_times_out else CHAT_TIMEOUT_ERROR)
+    assert job["message_count"] == 5
+    assert (tmp_path / jid / "chat/buckets.sqlite").is_file()

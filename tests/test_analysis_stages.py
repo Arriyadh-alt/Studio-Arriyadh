@@ -9,7 +9,7 @@ from clipper_studio.api import create_app
 from clipper_studio.chat import ChatReplayError
 from clipper_studio.media_analysis import analyze_ranges, media_ranges
 from clipper_studio.stages import Checkpoints
-from test_api import REPLAY_URL, media, saved_job
+from test_api import REPLAY_URL, media, saved_job, wait_job
 
 
 def test_restart_during_segment_scan_resumes_from_disk(tmp_path, monkeypatch):
@@ -63,7 +63,7 @@ def test_restart_during_segment_scan_resumes_from_disk(tmp_path, monkeypatch):
         with TestClient(app) as client:
             jid = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
             assert blocked.wait(5)
-            state = client.get(f"/api/jobs/{jid}").json()
+            state = wait_job(client, jid, lambda job: job["stages"]["chat_analysis"]["status"] == "completed")
             assert state["stages"]["source_validation"]["status"] == "completed"
             assert state["stages"]["audio_analysis"]["status"] == "processing"
             assert state["stages"]["audio_analysis"]["progress"] > 0

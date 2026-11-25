@@ -1,6 +1,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const busy = job => ['queued', 'running'].includes(job.status);
+const canCancel = job => busy(job) || job.chat_pending || job.chat_retrying;
 let current = null;
 let timer;
 let poll = null;
@@ -282,7 +283,7 @@ const stageStatusLabels = {
 };
 let stageMarkup, stageAction;
 function drawStages(job) {
-  const idle = !busy(job) && !job.chat_retrying;
+  const idle = !busy(job) && !job.chat_retrying && !job.chat_pending;
   const resume = idle && !job.analysis_complete && ['failed', 'cancelled'].includes(job.status);
   $('#analysis-stages').hidden = !job.stages;
   $('#resume-analysis').hidden = !resume;
@@ -314,9 +315,10 @@ function drawJob(job) {
   $('#stage').textContent = job.stage;
   $('#progress').value = job.progress;
   $('#progress-label').textContent = `${Math.round(job.progress*100)}%`;
-  const cancellable = busy(job) && 'queue_position' in job;
+  const cancellable = canCancel(job) && 'queue_position' in job;
   $('#cancel-job').hidden = !cancellable;
-  $('#cancel-hint').hidden = !cancellable;
+  $('#cancel-job').textContent = busy(job) ? 'Cancel job' : 'Cancel chat analysis';
+  $('#cancel-hint').hidden = !cancellable || !busy(job);
   $('#job-error').hidden = !job.error;
   $('#job-error').textContent = job.error || '';
   $('#analysis-detail').hidden = !busy(job) || !job.analysis_detail;
@@ -324,12 +326,13 @@ function drawJob(job) {
   drawStages(job);
   const retry = !PodcastControls.isPodcast(job) && job.url && job.metadata &&
     (job.chat_error || job.status==='failed') && ['completed','completed_with_errors','failed'].includes(job.status);
-  $('#chat-status').hidden = !(retry || job.chat_retrying || job.chat_warning || job.chat_error);
+  $('#chat-status').hidden = !(retry || job.chat_retrying || job.chat_pending || job.chat_warning || job.chat_error);
   $('#chat-warning').hidden = !job.chat_warning;
   $('#chat-warning').textContent = job.chat_warning || '';
-  $('#chat-detail').hidden = !(job.chat_retrying || job.chat_error);
-  $('#chat-detail').textContent = job.chat_retrying ? 'Retrying chat analysis…' : job.chat_error || '';
-  $('#retry-chat').hidden = !retry || !!job.chat_retrying;
+  $('#chat-detail').hidden = !(job.chat_retrying || job.chat_pending || job.chat_error);
+  $('#chat-detail').textContent = job.chat_retrying ? 'Retrying chat analysis…' :
+    job.chat_pending ? 'Chat analysis is still running…' : job.chat_error || '';
+  $('#retry-chat').hidden = !retry || !!job.chat_retrying || !!job.chat_pending;
   globalThis.MomentReview?.draw(job);
   PodcastControls.drawRights(job);
   $('.activity-panel').hidden = PodcastControls.isPodcast(job) || !!job.upload;
@@ -458,7 +461,7 @@ $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
     const source=await PodcastControls.source();
-    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),ai_analysis:$('#ai-analysis').checked,review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},editing_mode:jobMode.value,director:readJobDirector(),...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},editing_mode:jobMode.value,director:readJobDirector(),...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);
@@ -492,10 +495,12 @@ function draftFeedback(node) {
   $('.review [type=submit]',node).disabled=locked(clip)||!!error;
 }
 $('#cancel-job').addEventListener('click',async event=>{
-  if(!current || !busy(current) || !confirm('Cancel this job? Ready clips will be kept.'))return;
-  const jid=current.id;
+  if(!current || !canCancel(current))return;
+  const jid=current.id, scope=busy(current) ? 'job' : 'chat';
+  if(!confirm(scope==='job' ? 'Cancel this job? Ready clips will be kept.' :
+    'Cancel chat analysis? Existing moments and clips will be kept.')) return;
   event.target.disabled=true;
-  try {notice('');await api(`./api/jobs/${jid}/cancel`,'POST');await refresh();}
+  try {notice('');await api(`./api/jobs/${jid}/cancel?scope=${scope}`,'POST');await refresh();}
   catch(error){notice(error.message);}finally{event.target.disabled=false;}
 });
 $('#delete-unkept').addEventListener('click',async event=>{

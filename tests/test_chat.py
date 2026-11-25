@@ -9,7 +9,8 @@ from yt_dlp import YoutubeDL
 from yt_dlp.downloader.common import FileDownloader
 from yt_dlp.utils import DownloadError
 
-from clipper_studio.chat import ChatReplayError, Message, fetch_chat, fetch_metadata, parse_chat
+from clipper_studio.chat import (CHAT_PROCESSING_ERROR, CHAT_TIMEOUT_ERROR, ChatReplayError, ChatWatchdog, Message,
+                                 fetch_chat, fetch_metadata, parse_chat)
 from clipper_studio.spikes import detect_spikes
 
 
@@ -32,6 +33,93 @@ def test_empty_and_malformed():
     assert parse_chat(["", "{}", '{"videoOffsetTimeMsec":null}']) == []
     with pytest.raises(ValueError):
         parse_chat(["broken json"])
+
+
+def test_watchdog_keeps_partial_buckets_and_reports_fragment_offset(tmp_path, monkeypatch):
+    now = 0
+    monkeypatch.setattr("clipper_studio.chat.time", SimpleNamespace(monotonic=lambda: now))
+    progress = []
+    watchdog = ChatWatchdog(600, lambda: None, progress.append)
+
+    def replay(operation, args, *, timeout, check):
+        nonlocal now
+        assert operation == "replay"
+        output = args[1] / "replay.live_chat.json.part"
+        output.write_bytes(replay_line(1, 90, "Viewer") + b'{"videoOffsetTimeMsec":"120000","actions":[]}\n')
+        now = 10
+        check()
+        now = 56
+        check()
+
+    monkeypatch.setattr("clipper_studio.chat.run_download", replay)
+    info = dict(REPLAY_INFO, duration=600)
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, info, watchdog)
+    assert progress == [20]
+    assert len(buckets) == 1
+    assert buckets.warning == CHAT_TIMEOUT_ERROR
+    assert buckets.path.is_file()
+
+
+def test_watchdog_bounds_slow_but_advancing_chat_and_has_a_hard_cap(monkeypatch):
+    now = 0
+    monkeypatch.setattr("clipper_studio.chat.time", SimpleNamespace(monotonic=lambda: now))
+    slow = ChatWatchdog(6600, lambda: None, lambda _: None)
+    for now in (30, 60, 89):
+        slow.advanced(now)
+        assert not slow.expired()
+    now = 90
+    slow.advanced(now)
+    assert slow.expired()
+
+    now = 0
+    capped = ChatWatchdog(43200, lambda: None, lambda _: None)
+    for now in range(30, 600, 30):
+        capped.advanced(now * 70)
+        assert not capped.expired()
+    now = 600
+    capped.advanced(42000)
+    assert capped.expired()
+
+
+@pytest.mark.parametrize("finished", [True, False])
+def test_watchdog_drains_all_downloaded_fragments(tmp_path, monkeypatch, finished):
+    monkeypatch.setattr("clipper_studio.chat.REPLAY_POLL_BYTES", 1)
+    watchdog = ChatWatchdog(600, lambda: None, lambda _: None)
+
+    def replay(operation, args, *, timeout, check):
+        assert operation == "replay"
+        name = "replay.live_chat.json" + ("" if finished else ".part")
+        (args[1] / name).write_bytes(b"".join(replay_line(i, 60 + i, "Viewer") for i in range(5)))
+        watchdog.stopped = True
+        if not finished:
+            check()
+
+    monkeypatch.setattr("clipper_studio.chat.run_download", replay)
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, dict(REPLAY_INFO, duration=600), watchdog)
+    assert len(buckets) == 5
+    assert buckets.warning == (None if finished else CHAT_TIMEOUT_ERROR)
+
+
+def test_expiring_drain_retains_ingested_buckets_as_partial(tmp_path, monkeypatch):
+    now = 0
+    monkeypatch.setattr("clipper_studio.chat.time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr("clipper_studio.chat.REPLAY_POLL_BYTES", 1)
+
+    def advance_clock(_):
+        nonlocal now
+        now = 23
+
+    watchdog = ChatWatchdog(600, lambda: None, advance_clock)
+
+    def replay(operation, args, *, timeout, check):
+        assert operation == "replay"
+        (args[1] / "replay.live_chat.json").write_bytes(
+            b"".join(replay_line(i, 60 + i, "Viewer") for i in range(5)))
+
+    monkeypatch.setattr("clipper_studio.chat.run_download", replay)
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, dict(REPLAY_INFO, duration=600), watchdog)
+    assert len(buckets) == 1
+    assert buckets.warning == CHAT_PROCESSING_ERROR
 
 
 @pytest.fixture
