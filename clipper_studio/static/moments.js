@@ -125,12 +125,11 @@ globalThis.MomentReview = (() => {
     action(node,async()=>{
       const data=new FormData(event.target);
       const moment=job.moments.find(m=>m.id===node.dataset.moment);
-      const changes={};
       const preset=data.get('duration_preset');
-      if(preset!==(moment.duration_preset||'auto')) changes.duration_preset=preset;
-      if(['start','end'].some(field=>data.get(field)!==exact(moment[field]))) {
+      const changes={duration_preset:preset};
+      const presetChanged=preset!==(moment.duration_preset||'auto');
+      if(!presetChanged || ['start','end'].some(field=>data.get(field)!==exact(moment[field]))) {
         for(const field of ['start','end']) changes[field]=parse(data.get(field));
-        changes.duration_preset=preset;
       }
       await request(`/${node.dataset.moment}`,'PATCH',changes);
       drafts.delete(node.dataset.moment);
