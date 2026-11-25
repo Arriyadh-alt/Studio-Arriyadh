@@ -1,11 +1,15 @@
 import json
 import socket
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from clipper_studio.api import create_app
 from clipper_studio.feedback import FeedbackStore, calibrated_weights
+from shorts_clipper.captions import Caption
+from shorts_clipper.director import DirectorOptions, plan_record
+from shorts_clipper.editing import plan_source_edit
 from test_api import saved_job
 
 
@@ -132,6 +136,21 @@ def test_metrics_are_cleared_only_for_a_different_video_id(client):
     assert client.get(path).json()["metrics"] == {}
     assert client.get(PATH + "/comparison").json()["sample_size"] == 0
     assert client.patch(path, json={"metrics": {"views": 9}}).json()["metrics"] == {"views": 9}
+
+
+@pytest.mark.parametrize("commentary, expected", [(None, "source quote"), ("Here is what is happening.", "commentary")])
+def test_snapshot_distinguishes_enhanced_podcast_hook_styles(app, client, commentary, expected):
+    job = app.state.store.get("feedbackjob")
+    options = DirectorOptions(preset="podcast", commentary=commentary)
+    plan, _ = plan_source_edit(np.full(100, -20.), [Caption(.3, 2., "Let me show you.")], 10,
+                               options, mode="enhanced", category="educational")
+    assert plan.hook["style"] == "source"
+    job["clips"][0]["director_result"] = plan_record(plan, options, [])
+    app.state.store.save(job)
+    response = client.post(PATH, json=entry())
+    assert response.status_code == 201
+    assert response.json()["hook_style"] == expected
+    assert client.patch(PATH + "/" + response.json()["id"], json={"hook_style": expected}).status_code == 200
 
 
 def test_csv_and_json_import(client):

@@ -18,7 +18,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_valida
 Count = Annotated[int, Field(ge=0, le=2**53 - 1)]
 Nonnegative = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 ClipId = Annotated[str, Field(pattern=r"^[a-zA-Z0-9]{1,64}$")]
-HookStyle = Literal["question", "curiosity gap", "direct statement", "source quote", "no hook", "other"]
+HookStyle = Literal["question", "curiosity gap", "direct statement", "source quote", "commentary", "no hook", "other"]
 MIN_SAMPLE = 5
 OUTCOME = "average_percentage_viewed"
 COMPONENTS = ("hook", "story", "emotion", "visual", "payoff", "retention")

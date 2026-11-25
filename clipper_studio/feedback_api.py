@@ -46,6 +46,14 @@ def clip_snapshot(job, clip):
     if context.get("status") == "review":
         flags.append({"check": "Source context", "detail": context["detail"]})
     options = director.get("options") or {}
+    hook_style = None
+    if hook:
+        if edits.get("commentary") or hook.get("style") == "commentary":
+            hook_style = "commentary"
+        elif hook.get("style") == "source" and not options.get("hook_text"):
+            hook_style = "source quote"
+    elif director.get("status") in {"disabled", "used"}:
+        hook_style = "no hook"
     voiceover = bool(operations.get("synthetic_voiceover") or hook.get("narration") or edits.get("commentary"))
     ai_hook = bool(hook.get("text") and (hook.get("writer") or hook.get("style") == "story")
                    and (not options.get("hook_text") or hook["text"] in (hook.get("options") or [])))
@@ -68,8 +76,7 @@ def clip_snapshot(job, clip):
     return {
         "job_id": job["id"], "clip_id": clip["id"],
         "title": clip.get("title") or metadata.get("title") or "Highlight",
-        "hook": hook.get("text"), "hook_style": "source quote" if hook.get("style") == "source" and not options.get("hook_text")
-        else "no hook" if director.get("status") == "disabled" or director.get("status") == "used" and not hook else None,
+        "hook": hook.get("text"), "hook_style": hook_style,
         "duration": duration, "duration_basis": duration_basis, "editing_mode": clip.get("editing_mode"),
         "detection_sources": sources,
         "editorial_score": score if numeric(score) else None,
