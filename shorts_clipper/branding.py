@@ -119,9 +119,6 @@ def _position(settings, size, facecam, bands, source, start, end, mode):
     top, bottom = MARGIN, BOTTOM - h
     positions = {"top-left": (left, top), "top": (center, top), "top-right": (right, top),
                  "bottom-left": (left, bottom), "bottom": (center, bottom), "bottom-right": (right, bottom)}
-    if settings.position != "auto":
-        return positions[settings.position]
-
     blocked = [(0, band[0], WIDTH, band[1]) for band in bands if band is not None]
     if facecam:
         r = facecam.rect
@@ -132,7 +129,14 @@ def _position(settings, size, facecam, bands, source, start, end, mode):
         return sum(max(0, min(x + w, x2 + 16) - max(x, x1 - 16))
                    * max(0, min(y + h, y2 + 16) - max(y, y1 - 16)) for x1, y1, x2, y2 in blocked)
 
+    preferred = positions.get(settings.position)
+    if preferred is not None and not overlap(preferred):
+        return preferred
     corners = [positions[key] for key in ("top-left", "bottom-left", "top-right", "bottom-right")]
+    if preferred is not None:
+        rows = [max(top, min(bottom, y)) for _, a, _, b in blocked for y in (a - 16 - h, b + 17)]
+        candidates = [preferred, *positions.values(), *((x, y) for y in rows for x in (left, center, right))]
+        return min(candidates, key=lambda p: (overlap(p), abs(p[0]-preferred[0]) + abs(p[1]-preferred[1])))
     free = [point for point in corners if not overlap(point)]
     if not free:
         rows = [max(top, min(bottom, y)) for _, a, _, b in blocked for y in (a - 16 - h, b + 16)]

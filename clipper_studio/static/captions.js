@@ -1,6 +1,10 @@
 globalThis.CaptionControls = (() => {
   const defaults = {preset:'pop',font:'Montserrat',size:80,position:'bottom',text_color:'#FFFFFF',highlight_color:'#FFE34D',emphasis_color:'#67F5B5',uppercase:false,emphasis:true};
   const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const corrections = (list = []) => `<label>Subtitle fixes <span class="hint">One per line: wrong → right</span><textarea name="caption_edits" placeholder="clok → clock">${esc((list || []).map(e=>`${e.find} → ${e.replace}`).join('\n'))}</textarea></label>`;
+  const readCorrections = root => (root.querySelector('[name=caption_edits]')?.value || '').split('\n')
+    .map(line=>line.split(/\s*(?:→|->)\s*/)).filter(([find])=>find?.trim())
+    .map(([find,replace=''])=>({find:find.trim(),replace:replace.trim()}));
   function options(clip = {}) {
     const natural = clip.editing_mode==='natural' ? {preset:'classic',emphasis:false} : {};
     const style = {...defaults,...natural,...clip.caption_style};
@@ -62,5 +66,5 @@ globalThis.CaptionControls = (() => {
     if(event.target.dataset.caption==='preset')root.querySelector('[data-caption=font]').value=event.target.value==='pop'?'Montserrat':'DejaVu Sans';
     preview(root);
   },true);
-  return {options,html,read,preview,applyProfile};
+  return {options,html,read,preview,applyProfile,corrections,readCorrections};
 })();

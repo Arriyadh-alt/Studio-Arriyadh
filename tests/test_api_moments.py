@@ -54,12 +54,15 @@ def test_review_and_endpoints(monkeypatch, tmp_path, analysis):
             assert client.patch(base + "/" + m["id"], json=data).status_code == 422
         response = client.patch(base + "/" + m["id"], json={"status": "selected", "start": 101})
         assert response.json()["duration"] == 39
+        edits = [{"find": "citayem", "replace": "Citayam"}]
+        assert client.patch(base + "/" + m["id"], json={"caption_edits": edits}).json()["caption_edits"] == edits
         queued = []
         monkeypatch.setattr(app.state.pending, "put", lambda *a, **k: queued.append((a, k)))
         ids = client.post(base + "/render").json()["clips"]
         assert len(ids) == 1 and queued[0][1]["priority"]
         job = client.get(f"/api/jobs/{jid}").json()
         assert job["clips"][0]["moment_id"] == m["id"]
+        assert job["clips"][0]["caption_edits"] == edits
         assert job["moments"][0]["status"] == "rendered"
         assert client.patch(base + "/" + m["id"], json={"status": "selected"}).status_code == 409
         assert client.post(base + "/render", json={"ids": [m["id"]]}).status_code == 409

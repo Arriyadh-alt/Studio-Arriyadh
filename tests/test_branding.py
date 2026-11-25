@@ -84,6 +84,14 @@ def test_non_ascii_watermark_loads_a_charset_matched_font(tmp_path):
     load.assert_called_once_with("/fonts/NotoSansCJK-Regular.ttc", settings.size, index=2)
 
 
+def test_preferred_watermark_position_moves_when_it_covers_text(tmp_path):
+    settings = BrandingSettings(position="top")
+    path = tmp_path / "mark.png"
+    preferred = prepare_watermark(path, settings, None, None, 0, 1, "crop")
+    mark = prepare_watermark(path, settings, None, None, 0, 1, "crop", bands=[(0, 265)])
+    assert preferred.y < 265 and mark.y >= 281
+
+
 @pytest.mark.parametrize("mode", ["crop", "blur"])
 def test_default_watermark_is_burned_into_first_and_last_frames(tmp_path, mode):
     source, output = tmp_path / "source.mp4", tmp_path / "clip.mp4"

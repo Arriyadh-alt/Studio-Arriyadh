@@ -75,7 +75,7 @@ def main(argv=None) -> int:
                                                 "size": args.caption_size, "font": args.caption_font})
                 subtitles.write_text(to_ass(captions, style), encoding="utf-8")
                 if captions:
-                    bands = (caption_band(style, style.size, caption_height(captions, style)),)
+                    bands = (caption_band(style, style.size, caption_height(captions, style, fitted=True)),)
                 if args.srt:
                     args.output.parent.mkdir(parents=True, exist_ok=True)
                     args.output.with_suffix(".srt").write_text(to_srt(captions), encoding="utf-8")

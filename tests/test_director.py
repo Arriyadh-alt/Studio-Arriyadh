@@ -321,6 +321,14 @@ def test_loop_transition_adapts_to_boundaries_and_captions():
     assert _loop_seconds(head, head, 10, []) == 0.12
 
 
+def test_loop_leaves_a_final_caption_intact(source, tmp_path):
+    end = float(probe(source)['format']['duration'])
+    looped = tmp_path / 'looped.mp4'
+    result = make_seamless_loop(source, looped, [Caption(end - 1, end, 'The payoff')])
+    assert result == {'status': 'skipped', 'reason': 'Final subtitles need the full ending'}
+    assert not looped.exists()
+
+
 @pytest.mark.parametrize("audio_end", [2.0, 2.15])
 def test_loop_export_matches_first_and_last_frames_without_cutting_audio(tmp_path, audio_end):
     original, looped = tmp_path / "original.mp4", tmp_path / "looped.mp4"
@@ -423,7 +431,8 @@ def test_api_render_runs_director_and_rerender_can_disable_it(monkeypatch, tmp_p
         assert clip["status"] == "ready", clip.get("error")
         result = clip["director_result"]
         assert result["status"] == "used" and result["edits"]["hook"] and result["edits"]["music"]
-        assert clip["director"]["loop"] and result["edits"]["loop"]["status"] == "applied"
+        assert clip["director"]["loop"] and result["edits"]["loop"] == {
+            "status": "skipped", "reason": "The ending is still in progress"}
         assert len(loop_inputs) == 1 and loop_inputs[0][0] == [] and loop_inputs[0][1]
         assert {q["check"] for q in result["quality"]} >= {"Format", "Audio balance", "Subtitle timing", "Framing"}
         assert clip["director"]["music"] == "on"
@@ -532,6 +541,9 @@ def test_api_story_voiceover_and_channel_for_older_jobs(monkeypatch, tmp_path, s
         hook = clip["director_result"]["edits"]["hook"]
         assert hook["voiceover"] and hook["streamer"] == "Valkyrae" and "Valkyrae" in hook["text"]
         assert hook["narration"]["voice_name"] == "Movie Trailer" and hook["narration"]["mood"] == "suspense"
+        actual = client.get(clip["narration_url"])
+        assert actual.status_code == 200 and actual.headers["x-voice-name"] == "Movie Trailer"
+        assert actual.content == (tmp_path / jid / clip["id"] / "narration.wav").read_bytes()
         assert job["metadata"]["channel"] == "Valkyrae" and len(lookups) == 2
         assert client.post(f"/api/jobs/{jid}/clips/{clip['id']}/render",
                            json={"start": 10, "end": 22, "director": {"voiceover": True, "voice": "trailer",

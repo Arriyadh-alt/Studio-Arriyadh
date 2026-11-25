@@ -1,8 +1,10 @@
 import io
+import subprocess
 import threading
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -136,7 +138,9 @@ def media(monkeypatch):
     monkeypatch.setattr("clipper_studio.api.video_duration", lambda p: 30)
     monkeypatch.setattr("clipper_studio.api.transcribe", lambda p: [])
     monkeypatch.setattr("clipper_studio.api.make_vertical_clip", lambda source, output, *a, **kw: output.write_bytes(b"video"))
-    monkeypatch.setattr("clipper_studio.api.subprocess.run", lambda command, **k: Path(command[-1]).write_bytes(b"jpg"))
+    monkeypatch.setattr("clipper_studio.api.subprocess", SimpleNamespace(
+        run=lambda command, **k: Path(command[-1]).write_bytes(b"jpg"),
+        CalledProcessError=subprocess.CalledProcessError))
 
 
 def wait_job(client, jid, predicate):

@@ -172,8 +172,10 @@ class VoicePreview(BaseModel):
     voice: VoiceChoice = "auto"
     delivery: DeliveryChoice = "auto"
     text: str | None = Field(default=None, max_length=64)
+    commentary: str | None = Field(default=None, max_length=160)
     language: Literal["en", "id"] = "en"
     category: str | None = Field(default=None, max_length=24)
+    seed: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
 PREVIEW_CACHE = 64
@@ -280,6 +282,7 @@ class RenderRequest(BaseModel):
     tracking: TrackingSpec = Field(default_factory=TrackingSpec)
     language: str | None = Field(default="auto", pattern=r"^(auto|[a-z]{2,3})$")
     caption_style: dict | None = None
+    caption_edits: list[CaptionEdit] = Field(default_factory=list, max_length=50)
     editing_mode: EditingMode = "full"
     director: DirectorSpec = Field(default_factory=DirectorSpec)
     podcast: PodcastSpec | None = None
@@ -294,6 +297,7 @@ class MomentPatch(BaseModel):
     start: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     end: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     podcast: PodcastSpec | None = None
+    caption_edits: list[CaptionEdit] | None = Field(default=None, max_length=50)
 
 
 class MomentRender(BaseModel):
@@ -536,7 +540,6 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if editing_mode == "natural":
                     caption_config = {"preset": "classic", "emphasis": False, **(caption_config or {})}
                 style = CaptionStyle.from_dict(caption_config)
-                transcript = None
                 if spec["captions"]:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     try:
@@ -544,9 +547,6 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     except Exception:
                         logger.warning("Subtitles unavailable for %s/%s; rendering without them", jid, cid, exc_info=True)
                     caption_language = getattr(captions, "language", None)
-                    if choice and choice.caption_edits:
-                        transcript = deepcopy(captions)
-                        apply_caption_edits(captions, [e.model_dump() for e in choice.caption_edits])
                 elif director.enabled:
                     update(jid, generation, stage=f"{clip_label} · Transcribing")
                     try:
@@ -554,7 +554,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     except Exception:
                         captions = []
                         logger.debug("Transcription for AI Director unavailable", exc_info=True)
-                transcript = captions if transcript is None else transcript
+                transcript = captions
                 plan, directed, director_result = None, None, {"status": "disabled"}
                 adaptive_style = None
                 peak = thumbnail_peak(spec, duration)
@@ -579,9 +579,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                              if b > spec["start"] and a < spec["end"]]
                     try:
                         conversation = frame_conversation(source, duration, turns, choice.layout)
-                        tracking_result = {"status": "unavailable"} if conversation is None else tracking_result
+                        if conversation is None:
+                            tracking_result = {"status": "unavailable", "needs_review": True}
                     except Exception:
-                        conversation, tracking_result = None, {"status": "unavailable"}
+                        conversation, tracking_result = None, {"status": "unavailable", "needs_review": True}
                         logger.warning("Speaker framing unavailable for %s/%s", jid, cid, exc_info=True)
                     if conversation and conversation["mode"] == "blur":
                         spec["mode"] = "blur"
@@ -620,15 +621,16 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                             teaser = analysis.get("teaser") or {}
                             hook_span = ({"start": teaser["start"] - spec["start"], "end": teaser["end"] - spec["start"],
                                           "text": spec.get("thumbnail_text") or spec.get("title")} if teaser else None)
-                            plan = plan_podcast_edit(levels if levels is not None else loudness(source, duration), captions,
+                            plan = plan_podcast_edit(levels if levels is not None else loudness(source, duration), transcript,
                                                      duration, director, hook_span,
                                                      voice=lambda text: context["voice"](text, context["language"],
                                                                                          voice=director.voice,
                                                                                          delivery=director.delivery,
-                                                                                         max_seconds=COMMENTARY_SECONDS))
+                                                                                         max_seconds=COMMENTARY_SECONDS,
+                                                                                         allow_truncate=False))
                             directed = cut_source(source, work / "directed.mp4", plan)
                         else:
-                            plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
+                            plan = plan_edit(levels if levels is not None else loudness(source, duration), transcript,
                                              duration, director, peak,
                                              spec.get("score"), spec.get("thumbnail_text") or hook,
                                              story_context(stream_metadata(jid, generation, job), spec,
@@ -644,8 +646,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 render_duration = plan.duration if plan else duration
                 if professional and plan and plan.hook and not plan.commentary:
                     hook = plan.hook["text"]
-                edited_captions = remap_captions(captions, plan) if plan and (spec["captions"] or director.loop) else captions
-                shown = edited_captions if spec["captions"] else []
+                corrections = ([e.model_dump() for e in choice.caption_edits] if choice else spec.get("caption_edits"))
+                corrected = apply_caption_edits(deepcopy(transcript), corrections) if corrections else transcript
+                shown = (remap_captions(corrected, plan) if plan else corrected) if spec["captions"] else []
+                shown = [c for c in shown if c.text.strip()]
                 text_height = None
                 caption_limit = None
                 video = work / "clip.mp4"
@@ -706,7 +710,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                 if plan and plan.segments else (0.0, duration))
                         reframe = plan_reframe(reaction, span, layout_options(overlay, size), tracking.layout,
                                                tracking.follow, tracking.x,
-                                               tracking.target.model_dump() if tracking.target else None)
+                                               tracking.target.model_dump() if tracking.target else None,
+                                               retained=[(s.start, s.end) for s in plan.segments if s.role == "main"]
+                                               if plan else None)
                         if reframe["overlay"] is not overlay:
                             overlay = reframe["overlay"]
                             rect = overlay.rect
@@ -736,8 +742,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     except Exception:
                         logger.debug("Could not save tracking still", exc_info=True)
                 fixes = []
-                if plan and plan.hook and spec["captions"] and text_height is None:
-                    text_height = caption_height(shown, style)
+                if shown and text_height is None:
+                    text_height = caption_height(shown, style, fitted=True)
                 if spec["captions"]:
                     style, note = framing_fix(style, overlay.rect if overlay else None, text_height)
                     if note:
@@ -809,7 +815,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         update(jid, generation, stage=f"{clip_label} · AI Director smoothing the loop")
                         looped = work / "looped.mp4"
                         try:
-                            plan.loop = make_seamless_loop(video, looped, shown, speech=edited_captions,
+                            plan.loop = make_seamless_loop(video, looped, shown, speech=remap_captions(transcript, plan),
                                                           **({"professional": True} if professional else {}))
                             if plan.loop["status"] == "applied":
                                 looped.replace(video)
@@ -854,6 +860,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     clip["tracking_result"] = tracking_result
                     clip["needs_review"] = bool(tracking_result.get("needs_review"))
                     clip["director_result"] = director_result
+                    narration_file = output_dir / "narration.wav"
+                    if mixed_audio and plan.voiceover and Path(plan.voiceover).is_file():
+                        Path(plan.voiceover).replace(narration_file)
+                        clip["narration_url"] = base + "/narration"
+                        clip["narration"] = plan.hook.get("narration", {})
+                    else:
+                        narration_file.unlink(missing_ok=True)
+                        clip.pop("narration_url", None)
+                        clip.pop("narration", None)
                     clip["director_stage"] = ("skipped" if not director.enabled else
                                               "failed" if director_result["status"] == "unavailable" else "completed")
                     clip["authenticity"] = authenticity
@@ -1022,6 +1037,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             choice = {**(job["request"].get("podcast") or {}), **(moment.get("edits") or {})}
             clip.update(podcast=PodcastSpec.model_validate(choice).model_dump(),
                         podcast_analysis=moment.get("podcast") or {})
+        else:
+            clip["caption_edits"] = moment.get("caption_edits", [])
         clip.update(id=uuid.uuid4().hex, moment_id=moment["id"], number=number, status="queued", error=None,
                     file_url=None, download_url=None, thumbnail_url=None)
         moment.update(status="rendered", clip_id=clip["id"])
@@ -1630,8 +1647,11 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
 
     @app.post("/api/voices/preview")
     def preview_voice(request: VoicePreview):
-        text = " ".join((request.text or SAMPLES[request.language]).split())
-        key = hashlib.sha1(json.dumps([text, request.voice, request.delivery, request.language, request.category]).encode())
+        commentary = " ".join((request.commentary or "").split())
+        text = commentary or " ".join((request.text or "").split()) or SAMPLES[request.language]
+        seed = request.seed or "preview"
+        key = hashlib.sha1(json.dumps([text, request.voice, request.delivery, request.language, request.category,
+                                       seed, bool(commentary)]).encode())
         folder = store.root / "voice-previews"
         path = folder / f"{key.hexdigest()[:20]}.wav"
         info = path.with_suffix(".json")
@@ -1639,8 +1659,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             folder.mkdir(parents=True, exist_ok=True)
             partial = path.with_name(path.stem + f".{uuid.uuid4().hex[:6]}.wav")
             try:
+                limits = {"max_seconds": COMMENTARY_SECONDS, "allow_truncate": False} if commentary else {}
                 spoken = narrate(text, request.language, partial, store.root / "voices", request.voice,
-                                 request.category, "preview", request.delivery)
+                                 request.category, seed, request.delivery, **limits)
             except Exception as error:
                 partial.unlink(missing_ok=True)
                 logger.warning("Voice preview failed", exc_info=True)
@@ -1651,9 +1672,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             for stale in previews[:-PREVIEW_CACHE]:
                 stale.unlink(missing_ok=True)
                 stale.with_suffix(".json").unlink(missing_ok=True)
-        spoken = json.loads(info.read_text())
+        return voice_file(path, json.loads(info.read_text()))
+
+    def voice_file(path, spoken):
         return FileResponse(path, media_type="audio/wav", headers={
-            "X-Voice-Name": spoken["voice_name"], "X-Voice-Mood": spoken["mood"], "X-Voice-Engine": spoken["engine"],
+            "X-Voice-Name": spoken.get("voice_name", "AI narration"), "X-Voice-Mood": spoken.get("mood", ""),
+            "X-Voice-Engine": spoken.get("engine", ""),
             "Cache-Control": "no-store"})
 
     @app.post("/api/uploads", status_code=201)
@@ -1909,6 +1933,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if not is_podcast(job):
                     raise HTTPException(422, "Podcast options apply to podcast jobs only")
                 moment["edits"] = request.podcast.model_dump()
+            if request.caption_edits is not None and not is_podcast(job):
+                moment["caption_edits"] = [edit.model_dump() for edit in request.caption_edits]
+                moment["reviewed"] = True
             if request.start is not None or request.end is not None or request.status is not None:
                 moment["reviewed"] = True
             store.save(job)
@@ -1951,10 +1978,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     "start", "end", "mode", "captions", "file_url", "download_url", "thumbnail_url",
                     "rendered_at", "attempt", "facecam", "facecam_result", "source_still_url", "director",
                     "director_result", "tracking", "tracking_result", "tracking_still_url", "needs_review", "podcast") if key in clip}
-                clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language",
+                clip["previous_render"].update({key: clip.get(key) for key in ("language", "caption_style", "caption_language", "caption_edits",
                                                                              "authenticity")})
                 clip["previous_render"]["editing_mode"] = clip.get("editing_mode", "full")
             changes = request.model_dump(exclude={"podcast"})
+            if "caption_edits" not in request.model_fields_set:
+                changes.pop("caption_edits")
             current_mode = clip.get("editing_mode", "full")
             editing_mode = request.editing_mode if "editing_mode" in request.model_fields_set else current_mode
             changes["editing_mode"] = editing_mode
@@ -2056,6 +2085,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             if not clip.get("source_still_url"):
                 raise HTTPException(404, "Source still not available")
         return file(jid, cid, "source.jpg")
+
+    @app.get("/api/jobs/{jid}/clips/{cid}/narration")
+    def clip_narration(jid: str, cid: str):
+        with store.lock:
+            clip = find_clip(store.get(jid), cid)
+            path = store.root / jid / cid / "narration.wav"
+            if clip["status"] != "ready" or not clip.get("narration_url") or not path.is_file():
+                raise HTTPException(404, "Rendered narration not available")
+            return voice_file(path, clip.get("narration") or {})
 
     @app.get("/api/jobs/{jid}/clips/{cid}/tracking-still")
     def tracking_still(jid: str, cid: str):

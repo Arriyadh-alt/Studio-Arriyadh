@@ -1,6 +1,6 @@
 """Local speech transcription and short, speech-timed captions."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 import re
@@ -155,15 +155,62 @@ class Caption:
     words: list = field(default_factory=list, compare=False, repr=False)
 
 
+@dataclass
+class TimedWord:
+    start: float
+    end: float
+    word: str
+    probability: float = 1.0
+
+
+def _correct_words(words, pattern, replacement):
+    text = join_tokens(w.word for w in words)
+    spans = []
+    for i, word in enumerate(words, 1):
+        end = len(join_tokens(w.word for w in words[:i]))
+        spans.append((end - len(word.word.strip()), end))
+    groups = []
+    for match in pattern.finditer(text):
+        hits = [i for i, (a, b) in enumerate(spans) if a < match.end() and b > match.start()]
+        if not hits:
+            continue
+        first, last = hits[0], hits[-1]
+        if groups and first <= groups[-1][1]:
+            first, _, previous = groups.pop()
+            groups.append((first, last, [*previous, match]))
+        else:
+            groups.append((first, last, [match]))
+    for first, last, matches in reversed(groups):
+        left, right = spans[first][0], spans[last][1]
+        corrected = text[left:right]
+        for match in reversed(matches):
+            corrected = corrected[:match.start()-left] + replacement + corrected[match.end()-left:]
+        leading = words[first].word[:len(words[first].word) - len(words[first].word.lstrip())]
+        tokens = corrected.split()
+        original = words[first:last+1]
+        probability = min(getattr(w, "probability", 1.) for w in original)
+        if len(tokens) == len(original):
+            windows = [(w.start, w.end) for w in original]
+        else:
+            a, b = original[0].start, original[-1].end
+            count = len(tokens)
+            windows = [(a + (b-a)*i/count, a + (b-a)*(i+1)/count) for i in range(count)]
+        words[first:last+1] = [TimedWord(a, b, (leading if i == 0 else " ") + token, probability)
+                               for i, (token, (a, b)) in enumerate(zip(tokens, windows))]
+    return bool(groups)
+
+
 def apply_caption_edits(captions, edits):
     """Reviewer subtitle fixes: whole-word, case-insensitive find/replace on caption text and timed words."""
     rules = [(re.compile(r"(?<!\w)" + re.escape(e["find"].strip()) + r"(?!\w)", re.I), e.get("replace", "").strip())
              for e in edits or () if e.get("find", "").strip()]
     for caption in captions:
         for pattern, replacement in rules:
-            caption.text = " ".join(pattern.sub(replacement, caption.text).split())
-            for word in caption.words:
-                word.word = pattern.sub(replacement, word.word)
+            if caption.words:
+                if _correct_words(caption.words, pattern, replacement):
+                    caption.text = join_tokens(w.word for w in caption.words)
+            else:
+                caption.text = " ".join(pattern.sub(lambda _: replacement, caption.text).split())
     return captions
 
 
@@ -305,39 +352,42 @@ def _effective_style(style):
 
 
 def fit_caption_style(caption, style, max_height):
-    if max_height is None:
-        return style
+    text = literal_text(caption.text)
+    if style.uppercase:
+        text = text.upper()
     for size in range(style.size, 0, -1):
-        fitted = CaptionStyle(**{**vars(style), "size": size})
-        if caption_height([caption], fitted) <= max_height:
+        fitted = style if size == style.size else replace(style, size=size)
+        lines = wrap_caption(text) if fitted == CaptionStyle(preset="classic") else styled_lines(text, _effective_style(fitted))
+        if (len(lines) <= 2
+                and (max_height is None or _caption_height(caption, fitted) <= max_height)):
             return fitted
     return fitted
 
 
-def caption_height(captions, style, max_height=None):
-    if not captions:
-        return 0
-    if max_height is not None:
-        return max(caption_height([c], fit_caption_style(c, style, max_height)) for c in captions)
+def _caption_height(caption, style):
     effective = _effective_style(style)
     font = style_font(effective.font, effective.size)
     line_height = sum(font.getmetrics()) if font else effective.size*1.3
-    heights = []
-    for caption in captions:
-        text = literal_text(caption.text)
-        if style.uppercase:
-            text = text.upper()
-        lines = wrap_caption(text) if style == CaptionStyle(preset="classic") else styled_lines(text, effective)
-        heights.append(len(lines)*line_height*(1.15 if style.preset == "pop" else 1)+12)
-    return math.ceil(max(heights))
+    text = literal_text(caption.text)
+    if style.uppercase:
+        text = text.upper()
+    lines = wrap_caption(text) if style == CaptionStyle(preset="classic") else styled_lines(text, effective)
+    return math.ceil(len(lines)*line_height*(1.15 if style.preset == "pop" else 1)+12)
+
+
+def caption_height(captions, style, max_height=None, *, fitted=False):
+    return max((_caption_height(c, fit_caption_style(c, style, max_height) if fitted or max_height is not None else style)
+                for c in captions), default=0)
 
 
 def to_ass(captions: list[Caption], style: CaptionStyle | dict | None = None, max_height=None) -> str:
     # Preserve the historical serializer for callers supplying only static chunks.
     if style is None and not any(c.words for c in captions) and max_height is None:
-        return _classic_ass(captions)
-    style = style if isinstance(style, CaptionStyle) else CaptionStyle.from_dict(style)
-    if style == CaptionStyle(preset="classic") and max_height is None:
+        style = CaptionStyle(preset="classic")
+    else:
+        style = style if isinstance(style, CaptionStyle) else CaptionStyle.from_dict(style)
+    if (style == CaptionStyle(preset="classic") and max_height is None
+            and all(len(wrap_caption(literal_text(c.text))) <= 2 for c in captions)):
         return _classic_ass(captions)
     effective = _effective_style(style)
     size = effective.size

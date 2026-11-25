@@ -287,7 +287,8 @@ def choose_layout(track: Track, trigger: dict | None, has_facecam: bool, aspect:
 
 
 def validate(track: Track, path, width: float, trigger: dict | None, clip: tuple[float, float],
-             cam_rect: OutputRect | None = None, main_top: int = 0, main_height: int = OUTPUT_HEIGHT) -> dict:
+             cam_rect: OutputRect | None = None, main_top: int = 0, main_height: int = OUTPUT_HEIGHT,
+             *, retained=None) -> dict:
     """Check the planned framing before rendering. Times are source times."""
     def visible(x, t, margin=0.02):
         centre = _camera_at(path, t)
@@ -300,22 +301,34 @@ def validate(track: Track, path, width: float, trigger: dict | None, clip: tuple
         ox, oy = (x - left) / width * OUTPUT_WIDTH, main_top + y * main_height
         return cam_rect.x <= ox <= cam_rect.x + cam_rect.w and cam_rect.y <= oy <= cam_rect.y + cam_rect.h
 
-    inside = (track.times >= clip[0]) & (track.times <= clip[1])
+    intervals = [clip] if retained is None else retained
+
+    def kept(t, *, boundary=False):
+        return any(start <= t < end or (boundary and start - .05 <= t <= end + .05)
+                   for start, end in intervals)
+
+    inside = np.array([kept(t) for t in track.times], dtype=bool)
     times, xs, ys = track.times[inside], track.x[inside], track.y[inside]
     subject = float(np.mean([visible(x, t) for x, t in zip(xs, times)])) if len(times) else 1.0
     offset = float(np.mean([abs(x - _camera_at(path, t)) for x, t in zip(xs, times)]) / (width / 2)) if len(times) else 0.0
-    checks = {"subject_in_frame": subject >= 0.75, "camera_follows": offset <= 0.85}
+    checks = {"subject_in_frame": bool(len(times)) and subject >= 0.75,
+              "camera_follows": bool(len(times)) and offset <= 0.85}
     if trigger is not None:
         tx, ty = trigger["target"]
         span = [t for t in times if trigger["trigger"] <= t <= trigger["reaction"]] or [trigger["event"]]
         seen = float(np.mean([visible(tx if abs(t - trigger["event"]) < 0.5 else track.at(t)[0], t) for t in span]))
-        checks["trigger_visible"] = seen >= 0.7 and visible(tx, trigger["event"])
+        checks["trigger_visible"] = kept(trigger["event"]) and seen >= 0.7 and visible(tx, trigger["event"])
         checks["facecam_clear"] = not covered(tx, ty, trigger["event"])
-        checks["reaction_understandable"] = trigger["notice"] - trigger["trigger"] <= 12 and trigger["confidence"] >= 0.15
-        checks["story_complete"] = clip[0] <= trigger["trigger"] + 0.05 and clip[1] >= min(trigger["end"], trigger["reaction"] + 1.5)
+        checks["reaction_understandable"] = (kept(trigger["notice"]) and kept(trigger["reaction"])
+                                               and trigger["notice"] - trigger["trigger"] <= 12
+                                               and trigger["confidence"] >= 0.15)
+        checks["story_complete"] = (kept(trigger["trigger"], boundary=True) and kept(trigger["event"])
+                                    and kept(trigger["reaction"])
+                                    and kept(min(trigger["end"], trigger["reaction"] + 1.5), boundary=True))
     else:
         checks["trigger_visible"] = False
-    return {"checks": checks, "passed": all(checks.values()), "subject_visible": round(subject, 3)}
+    return {"checks": checks, "passed": all(checks.values()),
+            "failed_checks": [key for key, passed in checks.items() if not passed], "subject_visible": round(subject, 3)}
 
 
 def to_output_time(path, segments) -> list[tuple[float, float, float]]:
@@ -384,7 +397,7 @@ def analyze_reaction(source: Path, duration: float, reaction: float | None, excl
 
 
 def plan_reframe(reaction: Reaction, clip: tuple[float, float], layouts: dict, layout: str = "auto",
-                 follow: str = "auto", x: float | None = None, target: dict | None = None) -> dict:
+                 follow: str = "auto", x: float | None = None, target: dict | None = None, *, retained=None) -> dict:
     """Pick a layout and camera path, validate it, and retry with stronger framing when the trigger is lost."""
     footage, track, trigger = reaction.footage, reaction.track, reaction.trigger
     if target is not None:
@@ -410,7 +423,8 @@ def plan_reframe(reaction: Reaction, clip: tuple[float, float], layouts: dict, l
         tried.add((name, hold, bounds))
         pin = (trigger["trigger"], trigger["reaction"] + 0.5, trigger["target"][0]) if hold and trigger else None
         path = camera_path(track, width, fixed=x if follow == "fixed" else None, hold=pin, bounds=bounds)
-        report = validate(track, path, width, trigger, clip, overlay.rect if overlay else None, top, height)
+        report = validate(track, path, width, trigger, clip, overlay.rect if overlay else None, top, height,
+                          retained=retained)
         checks = report["checks"]
         rank = (report["passed"], checks.get("trigger_visible", False), checks.get("facecam_clear", True),
                 sum(checks.values()))
@@ -420,8 +434,7 @@ def plan_reframe(reaction: Reaction, clip: tuple[float, float], layouts: dict, l
         if report["passed"]:
             break
     result = best[1]
-    checks = result["validation"]["checks"]
     result.update(attempts=len(tried), auto_layout=automatic, trigger=trigger,
-                  needs_review=not (checks.get("trigger_visible") and checks.get("facecam_clear", True)),
+                  needs_review=not result["validation"]["passed"],
                   target=[round(v, 4) for v in (track.at(trigger["event"]) if trigger else track.at(clip[0]))])
     return result

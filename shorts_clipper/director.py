@@ -110,6 +110,7 @@ class Plan:
     camera: list = field(default_factory=list)  # (t, x, y) keyframes on the output timeline
     voice_clarity: bool = False
     commentary: dict | None = None
+    beats: list = field(default_factory=list)
 
     @property
     def duration(self):
@@ -136,7 +137,7 @@ class Plan:
                 "reframes": (len({round(c[1], 2) for c in self.camera}) if self.camera
                              else len({round(f, 2) for f in self.focal}) if self.focal else 0),
                 "duration": round(self.duration, 2), "loop": self.loop,
-                "voice_clarity": self.voice_clarity, "commentary": self.commentary,
+                "voice_clarity": self.voice_clarity, "commentary": self.commentary, "beats": self.beats,
                 "timeline": [[round(s.start, 3), round(s.end, 3), round(o, 3)]
                              for o, s in zip(self.offsets(), self.segments) if s.role == "main"]}
 
@@ -296,6 +297,40 @@ def score_clip(levels, words, duration, peak, hook_strength, spike_score, cut_se
 
 # ---------------------------------------------------------------- planning
 
+def _story_beats(words, start, end, reaction, trigger):
+    climax = trigger if trigger is not None and start < trigger < reaction else reaction - .45
+    context_end = next((w.end for w in words if start + .6 < w.end < climax and SENTENCE_END.search(w.word.strip())),
+                       start + (climax - start) / 3)
+    settle = min(end, reaction + 1.5)
+    followup = [w for w in words if settle <= w.start < end]
+    payoff = (followup[0].start if any(SENTENCE_END.search(w.word.strip()) for w in followup)
+              else max(settle, end - 1.2))
+    markers = (("context", start), ("buildup", context_end), ("climax", climax),
+               ("reaction", reaction), ("payoff", payoff), ("end", end))
+    return [(name, max(start, a), min(end, b)) for (name, a), (_, b) in zip(markers, markers[1:])
+            if min(end, b) > max(start, a)]
+
+
+def _repeated_sentences(words, levels, start, end, protect):
+    sentence, previous, cuts = [], None, []
+    for i, word in enumerate(words):
+        sentence.append(word)
+        if not SENTENCE_END.search(word.word.strip()):
+            continue
+        a, b = sentence[0].start, word.end
+        text = re.findall(r"\w+", " ".join(w.word for w in sentence).casefold())
+        before = sentence[0].start - words[i-len(sentence)].end if i + 1 > len(sentence) else 0
+        after = words[i+1].start - b if i+1 < len(words) else 0
+        if (len(text) >= 4 and text == previous and before >= .4 and after >= .4
+                and start + .6 <= a and b <= end - .6
+                and all(not EXCITED.search(w.word) for w in sentence)
+                and max(levels[round(a / STEP):round(b / STEP)], default=0) < -24
+                and not any(a-.1 < p1 and b+.1 > p0 for p0, p1 in protect)):
+            cuts.append((a - .1, b + .1))
+        previous, sentence = text, []
+    return cuts
+
+
 def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, spike_score=None, hook_text=None,
               story=None, trigger=None) -> Plan:
     """Plan the edit. With a `story` context (streamer, game, language, chat) and the story option on,
@@ -335,7 +370,14 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         room = MAX_OUTPUT - (intro["duration"] if intro else 0.0)
         if end - main_start > room and peak is not None:
             end = min(end, max(peak + 2.5, main_start + room))
-    cuts = find_silences(levels, words, main_start, end, protect) if options.edits else []
+    beats = _story_beats(words, main_start, end, peak, trigger) if arc else []
+    protect.extend((a, b if name != "buildup" else min(b, a + .6)) for name, a, b in beats)
+    category = intro["category"] if intro else None
+    expressive = category in ("funny", "scare", "wholesome", "rage")
+    cuts = find_silences(levels, words, main_start, end, protect,
+                         minimum=1.6 if expressive else 1.0 if arc else .8) if options.edits else []
+    if options.edits and arc and not expressive:
+        cuts = sorted(cuts + _repeated_sentences(words, levels, main_start, end, protect))
     pieces, cursor = [], main_start
     for a, b in cuts:
         if a - cursor >= 0.6:
@@ -352,13 +394,24 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
     while over > 0 and segments:
         last = segments[-1]
         if last.length - over >= 0.6:
-            last.end -= over
+            limit = last.end - over
+            complete = [w.end for w in words if max(last.start + .6, limit - 2.) <= w.end <= limit
+                        and SENTENCE_END.search(w.word.strip())] if arc else []
+            last.end = max(complete, default=limit)
             over = 0
         else:
             over -= last.length
             segments.pop()
-    plan = Plan(segments, trimmed_start=main_start + duration - end, removed=sum(b - a for a, b in cuts))
+    plan = Plan(segments, trimmed_start=main_start + duration - end,
+                removed=max(0., end - main_start - sum(s.length for s in pieces)))
     offsets = plan.offsets()
+    if beats:
+        plan.beats = [{"name": "hook", "start": 0., "end": round(intro["duration"], 3)}]
+        for name, a, b in beats:
+            spans = [(o + max(a, s.start) - s.start, o + min(b, s.end) - s.start)
+                     for o, s in zip(offsets, segments) if s.role == "main" and a < s.end and b > s.start]
+            if spans:
+                plan.beats.append({"name": name, "start": round(spans[0][0], 3), "end": round(spans[-1][1], 3)})
     if intro:
         plan.voiceover = intro.pop("voice", None)
         plan.hook = {**intro, "style": "story", "text": options.hook_text or intro["options"][0],
@@ -366,12 +419,9 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
                      "event": arc["event"], "end": round(end, 2),
                      "build_up": round(arc["event"] - main_start, 2), "payoff": round(end - arc["event"], 2)}
         boundary = intro["duration"]
-        plan.zooms.append([0.0, boundary, 0.12, 1.0, "hook"])
-        plan.flashes.append(boundary)
-        plan.sfx.append([0.0, "hit"])
-        plan.sfx.append([0.15, "boing"] if intro["category"] in ("funny", "fail", "karma") else
-                        [max(0.0, boundary - 1.35), "riser"])
-        plan.sfx.append([max(0.0, boundary - 0.25), "whoosh"])
+        plan.zooms.append([0.0, boundary, 0.06, 1.0, "hook"])
+        if not plan.voiceover and category in ("funny", "fail", "karma"):
+            plan.sfx.append([0.15, "boing"])
     if hook:
         plan.hook = {"source_start": round(hook[0], 2), "source_end": round(hook[1], 2),
                      "duration": round(hook[1] - hook[0], 2), "text": hook_text}
@@ -380,15 +430,13 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
         plan.flashes.append(boundary)
         plan.sfx.append([max(0.0, boundary - 0.25), "whoosh"])
     if options.edits:
-        mains = [(o, s) for o, s in zip(offsets, segments) if s.role == "main"]
-        for index, (offset, segment) in enumerate(mains[1:], 1):
-            if index % 2:
-                plan.zooms.append([offset, offset + segment.length, 0.07, 0.0, "cut"])
         reaction = plan.map_time(peak) if peak is not None else None
         if reaction is not None:
-            plan.zooms.append([max(0.0, reaction - 0.3), min(plan.duration, reaction + 2.2), 0.2, 0.35, "reaction"])
-            plan.shakes.append([max(0.0, reaction - 0.3), min(plan.duration, reaction + 0.25)])
-            plan.sfx.append([max(0.0, reaction - 0.3), "hit"])
+            plan.zooms.append([max(0.0, reaction - 0.3), min(plan.duration, reaction + 1.5), 0.10, 0.35, "reaction"])
+            if not arc:
+                plan.shakes.append([max(0.0, reaction - 0.1), min(plan.duration, reaction + 0.15)])
+            if not expressive and all(abs(reaction - at) >= 2.0 for at, _ in plan.sfx):
+                plan.sfx.append([max(0.0, reaction - 0.15), "hit"])
         moments = []
         for w in words:
             t = plan.map_time(w.start)
@@ -400,13 +448,11 @@ def plan_edit(levels, captions, duration, options: DirectorOptions, peak=None, s
                 moments.append((float(z[i]), t))
         taken = [(a, b) for a, b, *_ in plan.zooms if _[-1] != "cut"]
         for _, t in sorted(moments, reverse=True):
-            if len([zm for zm in plan.zooms if zm[-1] == "punch"]) >= 4:
+            if expressive or len([zm for zm in plan.zooms if zm[-1] == "punch"]) >= 2:
                 break
             if all(t < a - 2.0 or t > b + 2.0 for a, b in taken) and t + 0.9 <= plan.duration:
-                plan.zooms.append([t - 0.05, t + 0.9, 0.11, 0.1, "punch"])
-                taken.append((t - 0.05, t + 0.9))
-                if options.sfx:
-                    plan.sfx.append([max(0.0, t - 0.05), "pop"])
+                plan.zooms.append([max(0., t - 0.05), t + 0.9, 0.06, 0.1, "punch"])
+                taken.append((max(0., t - 0.05), t + 0.9))
     if not options.sfx:
         plan.sfx = []
     speaking = speech_mask(words, duration).mean() if words else 0.0
@@ -457,7 +503,7 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
     intro = None
     if options.commentary:
         from .story import intro_length
-        spoken, seconds = None, None
+        spoken, seconds, info = None, None, {}
         if voice is not None:
             try:
                 spoken, info = voice(options.commentary)
@@ -467,7 +513,7 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
                 logging.getLogger(__name__).warning("Commentary voice-over unavailable", exc_info=True)
                 spoken = None
         length = max(intro_length(options.commentary, seconds), min(10.4, (seconds or 0) + 0.4))
-        intro = {"duration": round(length, 2), "voice": str(spoken) if spoken else None}
+        intro = {"duration": round(length, 2), "voice": str(spoken) if spoken else None, "narration": info}
         segments.insert(0, Segment(main_start, main_start + intro["duration"], "intro"))
     over = sum(s.length for s in segments) - MAX_OUTPUT
     while over > 0 and segments:
@@ -490,6 +536,8 @@ def plan_podcast_edit(levels, captions, duration, options: DirectorOptions, hook
         plan.hook = {"style": "commentary", "text": f"{COMMENTARY_LABEL}: {options.commentary}",
                      "duration": intro["duration"], "source_start": round(main_start, 2),
                      "source_end": round(main_start, 2)}
+        if intro["voice"]:
+            plan.hook.update(voiceover=True, narration=intro["narration"])
         offset = intro["duration"]
         plan.zooms.append([0.0, offset, 0.04, 1.0, "hook"])
     if teaser:
@@ -596,13 +644,14 @@ def _bands_overlap(a, b, gap=0):
 
 
 def hook_layout(hook, rect, style, captions, caption_limit=None):
-    story = hook.get("style") == "story"
-    end = hook["duration"] + (0 if story or hook.get("style") == "source" else .7)
+    story = hook.get("style") in ("story", "commentary")
+    static = hook.get("style") == "source"
+    end = hook["duration"] + (0 if story or static else .7)
     active = [c for c in captions if c.start < end and c.end > 0]
-    height = measure_caption_height(active, style, caption_limit) if style is not None else 0
+    height = measure_caption_height(active, style, caption_limit, fitted=True) if style is not None else 0
     band = hook_band(hook["text"], rect, style if active else None, preferred=760 if story else 380,
                      size=STORY_SIZE if story else HOOK_SIZE, caption_height=height,
-                     static=hook.get("style") == "source")
+                     static=static)
     return band, height, bool(active)
 
 
@@ -612,8 +661,13 @@ def hook_band(text: str, rect=None, style=None, preferred=380, size=HOOK_SIZE, c
     regions = [(a,b) for a,b in regions if b > a]
     if not regions:
         raise ValueError("No title space outside the facecam")
-    height = min(hook_height(text, size, static=static), max(b-a for a,b in regions))
     blocked = caption_band(style, getattr(style,"size",80), caption_height) if style is not None else None
+    if blocked:
+        clear = [(c, d) for a, b in regions for c, d in
+                 ((a, min(b, blocked[0]-20)), (max(a, blocked[1]+20), b)) if d > c]
+        if clear:
+            regions = clear
+    height = min(hook_height(text, size, static=static), max(b-a for a,b in regions))
     candidates = []
     for a,b in regions:
         if b-a < height:
@@ -900,6 +954,14 @@ def make_seamless_loop(video: Path, output: Path, captions=(), *, speech=None, p
     if not len(head) or not len(tail):
         return {"status": "skipped", "reason": "Could not sample clip boundaries"}
     intervals = max(2, round(_loop_seconds(head, tail, end, captions) * fps))
+    seam = end - (intervals + 1) / fps
+    if any(c.end > seam and c.start < end for c in captions):
+        return {"status": "skipped", "reason": "Final subtitles need the full ending"}
+    tail_motion = np.abs(np.diff(tail[-(intervals+1):], axis=0)).mean() if len(tail) > 1 else 0.
+    different_opening = np.abs(tail[-1] - head[0]).mean() >= .06
+    trailing_speech = any(w.end > seam and w.start < end for w in transcript_words(speech))
+    if different_opening and (tail_motion >= .06 or trailing_speech):
+        return {"status": "skipped", "reason": "The ending is still in progress"}
     start = count - 1 - intervals
     # blend's N is one-based; enable's n is zero-based. Hold the single reference frame to EOF.
     weight = f"clip((N-{start + 1})/{intervals},0,1)"

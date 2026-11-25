@@ -30,7 +30,7 @@ globalThis.TrackingControls = (() => {
   }
   function html(clip, draft) {
     const t=defaults(draft.tracking), result=clip.tracking_result;
-    const review=result?.needs_review ? '<p class="error">Needs manual review: the trigger could not be kept in frame automatically. Click what the streamer reacts to, or change the layout.</p>' : '';
+    const review=result?.needs_review ? '<p class="error">Needs manual review. Check the warnings above, then adjust the clip range, layout, or tracking target.</p>' : '';
     const still=clip.tracking_still_url ? `<div class="tracking-editor" data-still-time="${result?.still_time ?? 0}"><img draggable="false" alt="Source frame at the reaction trigger" src=".${esc(clip.tracking_still_url)}?v=${clip.rendered_at||0}"><div class="crop-window"></div><span class="target-dot ai" title="AI target"></span><span class="target-dot manual" hidden title="Your target"></span></div>
       <p class="hint">Blue box = 9:16 crop · dot = tracked target. Click the object or character to follow instead.</p>
       <div class="tracking-preview-wrap"><canvas class="tracking-preview" width="216" height="384" aria-label="Final layout preview"></canvas><p class="hint">Final layout preview at the trigger</p></div>` : '<p class="hint">Tracking preview available after rendering.</p>';

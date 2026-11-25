@@ -155,6 +155,16 @@ def test_trigger_must_be_visible_when_it_appears():
     assert report['checks']['subject_in_frame'] and not report['checks']['trigger_visible']
 
 
+def test_validation_does_not_count_an_event_removed_by_a_cut():
+    times = np.arange(0, 10, .25)
+    track = T.Track(times, np.full(len(times), .5), np.full(len(times), .5), np.zeros(len(times)), np.ones(len(times)))
+    trigger = {'trigger': 2, 'event': 3, 'notice': 4, 'reaction': 6, 'end': 7, 'confidence': .8, 'target': [.5, .5]}
+    path = [(t, .5, .5) for t in times]
+    assert T.validate(track, path, .32, trigger, (0, 10))['passed']
+    report = T.validate(track, path, .32, trigger, (0, 10), retained=[(0, 2.5), (3.5, 10)])
+    assert report['failed_checks'] == ['trigger_visible', 'story_complete']
+
+
 def test_keyframes_never_ramp_over_zero_time_at_cuts():
     keys = [(0, .1, .5), (2, .3, .5), (2, .3005, .5), (2.5, .5, .5)]
     assert '/0.000' not in T.keyframe_expression(keys)

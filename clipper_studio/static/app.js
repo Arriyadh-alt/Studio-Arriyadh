@@ -45,14 +45,14 @@ const deliveryOptions = selected => `<option value="auto">Auto (from the scene)<
 const speechLanguage = (root, hook) => {
   const chosen=$('[data-caption=language]',root)?.value;
   if(chosen && chosen!=='auto') return ['id','ms','jw','su'].includes(chosen) ? 'id' : 'en';
-  return hook?.language==='id' ? 'id' : 'en';
+  return ['id','ms','jw','su'].includes(hook?.language) ? 'id' : 'en';
 };
-async function previewVoice(body, button, status) {
+async function previewVoice(body, button, status, narrationUrl) {
   const audio=new Audio();
   audio.play().catch(()=>{}); // unlocks playback inside the tap, before the fetch (iOS Safari)
   button.disabled=true; status.textContent='Generating preview…';
   try {
-    const response=await fetch('./api/voices/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const response=narrationUrl?await fetch(`.${narrationUrl}`):await fetch('./api/voices/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if(!response.ok) throw new Error((await response.json().catch(()=>({}))).detail || 'Voice preview failed');
     audio.src=URL.createObjectURL(await response.blob());
     status.textContent=`${response.headers.get('X-Voice-Name')} · ${deliveryLabels[response.headers.get('X-Voice-Mood')]||''}${response.headers.get('X-Voice-Engine')==='offline'?' · offline voice':''}`;
@@ -71,6 +71,7 @@ function directorHtml(clip, draft) {
     <p class="director-score"><strong>${r.score.overall}</strong><span>viral score</span></p>
     <ul class="director-bars">${Object.entries(directorLabels).map(([k,l])=>`<li><span>${l}</span><meter min="0" max="100" value="${r.score[k]}"></meter><span>${r.score[k]}</span></li>`).join('')}</ul>
     <p class="hint">${[edits.hook?.style==='story'?`${edits.hook.duration.toFixed(1)} s story hook · ${edits.hook.build_up.toFixed(1)} s build-up · ${edits.hook.payoff.toFixed(1)} s payoff & reaction`:edits.hook?.style==='source'?`${edits.hook.duration.toFixed(1)} s text hook`:edits.hook?`${edits.hook.duration.toFixed(1)} s hook from ${timestamp(edits.hook.source_start)}`:'No teaser hook',`${edits.cuts} cuts`,`${edits.removed_seconds.toFixed(1)} s trimmed`,`${edits.zooms} zooms`,`${edits.sound_effects} sound effects`,edits.music?'music bed':''].filter(Boolean).map(escapeHtml).join(' · ')}</p>
+    ${edits.beats?.length?`<p class="hint">Story: ${edits.beats.map(b=>`${escapeHtml(b.name)} ${timestamp(b.start)}`).join(' → ')}</p>`:''}
     <ul class="quality">${r.quality.map(q=>`<li class="${escapeHtml(q.status)}"><strong>${escapeHtml(q.check)}</strong> ${escapeHtml(q.detail)}</li>`).join('')}</ul>
     ${loop?.status==='applied'?'<p class="hint">Seamless loop applied. Play the preview to hear and see the replay.</p>':loop?.reason?`<p class="hint">Seamless loop skipped: ${escapeHtml(loop.reason)}.</p>`:''}
     ${r.suggestions.length?`<ul class="suggestions">${r.suggestions.map(t=>`<li>${escapeHtml(t)}</li>`).join('')}</ul>`:''}</div>`
@@ -265,6 +266,7 @@ function clipHtml(clip,index) {
       <div ${PodcastControls.isPodcastClip(clip)?'hidden':''}>${facecamHtml(clip,draft)}
       ${TrackingControls.html(clip,draft)}</div>
       ${CaptionControls.html(draft)}
+      ${PodcastControls.isPodcastClip(clip)?'':`<fieldset ${disabled}><legend>Subtitle corrections</legend>${CaptionControls.corrections(draft.caption_edits ?? clip.caption_edits)}</fieldset>`}
       ${clip.caption_language?`<p class="hint">Transcription language: ${escapeHtml(clip.caption_language)}</p>`:''}
       <p class="draft-note hint" hidden><span>Changes not applied — Re-render to update</span> <button type="button" class="quiet" data-action="reset">Reset</button></p><p class="draft-error error" role="status" hidden></p>
       ${locked(clip)?'<p class="hint">This highlight is queued or rendering. Review actions unlock when it finishes.</p>':''}
@@ -471,7 +473,7 @@ function saveDraft(node, profiles=drafts.get(node.dataset.id)?.profiles) {
   const clip=current.clips.find(c=>c.id===node.dataset.id);
   const previous=facecamDefaults(drafts.get(clip.id)?.facecam || clip.facecam);
   const facecam={...previous,enabled:$('[data-facecam=enabled]',node).checked,position:$('[data-facecam=position]',node).value,size:Number($('[data-facecam=size]',node).value)};
-  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),editing_mode:$('[data-field=editing_mode]',node).value,director:readDirector(node),profiles,podcast:PodcastControls.read(node,clip),...CaptionControls.read(node)});
+  drafts.set(node.dataset.id,{start:$('[data-field=start].time',node).value,end:$('[data-field=end].time',node).value,mode:$('[data-field=mode]',node).value,captions:$('[data-field=captions]',node).checked,facecam,tracking:TrackingControls.read(node,drafts.get(clip.id)?.tracking || clip.tracking),editing_mode:$('[data-field=editing_mode]',node).value,director:readDirector(node),profiles,podcast:PodcastControls.read(node,clip),caption_edits:CaptionControls.readCorrections(node),...CaptionControls.read(node)});
   draftFeedback(node);
 }
 function draftFeedback(node) {
@@ -480,6 +482,7 @@ function draftFeedback(node) {
   if(draft) {
     changed=draft.start!==timestamp(clip.start)||draft.end!==timestamp(clip.end)||draft.mode!==clip.mode||draft.captions!==clip.captions||draft.editing_mode!==editingMode(clip)||JSON.stringify(draft.facecam)!==JSON.stringify(facecamDefaults(clip.facecam))||JSON.stringify(draft.director)!==JSON.stringify(directorDefaults(clip.director,editingMode(clip)))||JSON.stringify(draft.tracking)!==JSON.stringify(TrackingControls.defaults(clip.tracking))||JSON.stringify(draft.podcast)!==JSON.stringify(PodcastControls.defaults(clip));
     changed=changed||JSON.stringify({language:draft.language,caption_style:draft.caption_style})!==JSON.stringify(CaptionControls.options(clip));
+    changed=changed||JSON.stringify(draft.caption_edits)!==JSON.stringify(clip.caption_edits || []);
     try {
       const start=parseTime(draft.start),end=parseTime(draft.end); length=end-start;
       const f=draft.facecam,b=f?.box;
@@ -568,9 +571,16 @@ $('#clips').addEventListener('click',async event=>{
       await refresh();
     } else if(button.dataset.action==='voice-preview') {
       const clip=current.clips.find(c=>c.id===cid), hook=clip?.director_result?.edits?.hook, field=button.closest('fieldset');
-      const input=$('[data-director=hook_text]',field), language=speechLanguage(node,hook);
-      const text=input?.value.trim() || (hook?.style==='story' && hook.language===language ? hook.text : null);
-      await previewVoice({voice:$('[data-director=voice]',field).value,delivery:$('[data-director=delivery]',field).value,text,language,category:hook?.category||null},button,$('.voice-status',field));
+      const d=readDirector(node), p=PodcastControls.read(node,clip), mode=$('[data-field=editing_mode]',node).value;
+      const old=directorDefaults(clip.director,editingMode(clip)), oldPodcast=PodcastControls.defaults(clip);
+      const language=speechLanguage(node,{language:hook?.language || clip.caption_language});
+      const commentary=p?.version==='commentary' && mode!=='natural' ? p.commentary || clip.podcast_analysis?.commentary : null;
+      const text=p?.hook_text || d.hook_text || (['story','source'].includes(hook?.style) && !clip.director_result?.edits?.commentary ? hook.text : null);
+      const same=mode===editingMode(clip) && ['enabled','hook','story','voiceover','voice','delivery','hook_text'].every(k=>d[k]===old[k])
+        && ['version','hook_text','commentary'].every(k=>p?.[k]===oldPodcast?.[k])
+        && $('[data-caption=language]',node).value===(clip.language || 'auto');
+      await previewVoice({voice:d.voice,delivery:d.delivery,text:text?.slice(0,64) || null,commentary,language,seed:cid,category:hook?.category||null},
+        button,$('.voice-status',field),same?clip.narration_url:null);
     } else if(button.dataset.action==='facecam-reset') {
       saveDraft(node); drafts.get(cid).facecam.box=null;
       const box=$('.camera-box',node); if(box)box.hidden=true;
@@ -613,7 +623,7 @@ $('#clips').addEventListener('submit',async event=>{
     notice(''); button.disabled=true;
     const start=parseTime(draft.start),end=parseTime(draft.end);
     if(end<=start || end-start>60 || end>current.metadata.duration)throw Error('Choose a window within the stream, with end after start and a maximum of 60 seconds.');
-    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),editing_mode:draft.editing_mode,director:draft.director,podcast:draft.podcast,language:draft.language,caption_style:draft.caption_style}); drafts.delete(cid); await refresh();
+    await api(`./api/jobs/${jid}/clips/${cid}/render`,'POST',{start,end,mode:draft.mode,captions:draft.captions,facecam:draft.facecam,tracking:retimeTarget(draft.tracking,current.clips.find(c=>c.id===cid)?.start,start,end),editing_mode:draft.editing_mode,director:draft.director,podcast:draft.podcast,language:draft.language,caption_style:draft.caption_style,caption_edits:draft.caption_edits}); drafts.delete(cid); await refresh();
   } catch(error) { notice(error.message); button.disabled=false; }
 });
 // A picked target's time is relative to the rendered section; keep it on the same frame when Start moves.
