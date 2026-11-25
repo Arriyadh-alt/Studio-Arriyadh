@@ -192,9 +192,57 @@ def test_ai_publishes_and_renders_while_chat_is_scoring(monkeypatch, tmp_path, a
         assert any(moment["sources"] == ["chat"] for moment in finished["moments"])
 
 
-def test_cancel_completed_job_kills_chat_download(monkeypatch, tmp_path, analysis, media):
+def test_chat_cancel_after_chat_finishes_does_not_cancel_its_render(monkeypatch, tmp_path, analysis, media):
+    scoring, finish_chat, rendering, finish_render = (threading.Event() for _ in range(4))
+
+    def score(*args, **kwargs):
+        scoring.set()
+        assert finish_chat.wait(8)
+        return [{**proposal(), "start": 300, "end": 340, "peak": 318}], []
+
+    renders = 0
+
+    def render_with_pause(source, output, *args, **kwargs):
+        nonlocal renders
+        renders += 1
+        if renders == 2:
+            rendering.set()
+            assert finish_render.wait(8)
+        output.write_bytes(b"video")
+
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", score)
+    monkeypatch.setattr("clipper_studio.api.make_vertical_clip", render_with_pause)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": False, "clips": 2}).json()["id"]
+        try:
+            assert scoring.wait(5)
+            wait_job(client, jid, lambda job: job["status"] == "completed" and job["chat_pending"])
+            finish_chat.set()
+            assert rendering.wait(5)
+            response = client.post(f"/api/jobs/{jid}/cancel?scope=chat")
+            assert response.status_code == 200
+            job = client.get(f"/api/jobs/{jid}").json()
+            assert job["clips"][1]["status"] == "rendering"
+        finally:
+            finish_chat.set()
+            finish_render.set()
+        app.state.pending.join()
+        job = client.get(f"/api/jobs/{jid}").json()
+        assert job["status"] == "completed"
+        assert [clip["status"] for clip in job["clips"]] == ["ready", "ready"]
+
+
+@pytest.mark.parametrize("rendering", [False, True])
+def test_chat_only_cancel_kills_download_without_stopping_render(monkeypatch, tmp_path, analysis, media, rendering):
     started = threading.Event()
+    render_started, finish_render = threading.Event(), threading.Event()
     processes = []
+
+    def render(source, output, *args, **kwargs):
+        render_started.set()
+        assert finish_render.wait(8)
+        output.write_bytes(b"video")
 
     def spawn(*args, **kwargs):
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
@@ -204,24 +252,32 @@ def test_cancel_completed_job_kills_chat_download(monkeypatch, tmp_path, analysi
 
     monkeypatch.setattr("clipper_studio.download_worker.subprocess", SimpleNamespace(Popen=spawn))
     monkeypatch.setattr("clipper_studio.api.fetch_chat", fetch_chat)
+    if rendering:
+        monkeypatch.setattr("clipper_studio.api.make_vertical_clip", render)
     app = create_app(tmp_path)
     with TestClient(app) as client:
         jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": False}).json()["id"]
         try:
             assert started.wait(5)
-            published = wait_job(client, jid, lambda job: job["status"] == "completed" and job["chat_pending"])
-            assert published["clips"][0]["status"] == "ready"
+            if rendering:
+                assert render_started.wait(5)
+            status = "running" if rendering else "completed"
+            published = wait_job(client, jid, lambda job: job["status"] == status and job["chat_pending"])
+            assert published["clips"][0]["status"] == ("rendering" if rendering else "ready")
             assert processes[0].poll() is None
-            assert client.post(f"/api/jobs/{jid}/cancel").status_code == 200
+            assert client.post(f"/api/jobs/{jid}/cancel?scope=chat").status_code == 200
             assert processes[0].wait(timeout=5) == -signal.SIGKILL
         finally:
+            finish_render.set()
             if processes and processes[0].poll() is None:
                 processes[0].kill()
                 processes[0].wait(timeout=5)
         app.state.pending.join()
         finished = client.get(f"/api/jobs/{jid}").json()
         assert finished["moments"] == published["moments"]
-        assert finished["clips"] == published["clips"]
+        assert finished["clips"][0]["id"] == published["clips"][0]["id"]
+        assert finished["clips"][0]["status"] == "ready"
+        assert finished["status"] == "completed"
         assert not finished["chat_pending"]
 
 

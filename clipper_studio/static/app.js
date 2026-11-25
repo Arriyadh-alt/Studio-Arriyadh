@@ -496,11 +496,11 @@ function draftFeedback(node) {
 }
 $('#cancel-job').addEventListener('click',async event=>{
   if(!current || !canCancel(current))return;
-  if(!confirm(busy(current) ? 'Cancel this job? Ready clips will be kept.' :
+  const jid=current.id, scope=busy(current) ? 'job' : 'chat';
+  if(!confirm(scope==='job' ? 'Cancel this job? Ready clips will be kept.' :
     'Cancel chat analysis? Existing moments and clips will be kept.')) return;
-  const jid=current.id;
   event.target.disabled=true;
-  try {notice('');await api(`./api/jobs/${jid}/cancel`,'POST');await refresh();}
+  try {notice('');await api(`./api/jobs/${jid}/cancel?scope=${scope}`,'POST');await refresh();}
   catch(error){notice(error.message);}finally{event.target.disabled=false;}
 });
 $('#delete-unkept').addEventListener('click',async event=>{

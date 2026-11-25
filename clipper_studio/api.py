@@ -448,6 +448,12 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             raise WorkCancelled
         return job
 
+    def active_chat(jid, generation, chat_generation):
+        job = active_job(jid, generation)
+        if job.get("chat_generation", 0) != chat_generation:
+            raise WorkCancelled
+        return job
+
     def upload_path(job):
         if not job.get("upload"):
             return None
@@ -1026,12 +1032,21 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             active_job(jid, generation)
 
     def start_chat(jid, generation, job, info, retry_dir=None):
+        chat_generation = job.get("chat_generation", 0)
+
+        def current_chat():
+            return active_chat(jid, generation, chat_generation)
+
+        def check_chat():
+            with store.lock:
+                current_chat()
+
         name = "chat_analysis/result.json"
         cache = checkpoints(jid)
         if retry_dir is None and (saved := cache.read(name)) is not None:
             def reuse():
                 with store.lock:
-                    latest = active_job(jid, generation)
+                    latest = current_chat()
                     record_chat(latest, saved["moments"], saved["fields"], write_checkpoint=False)
                     store.save(latest)
                 return saved["moments"], saved["fields"]
@@ -1039,13 +1054,15 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
 
         def publish(progress):
             with store.lock:
-                latest = active_job(jid, generation)
+                latest = current_chat()
                 state = stage_states(latest)["chat_analysis"]
                 if state["status"] == "processing" and progress >= state["progress"] + 1:
                     mark_stage(latest, "chat_analysis", "processing", progress)
                     store.save(latest)
 
-        set_stage(jid, generation, "chat_analysis", "processing", 0)
+        with store.lock:
+            current_chat()
+            set_stage(jid, generation, "chat_analysis", "processing", 0)
         queued_at = time.monotonic()
         queue_deadline = queued_at + CHAT_QUEUE_TIMEOUT
         budget = None
@@ -1088,22 +1105,22 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             nonlocal budget, downloaded
             try:
                 with store.lock:
-                    active_job(jid, generation)
+                    current_chat()
                     if abandoned:
                         return
                 directory.mkdir(exist_ok=True)
                 with tempfile.TemporaryDirectory(dir=directory, prefix="incoming-") as staging:
                     with store.lock:
-                        active_job(jid, generation)
+                        current_chat()
                         if abandoned:
                             return
                         if time.monotonic() >= queue_deadline:
                             raise ChatReplayError(CHAT_QUEUE_ERROR)
-                        budget = ChatWatchdog(job["metadata"]["duration"], lambda: check_job(jid, generation), publish)
+                        budget = ChatWatchdog(job["metadata"]["duration"], check_chat, publish)
                     metadata, messages = fetch_chat(job["url"], Path(staging), info, budget)
                     budget.begin_processing()
                     with store.lock:
-                        active_job(jid, generation)
+                        current_chat()
                         if abandoned:
                             return
                         if isinstance(messages, ChatBuckets):
@@ -1114,7 +1131,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                                          check=check_scoring)
                     except ChatReplayError:
                         with store.lock:
-                            latest = active_job(jid, generation)
+                            latest = current_chat()
                             if not abandoned and downloaded is not None:
                                 future.set_result(partial_result(latest))
                                 return
@@ -1123,7 +1140,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     fields = outcome(dict(metadata=metadata, activity=activity, message_count=len(messages)),
                                      getattr(messages, "warning", None))
                     with store.lock:
-                        latest = active_job(jid, generation)
+                        latest = current_chat()
                         if abandoned:
                             return
                         future.set_result(publish_result(latest, moments, fields, Path(staging) / "buckets.sqlite"))
@@ -1137,7 +1154,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             grace_end = None
             try:
                 while True:
-                    check_job(jid, generation)
+                    check_chat()
                     if future.done():
                         return future.result()
                     with store.lock:
@@ -1168,7 +1185,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     if future.done() and future.exception() is None:
                         return future.result()
                     abandoned = True
-                    latest = active_job(jid, generation)
+                    latest = current_chat()
                     if downloaded is not None and error == CHAT_PROCESSING_ERROR:
                         return partial_result(latest)
                     return publish_result(latest, [], fields)
@@ -1322,10 +1339,10 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                    else "AI analysis was unavailable. Try this replay again.")
             return [], error
 
-    def apply_chat_result(jid, generation, chat, fields, candidate, *, automatic):
+    def apply_chat_result(jid, generation, chat_generation, chat, fields, candidate, *, automatic):
         directory = store.root / jid / "chat"
         with store.lock:
-            job = active_job(jid, generation)
+            job = active_chat(jid, generation, chat_generation)
             if not automatic and job.get("message_count"):
                 old_count, new_count = job["message_count"], fields.get("message_count", 0)
                 previous_bins = {point["time"] for point in job["activity"] if point["count"]}
@@ -1374,41 +1391,50 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         if automatic:
             finish(jid, generation)
 
-    def complete_chat(jid, generation, collect, candidate=None, *, automatic=False):
+    def fail_chat(jid, generation, chat_generation, error):
+        try:
+            with store.lock:
+                active_chat(jid, generation, chat_generation)
+                set_stage(jid, generation, "chat_analysis", "failed", error=error,
+                          chat_retrying=False, chat_pending=False)
+        except WorkCancelled:
+            pass
+
+    def complete_chat(jid, generation, chat_generation, collect, candidate=None, *, automatic=False):
         try:
             chat, fields = collect()
-            apply_chat_result(jid, generation, chat, fields, candidate, automatic=automatic)
+            apply_chat_result(jid, generation, chat_generation, chat, fields, candidate, automatic=automatic)
         except WorkCancelled:
             pass
         except Exception:
             logger.warning("Could not save chat analysis for job %s", jid, exc_info=True)
-            try:
-                set_stage(jid, generation, "chat_analysis", "failed", error="Could not save the chat analysis.",
-                          chat_retrying=False, chat_pending=False)
-            except WorkCancelled:
-                pass
+            fail_chat(jid, generation, chat_generation, "Could not save the chat analysis.")
 
     def retry_chat(jid, generation, job):
+        chat_generation = job.get("chat_generation", 0)
         try:
             directory = store.root / jid / "chat"
-            directory.mkdir(exist_ok=True)
+            with store.lock:
+                active_chat(jid, generation, chat_generation)
+                directory.mkdir(exist_ok=True)
             if job.get("chat_pending"):
                 _, collect = start_chat(jid, generation, job, None)
-                complete_chat(jid, generation, collect, automatic=True)
+                complete_chat(jid, generation, chat_generation, collect, automatic=True)
                 return
             with tempfile.TemporaryDirectory(dir=directory, prefix="retry-") as temporary:
                 candidate = Path(temporary)
                 _, collect = start_chat(jid, generation, job, None, retry_dir=candidate)
-                complete_chat(jid, generation, collect, candidate)
+                complete_chat(jid, generation, chat_generation, collect, candidate)
         except WorkCancelled:
             pass
         except Exception:
             logger.warning("Could not start chat retry for job %s", jid, exc_info=True)
-            try:
-                set_stage(jid, generation, "chat_analysis", "failed", error="Could not start the chat retry.",
-                          chat_retrying=False, chat_pending=False)
-            except WorkCancelled:
-                pass
+            fail_chat(jid, generation, chat_generation, "Could not start the chat retry.")
+
+    def dispatch_chat_retry(job):
+        jid, generation = job["id"], job.get("generation", 0)
+        snapshot = dict(job)
+        pending.background(lambda: retry_chat(jid, generation, snapshot))
 
     def publish_analysis(jid, generation, ai, ai_error, chat, fields, *, defer_chat=False, ai_required=False):
         with store.lock:
@@ -1458,11 +1484,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         try:
             with store.lock:
                 job = active_job(jid, generation)
-                retrying = job.get("chat_retrying", False)
-                info = None if retrying else metadata_cache.pop((jid, generation), None)
-            if retrying:
-                pending.background(lambda: retry_chat(jid, generation, job))
-                return
+                info = metadata_cache.pop((jid, generation), None)
             podcast, upload = is_podcast(job), upload_path(job)
             duration = job["metadata"]["duration"]
             chat, fields = [], {}
@@ -1486,7 +1508,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             publish_analysis(jid, generation, ai, ai_error, chat, fields,
                              defer_chat=defer_chat, ai_required=bool(podcast or upload))
             if defer_chat:
-                pending.background(lambda: complete_chat(jid, generation, collect_chat, automatic=True))
+                chat_generation = job.get("chat_generation", 0)
+                pending.background(lambda: complete_chat(jid, generation, chat_generation, collect_chat, automatic=True))
         except WorkCancelled:
             pass
         except Exception as error:
@@ -1509,10 +1532,11 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
 
     def queued_job(job):
         job.pop("ai_candidates", None)
+        job.pop("chat_generation", None)
         analyses, renders = pending.positions()
         for clip in job["clips"]:
             clip["queue_position"] = renders.get((job["id"], clip["id"])) if clip["status"] == "queued" else None
-        position = None if job.get("chat_retrying") else analyses.get(job["id"])
+        position = analyses.get(job["id"])
         waiting = [clip["queue_position"] for clip in job["clips"] if clip["queue_position"] is not None]
         if position is None and waiting and not any(c["status"] == "rendering" for c in job["clips"]):
             position = min(waiting)
@@ -1534,7 +1558,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 if job.get("chat_retrying"):
                     mark_stage(job, "chat_analysis", "retrying")
                     store.save(job)
-                    pending.put((job["id"], None, job.get("generation", 0)))
+                    dispatch_chat_retry(job)
                 if job["status"] in ACTIVE_STATUSES:
                     generation = job.get("generation", 0)
                     job.update(status="queued", stage="Resuming after restart", error=None,
@@ -1735,7 +1759,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             job["chat_retrying"] = True
             mark_stage(job, "chat_analysis", "retrying")
             store.save(job)
-            pending.put((jid, None, job.get("generation", 0)))
+            dispatch_chat_retry(job)
         return {"id": jid}
 
     @app.post("/api/jobs/{jid}/stages/{name}/retry", status_code=202)
@@ -1782,22 +1806,30 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         return {"id": jid}
 
     @app.post("/api/jobs/{jid}/cancel")
-    def cancel_job(jid: str):
+    def cancel_job(jid: str, scope: Literal["job", "chat"] = "job"):
         with store.lock:
             job = store.get(jid)
             cancel_chat = job.get("chat_pending") or job.get("chat_retrying")
-            cancel_job_work = job["status"] in ("queued", "running", "cancelled")
+            cancel_job_work = scope == "job" and job["status"] in ("queued", "running", "cancelled")
+            if scope == "chat" and not cancel_chat:
+                return {"id": jid, "status": job["status"]}
             if not cancel_job_work and not cancel_chat:
                 raise HTTPException(409, "This job has already finished")
             if cancel_job_work:
                 job.update(status="cancelled", stage="Cancelled. In-flight work stops at the next stage boundary.")
-            job.update(generation=job.get("generation", 0) + 1, chat_retrying=False, chat_pending=False)
+                job["generation"] = job.get("generation", 0) + 1
+            else:
+                job["chat_generation"] = job.get("chat_generation", 0) + 1
+            job.update(chat_retrying=False, chat_pending=False)
             chat_stage = stage_states(job)["chat_analysis"]
             if chat_stage["status"] in ("processing", "retrying"):
                 error = "Chat analysis was cancelled."
                 mark_stage(job, "chat_analysis", "partially_completed" if job.get("message_count") else "failed",
                            error=error)
                 job["chat_error"] = error
+            if not cancel_job_work:
+                store.save(job)
+                return {"id": jid, "status": job["status"]}
             for clip in job["clips"]:
                 if clip["status"] in ("queued", "rendering"):
                     previous = clip.pop("previous_render", None)

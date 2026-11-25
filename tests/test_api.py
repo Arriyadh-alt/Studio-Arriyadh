@@ -519,8 +519,9 @@ def test_analysis_does_not_block_rerender_or_no_chat(monkeypatch, tmp_path, meta
             assert ready["clips"][0]["rendered_at"]
             assert not release.is_set()
             queued = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url": "https://www.youtube.com/watch?v=ccccccccccc"}).json()["id"]
-            waiting = wait_job(client, queued, lambda job: job["metadata"] is not None and job["queue_position"] == 1)
-            assert waiting["stage"] == "Queued (position 1)"
+            waiting = wait_job(client, queued, lambda job: job["stage"] == "Waiting for chat analysis")
+            assert waiting["queue_position"] is None
+            assert fetched == ["https://www.youtube.com/watch?v=aaaaaaaaaaa"]
             assert client.post(f"/api/jobs/{queued}/cancel").status_code == 200
             assert client.post(f"/api/jobs/{slow}/cancel").status_code == 200
         finally:
