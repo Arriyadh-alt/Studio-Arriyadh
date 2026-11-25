@@ -207,6 +207,8 @@ def build_ffmpeg_command(source: Path, output: Path, start: float, end: float, m
     silent_input = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"] if silent_audio else []
     quality = [*professional_video_options(export_preset=export_preset), "-r", export_fps] if export_fps else ["-crf", "20"]
     audio = ["-b:a", "192k", "-ar", "48000"] if export_fps else ["-b:a", "128k"]
+    if export_preset:
+        audio += ["-af", "aresample=48000:async=1:first_pts=0,apad"]
     return [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{start:.3f}", "-i", str(source), *watermark_input, *silent_input, "-t", f"{end - start:.3f}",

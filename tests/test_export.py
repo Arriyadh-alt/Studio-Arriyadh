@@ -10,7 +10,8 @@ from fastapi.testclient import TestClient
 from clipper_studio.api import create_app
 from shorts_clipper.director import DirectorOptions, plan_edit
 from shorts_clipper.duration import boundary_options
-from shorts_clipper.video import build_ffmpeg_command
+from shorts_clipper.export import check_export
+from shorts_clipper.video import build_ffmpeg_command, make_vertical_clip
 
 
 def test_presets_follow_completed_speech_and_do_not_add_filler():
@@ -110,3 +111,17 @@ def test_approved_60_seconds_matches_individual_and_batch_download(monkeypatch, 
         assert bundle.status_code == 200
         with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
             assert archive.read("highlight-01.mp4") == download.content
+
+
+def test_export_preserves_a_delayed_audio_onset(tmp_path):
+    source, output = tmp_path / "delayed.mp4", tmp_path / "preview.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=s=360x640:r=24:d=4",
+                    "-itsoffset", "1", "-f", "lavfi", "-i", "sine=d=2", "-c:v", "libx264",
+                    "-c:a", "aac", str(source)], check=True)
+    make_vertical_clip(source, output, 0, 4, export_preset="preview", use_hardware=False)
+    result = check_export(output, "preview", 4, "24/1", None)
+    assert next(c for c in result["checks"] if c["check"] == "Audio alignment")["status"] == "pass"
+    samples = np.frombuffer(subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(output),
+                                                   "-vn", "-f", "f32le", "-"]), dtype="<f4")
+    assert np.max(np.abs(samples[:24000])) < .001
+    assert np.max(np.abs(samples[57600:72000])) > .05
