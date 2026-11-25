@@ -1935,8 +1935,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 raise HTTPException(409, "Delete the rendered clip before changing this moment's status")
             start = request.start if request.start is not None else moment["start"]
             end = request.end if request.end is not None else moment["end"]
-            if request.duration_preset is not None and request.start is None and request.end is None:
-                proposal = moment.get("duration_options", {}).get(request.duration_preset)
+            options = moment.get("duration_options")
+            if options and request.duration_preset is not None and request.start is None and request.end is None:
+                proposal = options.get(request.duration_preset)
                 if proposal is None:
                     raise HTTPException(422, "No complete moment fits this duration preset. Try Auto or a different moment.")
                 start, end = proposal["start"], proposal["end"]

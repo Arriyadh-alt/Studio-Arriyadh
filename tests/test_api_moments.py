@@ -688,3 +688,22 @@ def test_status_patch_preserves_fractional_boundaries(tmp_path):
         response = client.patch(url, json={"start": 100, "end": 160})
         assert response.status_code == 200
         assert response.json()["duration"] == 60
+
+
+@pytest.mark.parametrize("podcast", [False, True])
+def test_preset_only_approves_an_existing_fitting_range_without_proposals(tmp_path, podcast):
+    app = create_app(tmp_path)
+    job = saved_job("preset")
+    if podcast:
+        job["request"]["content_type"] = "podcast"
+    job["moments"] = [{**proposal(), "id": "moment", "status": "suggested", "duration": 40,
+                       "sources": ["ai"] if podcast else ["chat"]}]
+    app.state.store.save(job)
+    with TestClient(app) as client:
+        url = "/api/jobs/preset/moments/moment"
+        assert client.patch(url, json={"duration_preset": "quick"}).status_code == 422
+        result = client.patch(url, json={"duration_preset": "story"})
+        assert result.status_code == 200, result.text
+        moment = result.json()
+        assert (moment["start"], moment["end"], moment["duration_preset"]) == (100, 140, "story")
+        assert moment["approved_timeline"] is True
