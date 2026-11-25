@@ -16,7 +16,7 @@ class _AnalysisSizeError(YouTubeAccessError):
 
 def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = None,
                             proxy: str | None = None, should_continue=None, *,
-                            prior_audio: Path | None = None, on_audio=None) -> tuple[Path, Path | None]:
+                            prior_audio: Path | None = None, on_audio=None, on_start=None) -> tuple[Path, Path | None]:
     """Download full-length compact audio and optional low-resolution video."""
     max_bytes = int(os.environ.get("CLIPPER_ANALYSIS_MAX_BYTES", "1500000000"))
     max_hours = float(os.environ.get("CLIPPER_ANALYSIS_MAX_HOURS", "12"))
@@ -36,6 +36,8 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
     if prior_audio and on_audio is not None:
         on_audio(prior_audio)
     with cookie_options(cookies, proxy=proxy) as authentication:
+        if on_start is not None:
+            on_start()
         for kind, selector in (("audio", "ba[abr<=80]/ba/wa"),
                                ("video", "bv[height<=160]/wv")):
             if kind == "audio" and prior_audio:
@@ -71,7 +73,7 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
 
 
 def download_section(url: str, output_dir: Path, start: float, end: float, max_height: int = 1080,
-                     cookies: Path | None = None, proxy: str | None = None, *, analysis=False) -> Path:
+                     cookies: Path | None = None, proxy: str | None = None, *, analysis=False, on_start=None) -> Path:
     """Download a frame-accurate range, using compact formats for analysis.
 
     Raises ValueError if the range starts past the end of the video.
@@ -98,6 +100,8 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
     options.update(socket_timeout=25, retries=2, fragment_retries=2,
                    external_downloader_args={"ffmpeg_i": ["-rw_timeout", "25000000"]})
     with cookie_options(cookies, proxy=proxy) as authentication:
+        if on_start is not None:
+            on_start()
         try:
             with yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
                 info = ydl.extract_info(url, download=False)

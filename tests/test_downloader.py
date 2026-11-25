@@ -1,6 +1,8 @@
+import fcntl
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -28,7 +30,7 @@ def test_download_worker_kills_and_reaps_a_stalled_process(monkeypatch):
 
     monkeypatch.setattr("clipper_studio.download_worker.subprocess.Popen", stalled)
     with pytest.raises(TimeoutError, match="exceeded its time limit"):
-        run_download("section", [], timeout=.1)
+        run_download("replay", [], timeout=.1)
     assert processes[0].returncode == -signal.SIGKILL
 
 
@@ -42,6 +44,8 @@ from clipper_studio.download_worker import main
 from shorts_clipper import downloader
 
 def download(url, output_dir, **kwargs):
+    if "on_start" in kwargs:
+        kwargs["on_start"]()
     audio = output_dir / "audio.m4a"
     audio.write_bytes(b"completed audio")
     if "on_audio" in kwargs:
@@ -59,6 +63,69 @@ main(Path(sys.argv[1]))
     audio, video = run_download("media", ["https://youtu.be/video", tmp_path], timeout=2)
     assert Path(audio).read_bytes() == b"completed audio"
     assert video is None
+
+
+def test_section_has_its_own_budget_after_waiting_for_cookie_lock(monkeypatch, tmp_path):
+    spawn = subprocess.Popen
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("# Netscape HTTP Cookie File\n")
+    monkeypatch.setenv("CLIPPER_YTDLP_COOKIES", str(cookie_file))
+    code = """
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from clipper_studio.download_worker import main
+from shorts_clipper import downloader
+
+original = downloader.cookie_options
+
+@contextmanager
+def cookies(*args, **kwargs):
+    (Path(sys.argv[1]) / "waiting").touch()
+    with original(*args, **kwargs) as options:
+        yield options
+
+class Stub:
+    def __init__(self, options):
+        self.path = Path(options["outtmpl"]).parent / "section.mp4"
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+    def extract_info(self, *args, **kwargs):
+        return {"duration": 60}
+    def process_ie_result(self, *args, **kwargs):
+        self.path.touch()
+        return {"requested_downloads": [{"filepath": str(self.path)}]}
+
+downloader.cookie_options = cookies
+downloader.yt_dlp.YoutubeDL = Stub
+main(Path(sys.argv[1]))
+"""
+    started_waiting = None
+
+    def child(command, **kwargs):
+        nonlocal started_waiting
+        process = spawn([sys.executable, "-c", code, command[-1]], **kwargs)
+        waiting = Path(command[-1]) / "waiting"
+        start = time.monotonic()
+        while not waiting.exists() and process.poll() is None and time.monotonic() < start + 5:
+            time.sleep(.01)
+        assert waiting.exists()
+        started_waiting = time.monotonic()
+        return process
+
+    monkeypatch.setattr("clipper_studio.download_worker.subprocess.Popen", child)
+    with cookie_file.with_suffix(".txt.lock").open("wb") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        def release_after_download_budget():
+            if time.monotonic() - started_waiting > 1:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+        result = run_download("section", ["https://youtu.be/video", tmp_path, 5, 30],
+                              timeout=1, check=release_after_download_budget)
+    assert Path(result) == tmp_path / "section.mp4"
 
 
 def test_fractional_windows_do_not_reuse_another_sections_file(monkeypatch, tmp_path):
