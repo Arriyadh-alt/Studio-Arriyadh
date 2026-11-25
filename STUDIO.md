@@ -366,6 +366,36 @@ round-robin automatic clips as described above; refreshing the job page reconnec
 to the existing job. Fewer than the requested N highlights (including zero)
 are valid when there are insufficient separated spikes.
 
+## YouTube performance feedback
+
+Open **Performance** (or use the link on a rendered highlight) after publishing on
+YouTube yourself. Record the published link, optional metadata and measured metrics.
+Studio keeps the source URL and channel, the original editorial estimate and available
+components, and advisory rights, reuse and disclosure checks. It does not publish,
+request YouTube credentials, fetch analytics, or claim legal clearance.
+
+Import the per-video CSV table from YouTube Studio, not the daily chart or totals
+export. Registered links match by YouTube video ID. For one unregistered video,
+select the corresponding rendered highlight; for several, add `Job ID` and
+`Clip ID` columns. For JSON use an object or array of objects with `job_id`,
+`clip_id`, `publish_url` and optional `metrics`; existing URLs can omit the IDs.
+Metrics use seconds for `average_view_duration`, percentages (not fractions) for
+percentage fields, and `{"position_percent": 50, "retained_percent": 72}` points
+for `retention_graph`. Omit unavailable values. Import updates only supplied
+fields; it does not overwrite the original score snapshot.
+
+The local API is `/api/feedback` (GET/POST), `/api/feedback/{id}` (GET/PATCH/DELETE),
+`/api/feedback/clips` (rendered highlights and integrity), `/api/feedback/import`
+(POST a JSON wrapper with `format`, `content` and `confirmed_published: true`),
+`/api/feedback/comparison?metric=average_percentage_viewed`, and
+`/api/feedback/calibration`. Manual creation also requires
+`confirmed_published: true`. The data stay in `CLIPPER_DATA_DIR/feedback/`.
+Calibration consumes average percentage viewed only, not estimated retention or
+raw views. Component weights may shift slightly once enough matched measurements
+exist. Duration, hook style and editing mode trends are shown only for groups
+with five measured uploads or more. Compare similar reporting windows and
+audiences; trends describe the recorded sample, not guaranteed future results.
+
 ## Detection and checks
 
 Count bins against the trailing 180-second median; combine ratio and Poisson-like

@@ -34,6 +34,7 @@ from PIL import Image
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
+from clipper_studio.feedback_api import feedback_router
 from shorts_clipper.branding import BrandingSettings, LOGO_LIMIT, normalize_logo, prepare_watermark, read_logo
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, apply_caption_edits, caption_height, to_ass, transcribe
 from shorts_clipper.moments import _audio, analyze_media
@@ -1583,6 +1584,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
     app = FastAPI(title="Clipper Studio", lifespan=lifespan)
     app.state.store = store
     app.state.pending = pending
+    app.include_router(feedback_router(store))
 
     @app.get("/api/branding")
     def get_branding():

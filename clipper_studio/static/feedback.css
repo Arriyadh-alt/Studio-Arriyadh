@@ -1,0 +1,30 @@
+.workspace-nav{display:flex;align-items:center;gap:16px}
+.workspace-nav [aria-current=page]{border-color:var(--accent);color:var(--accent)}
+#performance .back{display:block;width:max-content;margin-bottom:15px}
+#performance h1{margin-top:6px}
+#performance [hidden]{display:none}
+.performance-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;align-items:start}
+.performance-panel{min-width:0;padding:20px;margin:0 0 16px;overflow-wrap:anywhere}
+.performance-panel label,.performance-panel .performance-actions{margin:12px 0}
+.performance-panel pre{overflow:auto;white-space:pre-wrap;font-size:11px}
+.performance-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:12px}
+.performance-fields .retention-field{grid-column:1/-1}
+.retention-field textarea{width:100%;min-height:76px;resize:vertical;padding:10px;font:inherit;color:var(--text);background:#101419;border:1px solid #424a56;border-radius:8px}
+.performance-actions{display:flex;flex-wrap:wrap;gap:8px}
+.performance-record{padding:16px 0;border-top:1px solid var(--line);margin-top:12px}
+.performance-record p{margin:7px 0}
+.performance-panel dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.performance-panel dl div{padding:7px 10px;background:var(--bg);border-radius:6px}
+.performance-panel dt{color:var(--muted);font-size:12px}
+.performance-panel dd{margin:0;font-weight:650}
+.performance-panel a:not(.button){text-decoration:underline}
+.performance-table{overflow-x:auto;margin:12px 0}
+.performance-table table{width:100%;min-width:450px;border-collapse:collapse;text-align:left}
+.performance-table caption{text-align:left;color:var(--muted);margin-bottom:6px}
+.performance-table th,.performance-table td{padding:8px;border-bottom:1px solid var(--line)}
+.performance-table thead th{background:var(--bg);color:var(--muted)}
+.performance-retention{margin:12px 0;max-width:600px}
+.performance-retention svg{display:block;width:100%;color:var(--accent);background:var(--bg);border-radius:5px}
+.performance-clip{margin:10px 0}
+@media(max-width:740px){.workspace-nav .tag{display:none}.performance-grid{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:380px){.performance-panel{padding:14px}.performance-fields{grid-template-columns:minmax(0,1fr)}}
