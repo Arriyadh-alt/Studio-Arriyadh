@@ -7,6 +7,7 @@ import os
 import re
 import threading
 from datetime import date, datetime
+from math import isclose
 from pathlib import Path
 from statistics import StatisticsError, correlation, median
 from typing import Annotated, Literal
@@ -21,7 +22,8 @@ ClipId = Annotated[str, Field(pattern=r"^[a-zA-Z0-9]{1,64}$")]
 HookStyle = Literal["question", "curiosity gap", "direct statement", "source quote", "commentary", "no hook", "other"]
 MIN_SAMPLE = 5
 OUTCOME = "average_percentage_viewed"
-COMPONENTS = ("hook", "story", "emotion", "visual", "payoff", "retention")
+DEFAULT_EDITORIAL_WEIGHTS = dict(hook=.20, story=.20, emotion=.20, visual=.15, payoff=.15, retention=.10)
+COMPONENTS = tuple(DEFAULT_EDITORIAL_WEIGHTS)
 DIRECTOR_COMPONENTS = ("hook", "pacing", "emotion", "dialogue", "chat")
 
 
@@ -303,13 +305,34 @@ def _groups(records, value):
                   key=lambda group: (-group["median_percentage_viewed"], -group["sample_size"], group["label"]))
 
 
-def _records():
-    return FeedbackStore(os.environ.get("CLIPPER_DATA_DIR", "~/clipper-data")).records()
+def _data_root(data_dir=None):
+    return Path(data_dir or os.environ.get("CLIPPER_DATA_DIR", "~/clipper-data")).expanduser()
 
 
-def calibration_summary(records=None):
-    records = _records() if records is None else records
+def _configured_weights(root):
+    try:
+        config = json.loads((root / "viral-scoring.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return DEFAULT_EDITORIAL_WEIGHTS.copy()
+    overrides = config.get("weights") if isinstance(config, dict) else None
+    if not isinstance(overrides, dict):
+        return DEFAULT_EDITORIAL_WEIGHTS.copy()
+    merged = {key: overrides.get(key, value) for key, value in DEFAULT_EDITORIAL_WEIGHTS.items()}
+    if not all(numeric(value) and 0 <= value <= 100 for value in merged.values()) or not sum(merged.values()):
+        return DEFAULT_EDITORIAL_WEIGHTS.copy()
+    total = sum(merged.values())
+    return {key: value / total for key, value in merged.items()}
+
+
+def calibration_summary(records=None, *, data_dir=None):
+    root = _data_root(data_dir)
+    records = FeedbackStore(root).records() if records is None else records
+    baseline = _configured_weights(root)
+    effective = _calibrate(baseline, records)
+    is_calibrated = any(not isclose(effective[key], value, abs_tol=1e-12) for key, value in baseline.items())
     return {"metric": OUTCOME, "minimum_sample": MIN_SAMPLE, "record_count": len(records),
+            "weight_source": "calibrated" if is_calibrated else "default" if baseline == DEFAULT_EDITORIAL_WEIGHTS else "configured",
+            "default_weights": DEFAULT_EDITORIAL_WEIGHTS.copy(), "baseline_weights": baseline, "effective_weights": effective,
             "sample_size": sum(record["metrics"].get(OUTCOME) is not None for record in records),
             "component_sample_size": sum(record["metrics"].get(OUTCOME) is not None
                                          and any(numeric(v) for v in record["score_breakdown"].values())
@@ -320,7 +343,10 @@ def calibration_summary(records=None):
 
 
 def calibrated_weights(default_weights: dict[str, float]) -> dict[str, float]:
-    records = _records()
+    return _calibrate(default_weights, FeedbackStore(_data_root()).records())
+
+
+def _calibrate(default_weights, records):
     correlations = {
         key: _correlation(_pairs(records, OUTCOME, lambda record: record["score_breakdown"].get(key)))
         for key in default_weights

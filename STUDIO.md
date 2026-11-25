@@ -394,7 +394,9 @@ The local API is `/api/feedback` (GET/POST), `/api/feedback/{id}` (GET/PATCH/DEL
 `confirmed_published: true`. The data stay in `CLIPPER_DATA_DIR/feedback/`.
 Calibration consumes average percentage viewed only, not estimated retention or
 raw views. Component weights may shift slightly once enough matched measurements
-exist. Duration, hook style and editing mode trends are shown only for groups
+exist. The calibration panel shows the default, configured (from
+`viral-scoring.json` when present), and effective weights as applicable.
+Duration, hook style and editing mode trends are shown only for groups
 with five measured uploads or more. Compare similar reporting windows and
 audiences; trends describe the recorded sample, not guaranteed future results.
 

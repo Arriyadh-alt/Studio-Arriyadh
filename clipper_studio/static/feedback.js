@@ -164,6 +164,21 @@ function drawCalibration(summary) {
   const target = page.querySelector('#performance-calibration');
   target.replaceChildren(node('p', `${summary.sample_size} of ${summary.record_count} records include average percentage viewed. `
     + `${summary.component_sample_size} also include editorial components. At least ${summary.minimum_sample} comparable records are needed per component or group.`));
+  target.append(node('h3', 'Editorial scoring weights'));
+  const messages = {
+    default: 'Default scoring weights are in use. There is not enough comparable evidence to adjust them.',
+    configured: 'Configured scoring weights are in use, without adjustments from performance feedback.',
+    calibrated: 'Performance-calibrated weights are shown alongside the defaults.',
+  };
+  target.append(node('p', messages[summary.weight_source], 'hint'));
+  const percent = value => `${number(value * 100)}%`;
+  target.append(facts(Object.entries(summary.default_weights).map(([key, weight]) => {
+    const effective = percent(summary.effective_weights[key]);
+    if (summary.weight_source === 'default') return [key, percent(weight)];
+    const baseline = summary.baseline_weights[key] !== weight && summary.weight_source === 'calibrated'
+      ? ` · ${percent(summary.baseline_weights[key])} configured baseline` : '';
+    return [key, `${effective} ${summary.weight_source} · ${percent(weight)} default${baseline}`];
+  })));
   for (const [key, label] of Object.entries({durations:'Duration', hook_styles:'Hook style', editing_modes:'Editing mode'})) {
     target.append(node('h3', label));
     if (summary[key].length) {

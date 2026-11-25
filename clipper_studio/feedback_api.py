@@ -158,7 +158,7 @@ def feedback_router(studio):
 
     @router.get("/calibration")
     def summarize():
-        return calibration_summary(data.records())
+        return calibration_summary(data.records(), data_dir=studio.root)
 
     @router.post("", status_code=201)
     def record_publication(entry: Publication):

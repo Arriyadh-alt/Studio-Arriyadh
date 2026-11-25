@@ -211,7 +211,9 @@ def test_calibration_uses_only_measured_matching_samples(tmp_path, client, monke
     ]
     data.save(records[:-1] + [{**records[-1], "metrics": {"views": 1000}}])
     assert calibrated_weights(weights) == weights
-    assert client.get(PATH + "/calibration").json()["durations"] == []
+    summary = client.get(PATH + "/calibration").json()
+    assert summary["durations"] == [] and summary["weight_source"] == "default"
+    assert summary["default_weights"] == summary["baseline_weights"] == summary["effective_weights"] == weights
     data.save(records)
     result = calibrated_weights(weights)
     assert result.keys() == weights.keys()
@@ -220,6 +222,8 @@ def test_calibration_uses_only_measured_matching_samples(tmp_path, client, monke
     assert result["visual"] == weights["visual"]
     assert all(abs(result[key] - value) <= .05 for key, value in weights.items())
     summary = client.get(PATH + "/calibration").json()
+    assert summary["weight_source"] == "calibrated"
+    assert summary["default_weights"] == weights and summary["effective_weights"] == result
     assert summary["sample_size"] == summary["component_sample_size"] == 5
     for key, label in (("durations", "40–55s"), ("hook_styles", "curiosity gap"), ("editing_modes", "enhanced")):
         assert summary[key] == [{"label": label, "sample_size": 5, "median_percentage_viewed": 60}]
@@ -227,3 +231,16 @@ def test_calibration_uses_only_measured_matching_samples(tmp_path, client, monke
     assert compare["correlation"] == -1 and compare["components"]["hook"] == 1
     assert compare["percentile_gaps"]["0"] == -100 and compare["percentile_gaps"]["4"] == 100
     assert client.get(PATH + "/comparison?metric=views").json()["correlation"] is None
+
+
+def test_calibration_summary_reports_configured_scoring_baseline(tmp_path, client):
+    config = tmp_path / "viral-scoring.json"
+    config.write_text(json.dumps({"weights": {"hook": 0}}))
+    summary = client.get(PATH + "/calibration").json()
+    assert summary["weight_source"] == "configured"
+    assert summary["default_weights"]["hook"] == .2
+    assert summary["effective_weights"] == summary["baseline_weights"]
+    assert summary["effective_weights"]["hook"] == 0
+    assert sum(summary["effective_weights"].values()) == pytest.approx(1)
+    config.write_text(json.dumps({"weights": {"hook": -1}}))
+    assert client.get(PATH + "/calibration").json()["weight_source"] == "default"
