@@ -105,6 +105,21 @@ def test_snapshot_crud_and_integrity(app, client):
     assert client.get(path).status_code == 404
 
 
+def test_render_score_snapshot_does_not_replace_editorial_score(app, client):
+    render_score = {"overall": 62, "hook": 65, "pacing": 71, "emotion": 70, "dialogue": 80, "chat": 0}
+    job = app.state.store.get("feedbackjob")
+    job["clips"][0]["director_result"]["score"] = render_score
+    job["clips"][1]["director_result"] = {"status": "used", "score": render_score}
+    app.state.store.save(job)
+    ai, chat = client.get(PATH + "/clips").json()
+    assert ai["score_breakdown"]["hook"] == 78 and ai["director_score"] == render_score
+    assert chat["editorial_score"] is None and chat["director_score"] == render_score
+    published = client.post(PATH, json=entry(clip_id="chatclip", metrics={"average_percentage_viewed": 80})).json()
+    assert published["director_score"] == render_score
+    compared = client.get(PATH + "/comparison").json()
+    assert compared["sample_size"] == 0 and compared["director"]["sample_size"] == 1
+
+
 def test_csv_and_json_import(client):
     # A YouTube Studio per-video export has no Clipper IDs and may include a Total row.
     content = ('\ufeffContent,Video title,Video publish time, VIEWS ,Engaged views,'

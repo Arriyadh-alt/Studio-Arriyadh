@@ -22,6 +22,7 @@ HookStyle = Literal["question", "curiosity gap", "direct statement", "source quo
 MIN_SAMPLE = 5
 OUTCOME = "average_percentage_viewed"
 COMPONENTS = ("hook", "story", "emotion", "visual", "payoff", "retention")
+DIRECTOR_COMPONENTS = ("hook", "pacing", "emotion", "dialogue", "chat")
 
 
 def confirm_published(value):
@@ -267,9 +268,14 @@ def comparison(records, metric=OUTCOME):
             score, value = record["editorial_score"], record["metrics"].get(metric)
             if numeric(score) and value is not None:
                 ranks[record["id"]] = round(_percentile(value, measured) - _percentile(score, scores), 1)
+    director_pairs = _pairs(records, metric, lambda record: (record.get("director_score") or {}).get("overall"))
     return {"metric": metric, "sample_size": len(pairs), "correlation": corr,
             "components": {key: _correlation(_pairs(records, metric, lambda record: record["score_breakdown"].get(key)))
-                           for key in COMPONENTS}, "percentile_gaps": ranks}
+                           for key in COMPONENTS}, "percentile_gaps": ranks,
+            "director": {"sample_size": len(director_pairs), "correlation": _correlation(director_pairs),
+                         "components": {key: _correlation(_pairs(
+                             records, metric, lambda record: (record.get("director_score") or {}).get(key)))
+                             for key in DIRECTOR_COMPONENTS}}}
 
 
 def _duration_bucket(seconds):

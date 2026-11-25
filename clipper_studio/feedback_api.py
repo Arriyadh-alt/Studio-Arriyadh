@@ -74,6 +74,7 @@ def clip_snapshot(job, clip):
         "detection_sources": sources,
         "editorial_score": score if numeric(score) else None,
         "score_breakdown": breakdown,
+        "director_score": director.get("score") or {},
         "score_penalties": clip.get("score_penalties", moment.get("score_penalties")),
         "score_explanation": clip.get("score_explanation", moment.get("score_explanation")),
         "source": source, "integrity": flags,

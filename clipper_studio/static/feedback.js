@@ -193,7 +193,11 @@ function comparisonTable(result) {
   const table = node('table');
   table.append(node('caption', 'Published highlights and measured results'));
   const head = table.createTHead().insertRow();
-  for (const label of ['Highlight', 'AI editorial estimate', metricLabels[result.metric], 'Measured vs. AI percentile']) {
+  const showDirector = records.some(record => record.director_score?.overall != null);
+  const labels = ['Highlight', 'AI editorial estimate'];
+  if (showDirector) labels.push('AI Director render estimate');
+  labels.push(metricLabels[result.metric], 'Measured vs. editorial percentile');
+  for (const label of labels) {
     const cell = node('th', label);
     cell.scope = 'col';
     head.append(cell);
@@ -206,7 +210,10 @@ function comparisonTable(result) {
     const rank = gap == null ? 'Unavailable' : gap === 0 ? 'Same rank' : `${number(Math.abs(gap))} points ${gap > 0 ? 'above' : 'below'}`;
     const header = node('th', record.title || 'Published highlight');
     header.scope = 'row';
-    row.append(header, ...[score, number(record.metrics[result.metric]), rank].map(value => node('td', value)));
+    const values = [score];
+    if (showDirector) values.push(record.director_score?.overall == null ? 'Unavailable' : `${number(record.director_score.overall)} / 100`);
+    values.push(number(record.metrics[result.metric]), rank);
+    row.append(header, ...values.map(value => node('td', value)));
   }
   wrap.tabIndex = 0;
   wrap.setAttribute('role', 'region');
@@ -230,6 +237,10 @@ function renderRecord(record) {
     : node('p', 'No metrics recorded.', 'hint'));
   if (record.metrics.retention_graph?.length) details.append(retentionChart(record.metrics.retention_graph));
   if (Object.keys(record.score_breakdown).length) details.append(facts(Object.entries(record.score_breakdown).map(([k,v]) => [k, number(v)])));
+  if (Object.keys(record.director_score || {}).length) {
+    details.append(node('h4', 'AI Director render estimate'),
+      facts(Object.entries(record.director_score).map(([key, value]) => [key, number(value)])));
+  }
   if (record.score_explanation) details.append(node('p', record.score_explanation));
   details.append(integrity(record));
   card.append(details);
@@ -264,6 +275,13 @@ async function drawComparison() {
     : `Pearson correlation: ${number(result.correlation)} (n=${result.sample_size}). Relative ranks describe this sample only.`, 'hint'));
   const available = Object.entries(result.components).filter(([, value]) => value != null);
   if (available.length) target.append(facts(available.map(([key,value]) => [key + ' correlation', number(value)])));
+  if (result.director.sample_size) {
+    target.append(node('h3', 'AI Director render comparison'), node('p', result.director.correlation == null
+      ? `Matched rendered clips: ${result.director.sample_size}. Correlation needs at least five matches and variation in both values.`
+      : `Pearson correlation: ${number(result.director.correlation)} (n=${result.director.sample_size}).`, 'hint'));
+    const components = Object.entries(result.director.components).filter(([, value]) => value != null);
+    if (components.length) target.append(facts(components.map(([key, value]) => [key + ' correlation', number(value)])));
+  }
   if (records.length) target.append(comparisonTable(result));
   page.querySelector('#publication-records').replaceChildren(...(records.length ? records.map(renderRecord)
     : [node('p', 'No performance records yet. Mark an already-published highlight or import metrics.', 'hint')]));
