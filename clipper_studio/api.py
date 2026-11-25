@@ -66,6 +66,8 @@ from .stages import ANALYSIS_STAGES, RENDER_STAGES, RETRYABLE, AnalysisTracker, 
 
 logger = logging.getLogger(__name__)
 CHAT_FINISH_GRACE = 1.
+CHAT_QUEUE_TIMEOUT = 600.
+CHAT_QUEUE_ERROR = "Chat replay waited too long for a chat worker."
 YOUTUBE_URL_ERROR = "Paste a YouTube video link for a finished livestream (watch, live, or youtu.be)."
 ACTIVE_STATUSES = ("queued", "running")
 CHAT_FALLBACK_WARNING = "Chat analysis is temporarily unavailable. AI Video Analysis will continue automatically."
@@ -1044,7 +1046,9 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                     store.save(latest)
 
         set_stage(jid, generation, "chat_analysis", "processing", 0)
-        budget = ChatWatchdog(job["metadata"]["duration"], lambda: check_job(jid, generation), publish)
+        queued_at = time.monotonic()
+        queue_deadline = queued_at + CHAT_QUEUE_TIMEOUT
+        budget = None
         future = Future()
         directory = store.root / jid / "chat"
         abandoned = False
@@ -1053,7 +1057,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
 
         def outcome(fields, error):
             return dict(fields, chat_error=error, chat_warning=CHAT_FALLBACK_WARNING if error else None,
-                        chat_seconds=round(time.monotonic() - budget.started, 2))
+                        chat_seconds=round(time.monotonic() - (budget.started if budget else queued_at), 2))
 
         def publish_result(latest, moments, fields, buckets=None):
             if buckets is not None and buckets.is_file():
@@ -1081,7 +1085,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 next_cancel_check = now + .25
 
         def fetch():
-            nonlocal downloaded
+            nonlocal budget, downloaded
             try:
                 with store.lock:
                     active_job(jid, generation)
@@ -1089,6 +1093,13 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         return
                 directory.mkdir(exist_ok=True)
                 with tempfile.TemporaryDirectory(dir=directory, prefix="incoming-") as staging:
+                    with store.lock:
+                        active_job(jid, generation)
+                        if abandoned:
+                            return
+                        if time.monotonic() >= queue_deadline:
+                            raise ChatReplayError(CHAT_QUEUE_ERROR)
+                        budget = ChatWatchdog(job["metadata"]["duration"], lambda: check_job(jid, generation), publish)
                     metadata, messages = fetch_chat(job["url"], Path(staging), info, budget)
                     budget.begin_processing()
                     with store.lock:
@@ -1126,18 +1137,21 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             grace_end = None
             try:
                 while True:
-                    budget.check()
+                    check_job(jid, generation)
                     if future.done():
                         return future.result()
-                    processing = budget.processing.is_set()
-                    if budget.processing_expired():
-                        raise ChatReplayError(CHAT_PROCESSING_ERROR)
-                    if not processing and budget.expired():
-                        now = time.monotonic()
-                        if grace_end is not None and now >= grace_end:
-                            raise ChatReplayError(CHAT_TIMEOUT_ERROR)
-                        budget.stopped = True
-                        grace_end = grace_end if grace_end is not None else now + CHAT_FINISH_GRACE
+                    with store.lock:
+                        if budget is None:
+                            if time.monotonic() >= queue_deadline:
+                                raise ChatReplayError(CHAT_QUEUE_ERROR)
+                        elif budget.processing_expired():
+                            raise ChatReplayError(CHAT_PROCESSING_ERROR)
+                        elif not budget.processing.is_set() and budget.expired():
+                            now = time.monotonic()
+                            if grace_end is not None and now >= grace_end:
+                                raise ChatReplayError(CHAT_TIMEOUT_ERROR)
+                            budget.stopped = True
+                            grace_end = grace_end if grace_end is not None else now + CHAT_FINISH_GRACE
                     try:
                         return future.result(timeout=.1)
                     except FutureTimeout:
@@ -1159,7 +1173,8 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                         return partial_result(latest)
                     return publish_result(latest, [], fields)
             finally:
-                budget.stopped = True
+                if budget is not None:
+                    budget.stopped = True
 
         return future.done, collect
 

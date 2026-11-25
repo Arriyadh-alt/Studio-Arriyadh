@@ -1,4 +1,5 @@
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -213,6 +214,49 @@ def test_blocked_chat_leaves_analysis_worker_and_job_available(monkeypatch, tmp_
         finally:
             allow_ai.set()
             release_chat.set()
+
+
+@pytest.mark.parametrize("queue_times_out", [False, True])
+def test_queued_chat_has_a_separate_wait_budget(monkeypatch, tmp_path, analysis, queue_times_out):
+    waiting, release = threading.Event(), threading.Event()
+    calls = []
+
+    def chat(url, *args):
+        calls.append(url)
+        if len(calls) == 1:
+            waiting.set()
+            assert release.wait(5)
+            raise ChatReplayError("No chat on first replay")
+        return {"duration": 600}, []
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
+    monkeypatch.setattr("clipper_studio.api.CHAT_FINISH_GRACE", .02)
+    monkeypatch.setattr("clipper_studio.chat.CHAT_STALL_SECONDS", .15)
+    if queue_times_out:
+        monkeypatch.setattr("clipper_studio.api.CHAT_QUEUE_TIMEOUT", .2, raising=False)
+    app = create_app(tmp_path, analysis_workers=1)
+    with TestClient(app) as client:
+        try:
+            client.post("/api/jobs", json={"url": REPLAY_URL})
+            assert waiting.wait(3)
+            second = client.post("/api/jobs", json={"url": REPLAY_URL}).json()["id"]
+            wait_job(client, second, lambda job: job["status"] == "completed")
+            if queue_times_out:
+                result = wait_job(client, second, lambda job: not job["chat_pending"])
+                assert result["chat_error"] == "Chat replay waited too long for a chat worker."
+                assert result["stages"]["chat_analysis"]["status"] == "failed"
+                assert len(calls) == 1
+            else:
+                time.sleep(.4)
+                assert client.get(f"/api/jobs/{second}").json()["chat_pending"]
+                assert len(calls) == 1
+        finally:
+            release.set()
+        app.state.pending.join()
+        if not queue_times_out:
+            result = client.get(f"/api/jobs/{second}").json()
+            assert len(calls) == 2 and result["chat_error"] is None
+            assert result["stages"]["chat_analysis"]["status"] == "completed"
 
 
 def test_retry_chat_only_preserves_existing_reviews_and_clips(monkeypatch, tmp_path, analysis):
