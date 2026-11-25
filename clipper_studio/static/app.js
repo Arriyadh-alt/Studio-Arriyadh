@@ -68,7 +68,7 @@ function directorHtml(clip, draft) {
   const restricted=mode==='natural'?'disabled':'';
   const edits=r?.edits, loop=clip.status==='ready' ? edits?.loop : null;
   const report=r?.status==='used' ? `<div class="director-report">
-    <p class="director-score"><strong>${r.score.overall}</strong><span>viral score</span></p>
+    <p class="director-score"><strong>${r.score.overall}</strong><span>${clip.score_breakdown?'Director edit score':'viral score'}</span></p>
     <ul class="director-bars">${Object.entries(directorLabels).map(([k,l])=>`<li><span>${l}</span><meter min="0" max="100" value="${r.score[k]}"></meter><span>${r.score[k]}</span></li>`).join('')}</ul>
     <p class="hint">${[edits.hook?.style==='story'?`${edits.hook.duration.toFixed(1)} s story hook · ${edits.hook.build_up.toFixed(1)} s build-up · ${edits.hook.payoff.toFixed(1)} s payoff & reaction`:edits.hook?.style==='source'?`${edits.hook.duration.toFixed(1)} s text hook`:edits.hook?`${edits.hook.duration.toFixed(1)} s hook from ${timestamp(edits.hook.source_start)}`:'No teaser hook',`${edits.cuts} cuts`,`${edits.removed_seconds.toFixed(1)} s trimmed`,`${edits.zooms} zooms`,`${edits.sound_effects} sound effects`,edits.music?'music bed':''].filter(Boolean).map(escapeHtml).join(' · ')}</p>
     <ul class="quality">${r.quality.map(q=>`<li class="${escapeHtml(q.status)}"><strong>${escapeHtml(q.check)}</strong> ${escapeHtml(q.detail)}</li>`).join('')}</ul>

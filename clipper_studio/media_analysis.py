@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from shorts_clipper.moments import _audio, _transcribe, _visual, analyze_signals
+from shorts_clipper.moments import _audio, _speech_key, _transcribe, _visual, analyze_signals
 from shorts_clipper.podcast import BANDS, BLOCK, analyze_podcast, transcribe_all, voice_features
 
 SEGMENTED_MIN_SECONDS = 3600
@@ -44,7 +44,7 @@ def _stitch(target, local, segment, block=1):
 
 
 def analyze_ranges(duration, clips, lead, language, *, fetch, checkpoint, expect, progress, check,
-                   podcast=False, speakers=None):
+                   podcast=False, speakers=None, data_dir=None):
     ranges = media_ranges(duration)
     count = len(ranges)
     expect("audio_analysis", count * (2 if podcast else 1))
@@ -54,7 +54,7 @@ def analyze_ranges(duration, clips, lead, language, *, fetch, checkpoint, expect
     seconds = math.ceil(duration)
     # Loudness defaults to quiet in gaps; zero dB would shift inferred boundaries.
     signals = [np.full(seconds, -120.), np.zeros(seconds), np.zeros(seconds)]
-    video = np.zeros(seconds)
+    video = np.tile([0., -1., -1., -1.], (seconds, 1))
     valid_video = False
     sources, words = {}, []
     features = np.zeros((math.ceil(duration / BLOCK), BANDS + 1)) if podcast else None
@@ -113,8 +113,9 @@ def analyze_ranges(duration, clips, lead, language, *, fetch, checkpoint, expect
                     frames = _visual(source, segment.length, len(result[0]))
                     return frames.tolist()
 
-                local_video = checkpoint("video_analysis", f"scan-{segment.key}", visual_scan)
-                _stitch(video, local_video, segment)
+                local_video = np.asarray(checkpoint("video_analysis", f"scan-{segment.key}", visual_scan))
+                _stitch(video[:, 0] if local_video.ndim == 1 else video[:, :local_video.shape[1]],
+                        local_video, segment)
                 valid_video = True
             except Exception:
                 check()
@@ -130,8 +131,7 @@ def analyze_ranges(duration, clips, lead, language, *, fetch, checkpoint, expect
                                transcribe_fn=lambda *_: words, features_fn=lambda *_: features,
                                audio_fn=lambda *_: signals)
 
-    def transcript(lo, hi):
-        peak = int(lo + lead + 5) if lo else int(max(0, hi - 42))
+    def transcript(lo, hi, peak):
         segment = ranges[min(len(ranges) - 1, peak // CORE_SECONDS)]
 
         def transcribe_candidate():
@@ -140,7 +140,7 @@ def analyze_ranges(duration, clips, lead, language, *, fetch, checkpoint, expect
             return [{**word, "start": word["start"] + segment.start, "end": word["end"] + segment.start}
                     for word in words]
 
-        return checkpoint("transcript_generation", f"speech-{lo:g}-{hi:g}", transcribe_candidate)
+        return checkpoint("transcript_generation", _speech_key(peak, lead, hi), transcribe_candidate)
 
     return analyze_signals(signals, video if valid_video else None, duration, clips, lead,
-                           transcript, progress, expect)
+                           transcript, progress, expect, data_dir=data_dir)

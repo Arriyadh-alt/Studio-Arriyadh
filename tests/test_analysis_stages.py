@@ -56,7 +56,7 @@ def test_restart_during_segment_scan_resumes_from_disk(tmp_path, monkeypatch):
     monkeypatch.setattr("clipper_studio.media_analysis._audio", scan)
     monkeypatch.setattr("clipper_studio.media_analysis._visual", lambda p, d, n: np.zeros(n))
     monkeypatch.setattr("clipper_studio.media_analysis._transcribe", lambda path, lo, hi, lang: [
-        {"word": "no way", "start": lo + 5, "end": lo + 6}])
+        {"word": "no way", "start": hi - 60, "end": hi - 59}])
 
     app = create_app(tmp_path)
     try:

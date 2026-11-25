@@ -114,13 +114,28 @@ and use only media you are authorized to access.
   error, and job-relative artifact references.
 - `POST /api/jobs/{id}/resume` → 202 `{id}` to resume incomplete analysis
   after a failure or cancellation; returns 409 otherwise.
-- `PATCH /api/jobs/{id}/moments/{mid}` accepts `{status?,start?,end?}`; status is
+- `PATCH /api/jobs/{id}/moments/{mid}` accepts `{status?,start?,end?,title?,selected_hook?,mode?,captions?,layout?,framing?,voiceover?}`; status is
   `suggested`, `selected`, or `rejected`. Boundaries must fit the replay and be at
   most 60 seconds (422 otherwise); rendered status cannot be reverted (409).
+  `selected_hook` must match a proposed hook. `framing` is a relative horizontal
+  position from 0 to 1, or `null` to return to automatic framing.
 - `POST /api/jobs/{id}/moments/render` accepts `{ids?:[...]}` (default: selected
   moments), queues priority renders, and returns 202 `{clips:[clip_ids]}`; 409
   when nothing is eligible. Moments become `rendered` with `clip_id`; deleting
   their clip resets them to `suggested`.
+
+Viral potential is an editorial estimate, not measured retention or promised
+views. New gameplay AI moments store their six component estimates, evidence,
+deductions, reaction timestamps and hook choices. Scores below 55 are hidden
+by default but can be shown for review. Chat corroboration can break a tie
+without raising the AI estimate.
+
+Operators can override individual weights or deductions in
+`$CLIPPER_DATA_DIR/viral-scoring.json`, for example
+`{"weights":{"hook":0.25,"story":0.15},"penalties":{"missing_trigger":12}}`.
+The six weight keys are `hook`, `story`, `emotion`, `visual`, `payoff` and
+`retention`. Weights are normalized, and a published-performance calibrator
+can adjust them when available. Existing moments keep their saved estimate.
   Moments expose id/rank/sources, start/end/peak/duration, score/ai_score/chat_score,
   title/description/reason/category/signals/transcript/message_sample/status/clip_id.
   Agreements retain source boundaries under `alternatives.ai` and `.chat`.
