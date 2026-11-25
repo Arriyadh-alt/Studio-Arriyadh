@@ -42,7 +42,8 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
                 should_continue()
             options = {"format": selector, "outtmpl": str(output_dir / f"%(id)s_analysis_{kind}.%(ext)s"),
                        "noplaylist": True, "quiet": True, "no_warnings": True, "noprogress": True,
-                       "max_filesize": max_bytes, "progress_hooks": [check_size]}
+                       "max_filesize": max_bytes, "progress_hooks": [check_size],
+                       "socket_timeout": 25, "retries": 2, "fragment_retries": 2}
             try:
                 with yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -90,9 +91,8 @@ def download_section(url: str, output_dir: Path, start: float, end: float, max_h
         "no_warnings": True,
         "noprogress": True,
     }
-    if analysis:
-        options.update(socket_timeout=25, retries=2, fragment_retries=2,
-                       external_downloader_args={"ffmpeg_i": ["-rw_timeout", "25000000"]})
+    options.update(socket_timeout=25, retries=2, fragment_retries=2,
+                   external_downloader_args={"ffmpeg_i": ["-rw_timeout", "25000000"]})
     with cookie_options(cookies, proxy=proxy) as authentication:
         try:
             with yt_dlp.YoutubeDL({**options, **authentication}) as ydl:

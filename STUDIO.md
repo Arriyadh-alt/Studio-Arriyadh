@@ -98,7 +98,9 @@ and use only media you are authorized to access.
   `{url, clips:8, lead:18, ai_analysis:true, review:true, mode:"crop", editing_mode:"full", captions:true, language:"auto", caption_style:null}`. Use an HTTPS YouTube
   video link (`watch`, `live`, or `youtu.be`, including mobile) for a finished
   livestream or regular video; clips 1–50, lead 15–20, mode `crop` or `blur`. No timestamps needed.
-  `ai_analysis:false` prefers chat but still uses AI when chat is unavailable.
+  AI media analysis always runs; the legacy `ai_analysis` field is still accepted.
+  Chat runs independently and contributes any replay data collected before its
+  deadline or before media analysis finishes.
   Jobs include ranked `moments`, optional `chat_error`/`chat_warning`/`ai_error`, and
   `analysis_complete`. Review mode completes without
   creating clips; set `review:false` for automatic rendering of the best moments.

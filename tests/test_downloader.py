@@ -1,10 +1,35 @@
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yt_dlp
 
+from clipper_studio.download_worker import run_download
 from shorts_clipper.downloader import download_analysis_media, download_section
 from shorts_clipper.youtube import YouTubeAccessError
+
+
+def test_download_worker_translates_download_errors(tmp_path):
+    with pytest.raises(YouTubeAccessError, match="require an http:// proxy"):
+        run_download("section", ["https://youtu.be/video", tmp_path, 5, 30],
+                     {"proxy": "socks5://localhost"}, timeout=10)
+
+
+def test_download_worker_kills_and_reaps_a_stalled_process(monkeypatch):
+    spawn = subprocess.Popen
+    processes = []
+
+    def stalled(*args, **kwargs):
+        process = spawn([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("clipper_studio.download_worker.subprocess.Popen", stalled)
+    with pytest.raises(TimeoutError, match="exceeded its time limit"):
+        run_download("section", [], timeout=.1)
+    assert processes[0].returncode == -signal.SIGKILL
 
 
 def test_fractional_windows_do_not_reuse_another_sections_file(monkeypatch, tmp_path):

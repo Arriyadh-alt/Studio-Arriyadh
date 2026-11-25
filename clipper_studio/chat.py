@@ -15,6 +15,7 @@ from yt_dlp.utils import DownloadCancelled, DownloadError
 from shorts_clipper.youtube import blocking_message, cookie_options
 
 from .chat_buckets import ChatBuckets, Message
+from .download_worker import run_download
 
 
 METADATA_KEYS = ("id", "title", "duration", "thumbnail", "channel", "uploader")
@@ -24,11 +25,44 @@ REPLAY_DOWNLOAD_ERROR = "Studio couldn’t download the chat replay. Try again o
 REPLAY_READ_ERROR = "Studio couldn’t read this chat replay. Try again or choose another stream."
 DISK_RESERVE_BYTES = 256 * 1024 * 1024
 MAX_LINE_BYTES = 64 * 1024
+REPLAY_POLL_BYTES = 1024 * 1024
+CHAT_STALL_SECONDS = 45
+CHAT_PROJECTION_SECONDS = 90
+CHAT_TIMEOUT_ERROR = "Chat replay did not finish within the analysis time budget."
 logger = logging.getLogger(__name__)
 
 
 class ChatReplayError(ValueError):
     pass
+
+
+class ChatWatchdog:
+    def __init__(self, duration, check, progress):
+        self.duration, self.check, self.progress = duration, check, progress
+        self.started = self.last_progress = time.monotonic()
+        self.limit = min(600, 120 + duration / 30)
+        self.deadline = self.started + self.limit
+        self.offset = 0
+        self.stopped = False
+
+    def advanced(self, offset):
+        if offset > self.offset:
+            self.last_progress = time.monotonic()
+            self.offset = offset
+            self.progress(min(100, self.offset / self.duration * 100))
+
+    def expired(self):
+        now = time.monotonic()
+        elapsed = now - self.started
+        if self.stopped or now >= self.deadline or now - self.last_progress >= CHAT_STALL_SECONDS:
+            return True
+        return bool(self.offset and elapsed >= CHAT_PROJECTION_SECONDS
+                    and elapsed * self.duration / self.offset > 2 * self.limit)
+
+    def __call__(self):
+        self.check()
+        if self.expired():
+            raise DownloadCancelled(CHAT_TIMEOUT_ERROR)
 
 
 def _text(value):
@@ -39,7 +73,7 @@ def _text(value):
                    or run.get("emoji", {}).get("emojiId", "") for run in value.get("runs", []))
 
 
-def iter_chat(lines):
+def iter_chat(lines, on_offset=lambda _: None):
     def visit(node, offset=None):
         if isinstance(node, list):
             for child in node:
@@ -48,6 +82,8 @@ def iter_chat(lines):
             if "videoOffsetTimeMsec" in node:
                 try:
                     offset = float(node["videoOffsetTimeMsec"]) / 1000
+                    if math.isfinite(offset):
+                        on_offset(offset)
                 except (ValueError, TypeError):
                     offset = None
             for key, child in node.items():
@@ -81,11 +117,11 @@ def validate_metadata(info, require_chat=True, require_live=True):
         raise ChatReplayError("YouTube hasn’t published the replay duration yet. Try again later.")
 
 
-def fetch_metadata(url: str, require_chat=True, require_live=True):
+def fetch_metadata(url: str, require_chat=True, require_live=True, *, writeback=True):
     options = {"skip_download": True, "writesubtitles": False, "noplaylist": True,
                "quiet": True, "noprogress": True, "socket_timeout": 10,
                "retries": 1, "extractor_retries": 1}
-    with cookie_options() as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
+    with cookie_options(writeback=writeback) as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
         except DownloadError as error:
@@ -106,6 +142,18 @@ def _transient(error):
                                      "http error 500", "http error 502", "http error 503", "http error 504"))
 
 
+def _download_replay(info, work, progress=None):
+    options = {"skip_download": True, "writesubtitles": True, "subtitleslangs": ["live_chat"],
+               "outtmpl": str(work / "replay.%(ext)s"), "noplaylist": True,
+               "quiet": True, "noprogress": True, "retries": 2, "fragment_retries": 2,
+               "retry_sleep_functions": {"http": _backoff, "fragment": _backoff},
+               "socket_timeout": 20}
+    if progress is not None:
+        options["progress_hooks"] = [progress]
+    with cookie_options(writeback=False) as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
+        ydl.process_ie_result(info, download=True)
+
+
 def _ingest_attempt(info, work, writer, should_continue):
     path = work / "replay.live_chat.json"
     partial = path.with_name(path.name + ".part")
@@ -113,19 +161,29 @@ def _ingest_attempt(info, work, writer, should_continue):
     start = time.monotonic()
     overlong = False
     guarded = set()
+    watchdog = should_continue if isinstance(should_continue, ChatWatchdog) else None
+    offset = 0.
+
+    def note_offset(value):
+        nonlocal offset
+        offset = max(offset, value)
 
     def record_guard(guard):
         if guard not in guarded:
             guarded.add(guard)
             logger.warning("Chat replay guard=%s elapsed=%.2fs bytes=%d", guard, time.monotonic() - start, downloaded)
 
-    def consume(replay, final=False):
+    def consume(replay, final=False, max_bytes=None):
         nonlocal position, overlong
-        if not replay.is_file():
+        try:
+            stream = replay.open("rb")
+        except FileNotFoundError:
             return
-        with replay.open("rb") as stream:
+        with stream:
             stream.seek(position)
-            while line := stream.readline(MAX_LINE_BYTES + 1):
+            start_position = position
+            while (max_bytes is None or position - start_position < max_bytes) and (
+                    line := stream.readline(MAX_LINE_BYTES + 1)):
                 if not line.endswith(b"\n") and len(line) <= MAX_LINE_BYTES and not final:
                     break
                 position = stream.tell()
@@ -135,7 +193,7 @@ def _ingest_attempt(info, work, writer, should_continue):
                     record_guard("line_bytes")
                     continue
                 try:
-                    for message, message_id in iter_chat((line,)):
+                    for message, message_id in iter_chat((line,), note_offset):
                         writer.add(message, message_id)
                 except (UnicodeError, json.JSONDecodeError, RecursionError):
                     writer.buckets.warning = REPLAY_READ_ERROR
@@ -154,18 +212,46 @@ def _ingest_attempt(info, work, writer, should_continue):
             record_guard("disk_reserve")
             raise DownloadCancelled("Chat replay stopped to preserve available disk space.")
 
-    options = {"skip_download": True, "writesubtitles": True, "subtitleslangs": ["live_chat"],
-               "outtmpl": str(work / "replay.%(ext)s"), "noplaylist": True,
-               "quiet": True, "noprogress": True, "retries": 2, "fragment_retries": 2,
-               "retry_sleep_functions": {"http": _backoff, "fragment": _backoff},
-               "socket_timeout": 20, "progress_hooks": [progress]}
+    def poll():
+        nonlocal downloaded
+        replay = path if path.is_file() else partial
+        try:
+            size = replay.stat().st_size
+        except FileNotFoundError:
+            size = 0
+        downloaded = max(downloaded, size)
+        if size > position:
+            consume(replay, final=replay == path, max_bytes=REPLAY_POLL_BYTES)
+            watchdog.advanced(offset)
+        should_continue()
+        if shutil.disk_usage(work).free < DISK_RESERVE_BYTES:
+            record_guard("disk_reserve")
+            raise DownloadCancelled("Chat replay stopped to preserve available disk space.")
+
     try:
         progress({})
-        with cookie_options(writeback=False) as authentication, yt_dlp.YoutubeDL({**options, **authentication}) as ydl:
-            ydl.process_ie_result(info, download=True)
+        if watchdog:
+            run_download("replay", [info, work], timeout=600, check=poll)
+        else:
+            _download_replay(info, work, progress)
+    except DownloadCancelled:
+        if watchdog and watchdog.expired():
+            record_guard("chat_watchdog")
+        raise
     finally:
-        consume(path if path.is_file() else partial, final=path.is_file())
-        writer.flush()
+        replay = path if path.is_file() else partial
+        try:
+            if watchdog:
+                while True:
+                    previous = position
+                    consume(replay, final=replay == path, max_bytes=REPLAY_POLL_BYTES)
+                    watchdog.advanced(offset)
+                    if position == previous or watchdog.expired():
+                        break
+            else:
+                consume(replay, final=replay == path)
+        finally:
+            writer.flush()
         if writer.limited:
             record_guard("interval_entries")
     if not path.is_file():
@@ -173,7 +259,11 @@ def _ingest_attempt(info, work, writer, should_continue):
 
 
 def fetch_chat(url: str, directory: Path, info=None, should_continue=None):
-    info = info if info is not None else fetch_metadata(url)
+    if info is None:
+        if isinstance(should_continue, ChatWatchdog):
+            info = run_download("metadata", [url], {"writeback": False}, timeout=45, check=should_continue)
+        else:
+            info = fetch_metadata(url)
     validate_metadata(info)
     directory.mkdir(parents=True, exist_ok=True)
     should_continue = should_continue or (lambda: None)
@@ -182,8 +272,8 @@ def fetch_chat(url: str, directory: Path, info=None, should_continue=None):
         failure = None
         with buckets.writer() as writer:
             for attempt in range(1, 4):
-                should_continue()
                 try:
+                    should_continue()
                     with TemporaryDirectory(dir=staging, prefix="attempt-") as temporary:
                         _ingest_attempt(info, Path(temporary), writer, should_continue)
                     failure = None

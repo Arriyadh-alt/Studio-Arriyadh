@@ -458,7 +458,7 @@ $('#start-form').addEventListener('submit',async event=>{
   event.preventDefault(); notice(''); const button=$('#start-button'); button.disabled=true;
   try {
     const source=await PodcastControls.source();
-    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),ai_analysis:$('#ai-analysis').checked,review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},editing_mode:jobMode.value,director:readJobDirector(),...CaptionControls.read($('#start-form'))});
+    const job=await api('./api/jobs','POST',{...source,...PodcastControls.request(),review:$('#review-moments').checked,clips:Number($('#clip-count').value),lead:Number($('#lead').value),mode:$('#mode').value,captions:$('#captions').checked,facecam:{enabled:$('#facecam').checked},editing_mode:jobMode.value,director:readJobDirector(),...CaptionControls.read($('#start-form'))});
     location.hash=`jobs/${job.id}`;
   } catch(error) {
     notice(error instanceof TypeError ? 'Couldn’t confirm the submission. Check Recent streams before trying again.' : error.message);

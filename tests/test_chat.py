@@ -9,7 +9,8 @@ from yt_dlp import YoutubeDL
 from yt_dlp.downloader.common import FileDownloader
 from yt_dlp.utils import DownloadError
 
-from clipper_studio.chat import ChatReplayError, Message, fetch_chat, fetch_metadata, parse_chat
+from clipper_studio.chat import (CHAT_TIMEOUT_ERROR, ChatReplayError, ChatWatchdog, Message,
+                                 fetch_chat, fetch_metadata, parse_chat)
 from clipper_studio.spikes import detect_spikes
 
 
@@ -32,6 +33,52 @@ def test_empty_and_malformed():
     assert parse_chat(["", "{}", '{"videoOffsetTimeMsec":null}']) == []
     with pytest.raises(ValueError):
         parse_chat(["broken json"])
+
+
+def test_watchdog_keeps_partial_buckets_and_reports_fragment_offset(tmp_path, monkeypatch):
+    now = 0
+    monkeypatch.setattr("clipper_studio.chat.time", SimpleNamespace(monotonic=lambda: now))
+    progress = []
+    watchdog = ChatWatchdog(600, lambda: None, progress.append)
+
+    def replay(operation, args, *, timeout, check):
+        nonlocal now
+        assert operation == "replay"
+        output = args[1] / "replay.live_chat.json.part"
+        output.write_bytes(replay_line(1, 90, "Viewer") + b'{"videoOffsetTimeMsec":"120000","actions":[]}\n')
+        now = 10
+        check()
+        now = 56
+        check()
+
+    monkeypatch.setattr("clipper_studio.chat.run_download", replay)
+    info = dict(REPLAY_INFO, duration=600)
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, info, watchdog)
+    assert progress == [20]
+    assert len(buckets) == 1
+    assert buckets.warning == CHAT_TIMEOUT_ERROR
+    assert buckets.path.is_file()
+
+
+def test_watchdog_bounds_slow_but_advancing_chat_and_has_a_hard_cap(monkeypatch):
+    now = 0
+    monkeypatch.setattr("clipper_studio.chat.time", SimpleNamespace(monotonic=lambda: now))
+    slow = ChatWatchdog(6600, lambda: None, lambda _: None)
+    for now in (30, 60, 89):
+        slow.advanced(now)
+        assert not slow.expired()
+    now = 90
+    slow.advanced(now)
+    assert slow.expired()
+
+    now = 0
+    capped = ChatWatchdog(43200, lambda: None, lambda _: None)
+    for now in range(30, 600, 30):
+        capped.advanced(now * 70)
+        assert not capped.expired()
+    now = 600
+    capped.advanced(42000)
+    assert capped.expired()
 
 
 @pytest.fixture

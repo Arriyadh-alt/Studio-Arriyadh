@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from clipper_studio.api import CHAT_FALLBACK_WARNING, JobRequest, Store, create_app
 from clipper_studio.chat import ChatReplayError, REPLAY_LIMIT_MESSAGE
 from shorts_clipper.youtube import YouTubeAccessError
-from test_api import REPLAY_URL, media, metadata, saved_job
+from test_api import REPLAY_URL, media, metadata, saved_job, wait_job
 
 
 def proposal(score=80):
@@ -108,8 +108,6 @@ def test_ai_off_still_falls_back_when_chat_is_unavailable(monkeypatch, tmp_path,
 
     def download(*args, **kwargs):
         assert kwargs["should_continue"]() is None
-        job = app.state.store.jobs()[0]
-        assert job["chat_warning"] == CHAT_FALLBACK_WARNING
         return None, None
 
     monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
@@ -143,6 +141,44 @@ def test_ai_starts_without_waiting_for_chat(monkeypatch, tmp_path, analysis):
         app.state.pending.join()
         job = client.get(f"/api/jobs/{jid}").json()
         assert job["status"] == "completed" and job["chat_error"] == "Chat replay unavailable"
+
+
+@pytest.mark.parametrize("ai_analysis", [False, True])
+def test_blocked_chat_leaves_analysis_worker_and_job_available(monkeypatch, tmp_path, analysis, ai_analysis):
+    chat_entered, release_chat, allow_ai = threading.Event(), threading.Event(), threading.Event()
+
+    def chat(*args):
+        chat_entered.set()
+        release_chat.wait()
+        return {"duration": 600}, []
+
+    def analyze(*args, progress, **kwargs):
+        progress(.5, "Analyzing AI despite blocked chat")
+        assert allow_ai.wait(5)
+        return [proposal()]
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
+    monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
+    monkeypatch.setattr("clipper_studio.api.CHAT_FINISH_GRACE", .1)
+    app = create_app(tmp_path, analysis_workers=1)
+    with TestClient(app) as client:
+        request = {"url": REPLAY_URL, "ai_analysis": ai_analysis, "review": True}
+        first = client.post("/api/jobs", json=request).json()["id"]
+        try:
+            assert chat_entered.wait(3)
+            running = wait_job(client, first, lambda job: job.get("analysis_detail") == "Analyzing AI despite blocked chat")
+            assert 0 < running["progress"] < 1
+            assert running["stages"]["chat_analysis"]["status"] == "processing"
+            second = client.post("/api/jobs", json=request).json()["id"]
+            allow_ai.set()
+            result = wait_job(client, first, lambda job: job["status"] == "completed")
+            assert result["moments"][0]["sources"] == ["ai"]
+            assert result["chat_warning"] == CHAT_FALLBACK_WARNING
+            assert result["stages"]["chat_analysis"]["status"] == "failed"
+            assert wait_job(client, second, lambda job: job["status"] == "completed")["moments"][0]["sources"] == ["ai"]
+        finally:
+            allow_ai.set()
+            release_chat.set()
 
 
 def test_retry_chat_only_preserves_existing_reviews_and_clips(monkeypatch, tmp_path, analysis):
@@ -193,6 +229,7 @@ def test_retry_chat_only_preserves_existing_reviews_and_clips(monkeypatch, tmp_p
 
 
 def test_chat_retry_updates_an_untouched_suggestion(monkeypatch, tmp_path, analysis):
+    monkeypatch.setattr("clipper_studio.api.analyze_media", lambda *a, **k: [])
     monkeypatch.setattr("clipper_studio.api.detect_spikes", lambda *a, **k: ([
         proposal(8), {**proposal(4), "start": 143, "end": 178, "peak": 145},
     ], []))

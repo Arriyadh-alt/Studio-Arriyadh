@@ -14,7 +14,7 @@ import time
 import uuid
 import unicodedata
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -36,7 +36,6 @@ from starlette.background import BackgroundTask
 
 from shorts_clipper.branding import BrandingSettings, LOGO_LIMIT, normalize_logo, prepare_watermark, read_logo
 from shorts_clipper.captions import FONT_DIR, CaptionStyle, apply_caption_edits, caption_height, to_ass, transcribe
-from shorts_clipper.downloader import download_analysis_media, download_section
 from shorts_clipper.moments import _audio, analyze_media
 from shorts_clipper.podcast import analyze_podcast, transcribe_all, voice_features
 from shorts_clipper.sources import UPLOAD_ID, UPLOAD_SUFFIXES, local_analysis_media, local_section, probe_source, source_track_kinds
@@ -54,7 +53,9 @@ from shorts_clipper.facecam import (SourceBox, detect_facecam, auto_layout_facec
 from shorts_clipper.tracking import analyze_reaction, keyframe_expression, layout_options, plan_reframe, to_output_time
 from shorts_clipper.youtube import YouTubeAccessError
 
-from .chat import DISK_RESERVE_BYTES, METADATA_KEYS, ChatReplayError, fetch_chat, fetch_metadata
+from .chat import (CHAT_TIMEOUT_ERROR, DISK_RESERVE_BYTES, METADATA_KEYS, ChatReplayError, ChatWatchdog,
+                   fetch_chat)
+from .download_worker import run_download
 from .media_analysis import SEGMENTED_MIN_SECONDS, analyze_ranges
 from .scheduler import Scheduler
 from .spikes import detect_spikes
@@ -63,9 +64,24 @@ from .stages import ANALYSIS_STAGES, RENDER_STAGES, RETRYABLE, AnalysisTracker, 
 
 
 logger = logging.getLogger(__name__)
+CHAT_FINISH_GRACE = 1.
 YOUTUBE_URL_ERROR = "Paste a YouTube video link for a finished livestream (watch, live, or youtu.be)."
 ACTIVE_STATUSES = ("queued", "running")
 CHAT_FALLBACK_WARNING = "Chat analysis is temporarily unavailable. AI Video Analysis will continue automatically."
+
+
+def fetch_metadata(url, require_chat=True, require_live=True):
+    return run_download("metadata", [url, require_chat, require_live], {"writeback": False}, timeout=45)
+
+
+def download_section(url, directory, start, end, *, check=lambda: None, **kwargs):
+    timeout = min(480, max(120, 90 + (end - start) / 3))
+    return Path(run_download("section", [url, directory, start, end], kwargs, timeout=timeout, check=check))
+
+
+def download_analysis_media(url, directory, should_continue, **kwargs):
+    paths = run_download("media", [url, directory], kwargs, timeout=480, check=should_continue)
+    return tuple(Path(path) if path else None for path in paths)
 
 
 class WorkCancelled(Exception):
@@ -417,6 +433,7 @@ def clip_number(job, clip):
 
 
 def create_app(data_dir=None, analysis_workers=None, render_workers=None, metadata_workers=None):
+    chat_slots = threading.BoundedSemaphore(max(1, analysis_workers or int(os.environ.get("CLIPPER_ANALYSIS_WORKERS", "3"))))
     runtime_dir = str(Path(sys.executable).parent)
     if (Path(runtime_dir) / "deno").is_file() and runtime_dir not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = runtime_dir + os.pathsep + os.environ.get("PATH", "")
@@ -1006,41 +1023,107 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         with store.lock:
             active_job(jid, generation)
 
-    def analyze_chat(jid, generation, job, info, retry_dir=None):
+    def start_chat(jid, generation, job, info, retry_dir=None):
         name = "chat_analysis/result.json"
         cache = checkpoints(jid)
         if retry_dir is None and (saved := cache.read(name)) is not None:
+            def reuse(wait_for_chat):
+                with store.lock:
+                    latest = active_job(jid, generation)
+                    record_chat(latest, saved["moments"], saved["fields"], write_checkpoint=False)
+                    store.save(latest)
+                return saved["moments"], saved["fields"]
+            return reuse
+
+        def publish(progress):
             with store.lock:
                 latest = active_job(jid, generation)
-                record_chat(latest, saved["moments"], saved["fields"], write_checkpoint=False)
-                store.save(latest)
-            return saved["moments"], saved["fields"]
-        set_stage(jid, generation, "chat_analysis", "processing")
-        started = time.monotonic()
-        try:
-            directory = retry_dir if retry_dir is not None else store.root / jid / "chat"
-            metadata, messages = fetch_chat(job["url"], directory, info,
-                                            lambda: check_job(jid, generation))
-            count, lead = job["request"]["clips"], job["request"]["lead"]
-            spikes, activity = detect_spikes(messages, metadata["duration"], clips=count, lead=lead)
-            moments = [chat_moment(s) for s in sorted(spikes, key=lambda s: -s.get("score", 0))[:count]]
-            error = getattr(messages, "warning", None)
-            fields = dict(metadata=metadata, activity=activity, message_count=len(messages))
-        except WorkCancelled:
-            raise
-        except Exception as failure:
-            error = str(failure) if isinstance(failure, ChatReplayError) else "Chat analysis was unavailable."
-            if not isinstance(failure, ChatReplayError):
-                logger.warning("Chat analysis failed for job %s", jid, exc_info=True)
-            moments, fields = [], {}
-        fields.update(chat_error=error, chat_warning=CHAT_FALLBACK_WARNING if error else None,
-                      chat_seconds=round(time.monotonic() - started, 2))
-        if retry_dir is None:
-            with store.lock:
-                latest = active_job(jid, generation)
-                record_chat(latest, moments, fields)
-                store.save(latest)
-        return moments, fields
+                state = stage_states(latest)["chat_analysis"]
+                if state["status"] == "processing" and progress >= state["progress"] + 1:
+                    mark_stage(latest, "chat_analysis", "processing", progress)
+                    store.save(latest)
+
+        set_stage(jid, generation, "chat_analysis", "processing", 0)
+        budget = ChatWatchdog(job["metadata"]["duration"], lambda: check_job(jid, generation), publish)
+        future = Future()
+        directory = store.root / jid / "chat"
+        abandoned = False
+
+        def outcome(fields, error):
+            return dict(fields, chat_error=error, chat_warning=CHAT_FALLBACK_WARNING if error else None,
+                        chat_seconds=round(time.monotonic() - budget.started, 2))
+
+        def fetch():
+            try:
+                directory.mkdir(exist_ok=True)
+                with tempfile.TemporaryDirectory(dir=directory, prefix="incoming-") as staging:
+                    metadata, messages = fetch_chat(job["url"], Path(staging), info, budget)
+                    count, lead = job["request"]["clips"], job["request"]["lead"]
+                    spikes, activity = detect_spikes(messages, metadata["duration"], clips=count, lead=lead)
+                    moments = [chat_moment(s) for s in sorted(spikes, key=lambda s: -s.get("score", 0))[:count]]
+                    fields = outcome(dict(metadata=metadata, activity=activity, message_count=len(messages)),
+                                     getattr(messages, "warning", None))
+                    with store.lock:
+                        latest = active_job(jid, generation)
+                        if abandoned:
+                            return
+                        buckets = Path(staging) / "buckets.sqlite"
+                        if buckets.is_file():
+                            buckets.replace((retry_dir or directory) / buckets.name)
+                        if retry_dir is None:
+                            record_chat(latest, moments, fields)
+                            store.save(latest)
+                        future.set_result((moments, fields))
+            except Exception as failure:
+                future.set_exception(failure)
+            finally:
+                chat_slots.release()
+
+        if chat_slots.acquire(blocking=False):
+            threading.Thread(target=fetch, name="chat-replay", daemon=True).start()
+        else:
+            future.set_exception(ChatReplayError("Chat analysis workers are busy. Retry chat analysis."))
+
+        def collect(wait_for_chat):
+            nonlocal abandoned
+            grace_end = None if wait_for_chat else time.monotonic() + CHAT_FINISH_GRACE
+            try:
+                while True:
+                    budget.check()
+                    now = time.monotonic()
+                    if grace_end is None and budget.expired():
+                        budget.stopped = True
+                        grace_end = now + CHAT_FINISH_GRACE
+                    try:
+                        return future.result(timeout=.1 if grace_end is None else min(.1, max(0, grace_end - now)))
+                    except FutureTimeout:
+                        if future.done():
+                            raise
+                        if grace_end is not None and time.monotonic() >= grace_end:
+                            if budget.stopped:
+                                raise ChatReplayError(CHAT_TIMEOUT_ERROR)
+                            budget.stopped = True
+                            grace_end = time.monotonic() + CHAT_FINISH_GRACE
+            except WorkCancelled:
+                raise
+            except Exception as failure:
+                error = str(failure) if isinstance(failure, ChatReplayError) else "Chat analysis was unavailable."
+                if not isinstance(failure, ChatReplayError):
+                    logger.warning("Chat analysis failed for job %s", jid, exc_info=True)
+                fields = outcome({}, error)
+                with store.lock:
+                    if future.done() and future.exception() is None:
+                        return future.result()
+                    abandoned = True
+                    if retry_dir is None:
+                        latest = active_job(jid, generation)
+                        record_chat(latest, [], fields)
+                        store.save(latest)
+                return [], fields
+            finally:
+                budget.stopped = True
+
+        return collect
 
     def record_chat(job, moments, fields, write_checkpoint=True):
         jid = job["id"]
@@ -1054,7 +1137,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 artifacts.append("chat/buckets.sqlite")
         error = fields["chat_error"]
         mark_stage(job, "chat_analysis", ("partially_completed" if artifacts else "failed") if error else "completed",
-                   100 if artifacts and error else None, error, artifacts)
+                   error=error, artifacts=artifacts)
         job.update(fields)
 
     def analyze_ai(jid, generation, job, duration, podcast, upload):
@@ -1129,7 +1212,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                             raise YouTubeAccessError("Analysis paused to preserve available disk space.")
                         folder.mkdir(parents=True, exist_ok=True)
                         return (download_section(job["url"], folder, segment.start, segment.end,
-                                                 max_height=240, analysis=True),)
+                                                 max_height=240, analysis=True, check=check),)
 
                     try:
                         source, = media(f"media/{segment.key}.json", download, track_kinds=source_track_kinds,
@@ -1191,7 +1274,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
         directory.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=directory, prefix="retry-") as temporary:
             candidate = Path(temporary)
-            chat, fields = analyze_chat(jid, generation, job, None, retry_dir=candidate)
+            chat, fields = start_chat(jid, generation, job, None, retry_dir=candidate)(True)
             with store.lock:
                 job = active_job(jid, generation)
                 if job.get("message_count"):
@@ -1245,27 +1328,18 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
             count, lead = job["request"]["clips"], job["request"]["lead"]
             duration = job["metadata"]["duration"]
             chat, ai, fields, ai_error = [], [], {}, None
-            update(jid, generation, status="running", stage="Fetching chat replay" if not (podcast or upload)
-                   else "Preparing AI analysis")
+            update(jid, generation, status="running", stage="Preparing AI analysis")
+            collect_chat = None
             if podcast or upload:
                 set_stage(jid, generation, "chat_analysis", "skipped")
-                ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
             elif (job.get("retry_stage") in ANALYSIS_STAGES and job.get("chat_error") and
                     not checkpoints(jid).file("chat_analysis/result.json").is_file()):
                 fields = {"chat_error": job["chat_error"]}
-                ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
-            elif job["request"].get("ai_analysis", False):
-                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-replay") as worker:
-                    chat_task = worker.submit(analyze_chat, jid, generation, job, info)
-                    ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
-                    chat, fields = chat_task.result()
             else:
-                chat, fields = analyze_chat(jid, generation, job, info)
-                if fields["chat_error"] or job.get("retry_stage") in ANALYSIS_STAGES:
-                    ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
-                else:
-                    for name in ANALYSIS_STAGES:
-                        set_stage(jid, generation, name, "skipped")
+                collect_chat = start_chat(jid, generation, job, info)
+            ai, ai_error = analyze_ai(jid, generation, job, duration, podcast, upload)
+            if collect_chat:
+                chat, fields = collect_chat(ai_error is not None)
             if ai_error and (podcast or upload or (fields.get("chat_error") and not chat)):
                 if not job.get("analysis_complete"):
                     raise ai_error
