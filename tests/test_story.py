@@ -106,6 +106,15 @@ def test_story_arc_builds_up_before_the_event_and_ends_after_the_reaction():
     assert not any(w.start + 0.01 < t < w.end - 0.01 for w in words for t in (nonstop["start"], nonstop["end"]))
 
 
+def test_story_limit_stops_at_the_completed_sentence_before_continuous_speech():
+    words = speech([(0, 34)])
+    words += [word(34, 'Finished.', .3), word(34.32, 'The', .3),
+              word(34.66, 'next', .3), word(35, 'sentence', .48)]
+    arc = story_arc(np.full(400, -24.0), words, 40, peak=20)
+    assert arc["event"] == 20
+    assert arc["end"] == 34.3
+
+
 def test_intro_length_fits_text_and_voice():
     assert 2.5 <= intro_length("Short one") <= 3.3
     assert intro_length("x" * 60) == 3.3

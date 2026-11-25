@@ -321,11 +321,12 @@ def story_arc(levels, words, duration, peak=None) -> dict:
         end = limit * STEP
         complete = [w.end for w in words if end - 2 <= w.end <= end and w.word.rstrip().endswith((".", "!", "?", "…"))]
         if complete and complete[-1] >= event + 3.5:
-            end = min(end, complete[-1] + .15)
-        inside = next((i for i, w in enumerate(words) if w.start < end < w.end), None)
-        if inside is not None:
-            after = words[inside + 1].start if inside + 1 < len(words) else duration
-            end = min(after, words[inside].end + 0.25)
+            end = complete[-1]
+        else:
+            inside = next((i for i, w in enumerate(words) if w.start < end < w.end), None)
+            if inside is not None:
+                after = words[inside + 1].start if inside + 1 < len(words) else duration
+                end = min(after, words[inside].end + 0.25)
     return {"start": round(start, 2), "event": round(event, 2), "end": round(min(duration, end), 2)}
 
 
