@@ -120,6 +120,20 @@ def test_render_score_snapshot_does_not_replace_editorial_score(app, client):
     assert compared["sample_size"] == 0 and compared["director"]["sample_size"] == 1
 
 
+def test_metrics_are_cleared_only_for_a_different_video_id(client):
+    original = {"views": 42, "average_percentage_viewed": 72,
+                "retention_graph": [{"position_percent": 0, "retained_percent": 100}]}
+    record = client.post(PATH, json=entry(metrics=original)).json()
+    path = PATH + "/" + record["id"]
+    assert client.patch(path, json={"publish_url": "https://youtu.be/AbCdEf12345?si=test"}).json()["metrics"] == original
+    response = client.patch(path, json={"publish_url": "https://www.youtube.com/shorts/AbCdEf12346", "metrics": original})
+    assert response.status_code == 200
+    assert response.json()["metrics"] == {}
+    assert client.get(path).json()["metrics"] == {}
+    assert client.get(PATH + "/comparison").json()["sample_size"] == 0
+    assert client.patch(path, json={"metrics": {"views": 9}}).json()["metrics"] == {"views": 9}
+
+
 def test_csv_and_json_import(client):
     # A YouTube Studio per-video export has no Clipper IDs and may include a Total row.
     content = ('\ufeffContent,Video title,Video publish time, VIEWS ,Engaged views,'

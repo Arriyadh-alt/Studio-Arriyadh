@@ -382,7 +382,9 @@ select the corresponding rendered highlight; for several, add `Job ID` and
 Metrics use seconds for `average_view_duration`, percentages (not fractions) for
 percentage fields, and `{"position_percent": 50, "retained_percent": 72}` points
 for `retention_graph`. Omit unavailable values. Import updates only supplied
-fields; it does not overwrite the original score snapshot.
+fields; it does not overwrite the original score snapshot. Changing a saved URL
+to a different YouTube video clears its metrics. Save the link first, then enter
+the new video's metrics separately. Changing only the URL format keeps the data.
 
 The local API is `/api/feedback` (GET/POST), `/api/feedback/{id}` (GET/PATCH/DELETE),
 `/api/feedback/clips` (rendered highlights and integrity), `/api/feedback/import`

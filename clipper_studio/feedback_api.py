@@ -84,8 +84,12 @@ def clip_snapshot(job, clip):
 def update_record(record, update):
     fields = update.model_dump(mode="json", exclude_unset=True, exclude={"job_id", "clip_id", "confirmed_published"})
     metrics = fields.pop("metrics", {})
+    changed_video = "publish_url" in record and fields.get("publish_url", record["publish_url"]) != record["publish_url"]
     record.update(fields)
-    record["metrics"].update(metrics)
+    if changed_video:
+        record["metrics"] = {}
+    else:
+        record["metrics"].update(metrics)
 
 
 ScalarMetric = Literal["views", "engaged_views", "viewed_percent", "swiped_away_percent",

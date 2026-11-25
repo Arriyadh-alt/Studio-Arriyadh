@@ -1,8 +1,12 @@
+import { isDifferentPublishedVideo } from './feedback_url.js';
+
 const page = document.querySelector('#performance');
 const form = page.querySelector('#publication-form');
 const importForm = page.querySelector('#performance-import');
 const chooser = form.elements.clip;
 const metricSelect = page.querySelector('#performance-compare');
+const metricsPanel = page.querySelector('#publication-metrics');
+const metricsResetNotice = page.querySelector('#publication-metrics-reset');
 const status = page.querySelector('#performance-status');
 const endpoint = './api/feedback';
 const metricLabels = {
@@ -122,6 +126,15 @@ function showSelection() {
   }
 }
 
+function metricsBelongToCurrentVideo() {
+  return !isDifferentPublishedVideo(editing?.publish_url, form.elements.publish_url.value);
+}
+
+function syncMetricsVisibility() {
+  metricsPanel.hidden = !metricsBelongToCurrentVideo();
+  metricsResetNotice.hidden = !metricsPanel.hidden;
+}
+
 function recordForm(record = null, selected = '') {
   editing = record;
   form.reset();
@@ -137,12 +150,13 @@ function recordForm(record = null, selected = '') {
   form.querySelector('button[type="submit"]').textContent = record ? 'Save changes' : 'Mark as published';
   page.querySelector('#cancel-publication').hidden = !record;
   page.querySelector('#publication-heading').textContent = record ? 'Edit published highlight' : 'Record a published highlight';
-  page.querySelector('#publication-metrics').open = !!record;
+  metricsPanel.open = !!record;
   if (record) {
     for (const key of textFields) form.elements[key].value = record[key] ?? '';
     for (const name of Object.keys(metricLabels)) form.elements[name].value = record.metrics[name] ?? '';
     retention.value = record.metrics.retention_graph ? JSON.stringify(record.metrics.retention_graph) : '';
   }
+  syncMetricsVisibility();
   showSelection();
 }
 
@@ -320,6 +334,7 @@ async function route() {
 }
 
 chooser.addEventListener('change', showSelection);
+form.elements.publish_url.addEventListener('input', syncMetricsVisibility);
 metricSelect.addEventListener('change', () => action(null, drawComparison));
 page.querySelector('#cancel-publication').addEventListener('click', () => recordForm());
 form.addEventListener('submit', event => {
@@ -332,14 +347,16 @@ form.addEventListener('submit', event => {
       const value = form.elements[key].value.trim();
       if (value || editing) data[key] = value || null;
     }
-    data.metrics = {};
-    for (const key of Object.keys(metricLabels)) {
-      const input = form.elements[key];
-      if (input.value || editing) data.metrics[key] = input.value ? input.valueAsNumber : null;
+    if (metricsBelongToCurrentVideo()) {
+      data.metrics = {};
+      for (const key of Object.keys(metricLabels)) {
+        const input = form.elements[key];
+        if (input.value || editing) data.metrics[key] = input.value ? input.valueAsNumber : null;
+      }
+      try { if (retention.value.trim()) data.metrics.retention_graph = JSON.parse(retention.value); }
+      catch { throw new Error('Retention graph must be valid JSON; see the example in the field.'); }
+      if (editing && !retention.value.trim()) data.metrics.retention_graph = null;
     }
-    try { if (retention.value.trim()) data.metrics.retention_graph = JSON.parse(retention.value); }
-    catch { throw new Error('Retention graph must be valid JSON; see the example in the field.'); }
-    if (editing && !retention.value.trim()) data.metrics.retention_graph = null;
     if (editing) await request('/' + editing.id, 'PATCH', data);
     else await request('', 'POST', {...data, job_id:clip.job_id, clip_id:clip.clip_id, confirmed_published:form.elements.confirmed_published.checked});
     recordForm();
