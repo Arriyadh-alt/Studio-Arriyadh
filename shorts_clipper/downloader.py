@@ -16,7 +16,7 @@ class _AnalysisSizeError(YouTubeAccessError):
 
 def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = None,
                             proxy: str | None = None, should_continue=None, *,
-                            prior_audio: Path | None = None) -> tuple[Path, Path | None]:
+                            prior_audio: Path | None = None, on_audio=None) -> tuple[Path, Path | None]:
     """Download full-length compact audio and optional low-resolution video."""
     max_bytes = int(os.environ.get("CLIPPER_ANALYSIS_MAX_BYTES", "1500000000"))
     max_hours = float(os.environ.get("CLIPPER_ANALYSIS_MAX_HOURS", "12"))
@@ -33,6 +33,8 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
                                  "Use an http:// proxy so ffmpeg cannot bypass the proxy setting.")
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = [prior_audio] if prior_audio else []
+    if prior_audio and on_audio is not None:
+        on_audio(prior_audio)
     with cookie_options(cookies, proxy=proxy) as authentication:
         for kind, selector in (("audio", "ba[abr<=80]/ba/wa"),
                                ("video", "bv[height<=160]/wv")):
@@ -55,6 +57,8 @@ def download_analysis_media(url: str, output_dir: Path, cookies: Path | None = N
                 if not files or not files[0].exists():
                     raise FileNotFoundError("Download finished but the media file was not found")
                 paths.append(files[0])
+                if kind == "audio" and on_audio is not None:
+                    on_audio(files[0])
             except (_AnalysisSizeError, DownloadError, FileNotFoundError) as error:
                 if kind == "audio" and isinstance(error, DownloadError):
                     message = blocking_message(error, cookies, proxy)

@@ -18,6 +18,7 @@ def run_download(operation, args, kwargs=None, *, timeout, check=lambda: None):
     deadline = time.monotonic() + timeout
     with TemporaryDirectory(prefix="clipper-download-") as directory:
         request, result = Path(directory) / "request.json", Path(directory) / "result.json"
+        completed_audio = Path(directory) / "audio.json"
         request.write_text(json.dumps([operation, args, kwargs or {}], default=os.fspath))
         with subprocess.Popen([sys.executable, "-m", "clipper_studio.download_worker", directory],
                               start_new_session=True,
@@ -26,6 +27,11 @@ def run_download(operation, args, kwargs=None, *, timeout, check=lambda: None):
                 while process.poll() is None:
                     check()
                     if time.monotonic() >= deadline:
+                        if operation == "media" and completed_audio.is_file():
+                            audio = json.loads(completed_audio.read_text())
+                            if Path(audio).is_file():
+                                os.killpg(process.pid, signal.SIGKILL)
+                                return [audio, None]
                         raise TimeoutError("YouTube download exceeded its time limit.")
                     time.sleep(.2)
             except BaseException:
@@ -61,7 +67,13 @@ def main(directory):
         elif operation == "media":
             if kwargs.get("prior_audio"):
                 kwargs["prior_audio"] = Path(kwargs["prior_audio"])
-            value = download_analysis_media(args[0], Path(args[1]), **kwargs)
+
+            def on_audio(path):
+                temporary = directory / "audio.tmp"
+                temporary.write_text(json.dumps(str(path)))
+                temporary.replace(directory / "audio.json")
+
+            value = download_analysis_media(args[0], Path(args[1]), on_audio=on_audio, **kwargs)
         else:
             raise ValueError("Unknown download operation.")
         reply = {"value": value}

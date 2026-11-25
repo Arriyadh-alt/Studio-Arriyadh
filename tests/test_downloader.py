@@ -32,6 +32,35 @@ def test_download_worker_kills_and_reaps_a_stalled_process(monkeypatch):
     assert processes[0].returncode == -signal.SIGKILL
 
 
+def test_download_worker_returns_completed_audio_when_video_times_out(monkeypatch, tmp_path):
+    spawn = subprocess.Popen
+    code = """
+import sys
+import time
+from pathlib import Path
+from clipper_studio.download_worker import main
+from shorts_clipper import downloader
+
+def download(url, output_dir, **kwargs):
+    audio = output_dir / "audio.m4a"
+    audio.write_bytes(b"completed audio")
+    if "on_audio" in kwargs:
+        kwargs["on_audio"](audio)
+    time.sleep(60)
+
+downloader.download_analysis_media = download
+main(Path(sys.argv[1]))
+"""
+
+    def stalled(command, **kwargs):
+        return spawn([sys.executable, "-c", code, command[-1]], **kwargs)
+
+    monkeypatch.setattr("clipper_studio.download_worker.subprocess.Popen", stalled)
+    audio, video = run_download("media", ["https://youtu.be/video", tmp_path], timeout=2)
+    assert Path(audio).read_bytes() == b"completed audio"
+    assert video is None
+
+
 def test_fractional_windows_do_not_reuse_another_sections_file(monkeypatch, tmp_path):
     youtube_dl = yt_dlp.YoutubeDL
     downloads = []
