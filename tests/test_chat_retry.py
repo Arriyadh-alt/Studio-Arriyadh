@@ -1,8 +1,11 @@
+import time
+
 from fastapi.testclient import TestClient
 
 from clipper_studio.api import create_app
-from clipper_studio.chat import DownloadCancelled, _download_replay, fetch_metadata
-from test_api import media
+from clipper_studio.chat import CHAT_TIMEOUT_ERROR, DownloadCancelled, _download_replay, fetch_chat, fetch_metadata
+from clipper_studio.spikes import detect_spikes
+from test_api import media, saved_job
 from test_chat import REPLAY_URL, replay_line, stub_yt_dlp
 
 
@@ -48,3 +51,41 @@ def test_chat_retry_retains_more_complete_buckets(stub_yt_dlp, tmp_path, monkeyp
         job = app.state.store.get(jid)
         assert job["message_count"] == 5
         assert buckets.read_bytes() != previous_buckets
+
+
+def test_chat_retry_scores_partial_replay_after_teardown_grace(tmp_path, monkeypatch):
+    watchdog = None
+
+    def fetch(url, directory, info, budget):
+        nonlocal watchdog
+        watchdog = budget
+        return fetch_chat(url, directory, info, budget)
+
+    def download(operation, args, kwargs=None, *, timeout, check):
+        if operation == "metadata":
+            return {"duration": 600, "was_live": True, "subtitles": {"live_chat": [{}]}}
+        assert operation == "replay"
+        (args[1] / "replay.live_chat.json.part").write_bytes(
+            b"".join(replay_line(i, 100 + i, "Viewer") for i in range(5)))
+        watchdog.stopped = True
+        check()
+
+    def score(*args, **kwargs):
+        time.sleep(.3)
+        return detect_spikes(*args, **kwargs)
+
+    monkeypatch.setattr("clipper_studio.api.fetch_chat", fetch)
+    monkeypatch.setattr("clipper_studio.chat.run_download", download)
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", score)
+    monkeypatch.setattr("clipper_studio.api.CHAT_FINISH_GRACE", .02)
+    app = create_app(tmp_path)
+    jid = "chatwatchdogretry"
+    app.state.store.save(dict(saved_job(jid), moments=[]))
+    with TestClient(app) as client:
+        assert client.post(f"/api/jobs/{jid}/chat/retry").status_code == 202
+        app.state.pending.join()
+        job = app.state.store.get(jid)
+    assert job["stages"]["chat_analysis"]["status"] == "partially_completed"
+    assert job["chat_error"] == CHAT_TIMEOUT_ERROR
+    assert job["message_count"] == 5
+    assert (tmp_path / jid / "chat/buckets.sqlite").is_file()

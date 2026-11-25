@@ -8,6 +8,7 @@ import shutil
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 
 import yt_dlp
 from yt_dlp.utils import DownloadCancelled, DownloadError
@@ -44,6 +45,7 @@ class ChatWatchdog:
         self.deadline = self.started + self.limit
         self.offset = 0
         self.stopped = False
+        self.processing = Event()
 
     def advanced(self, offset):
         if offset > self.offset:
@@ -242,6 +244,7 @@ def _ingest_attempt(info, work, writer, should_continue):
         replay = path if path.is_file() else partial
         try:
             if watchdog:
+                watchdog.processing.set()
                 while True:
                     watchdog.check()
                     previous = position
@@ -275,6 +278,8 @@ def fetch_chat(url: str, directory: Path, info=None, should_continue=None):
             for attempt in range(1, 4):
                 try:
                     should_continue()
+                    if isinstance(should_continue, ChatWatchdog):
+                        should_continue.processing.clear()
                     with TemporaryDirectory(dir=staging, prefix="attempt-") as temporary:
                         _ingest_attempt(info, Path(temporary), writer, should_continue)
                     failure = None

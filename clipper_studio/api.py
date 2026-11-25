@@ -1058,6 +1058,7 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 directory.mkdir(exist_ok=True)
                 with tempfile.TemporaryDirectory(dir=directory, prefix="incoming-") as staging:
                     metadata, messages = fetch_chat(job["url"], Path(staging), info, budget)
+                    budget.processing.set()
                     count, lead = job["request"]["clips"], job["request"]["lead"]
                     spikes, activity = detect_spikes(messages, metadata["duration"], clips=count, lead=lead)
                     moments = [chat_moment(s) for s in sorted(spikes, key=lambda s: -s.get("score", 0))[:count]]
@@ -1091,15 +1092,18 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                 while True:
                     budget.check()
                     now = time.monotonic()
-                    if grace_end is None and budget.expired():
+                    processing = budget.processing.is_set()
+                    if not processing and grace_end is None and budget.expired():
                         budget.stopped = True
                         grace_end = now + CHAT_FINISH_GRACE
                     try:
-                        return future.result(timeout=.1 if grace_end is None else min(.1, max(0, grace_end - now)))
+                        return future.result(timeout=.1 if processing or grace_end is None else
+                                             min(.1, max(0, grace_end - now)))
                     except FutureTimeout:
                         if future.done():
                             raise
-                        if grace_end is not None and time.monotonic() >= grace_end:
+                        if (not budget.processing.is_set() and grace_end is not None
+                                and time.monotonic() >= grace_end):
                             if budget.stopped:
                                 raise ChatReplayError(CHAT_TIMEOUT_ERROR)
                             budget.stopped = True
