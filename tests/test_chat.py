@@ -81,6 +81,25 @@ def test_watchdog_bounds_slow_but_advancing_chat_and_has_a_hard_cap(monkeypatch)
     assert capped.expired()
 
 
+@pytest.mark.parametrize("finished", [True, False])
+def test_watchdog_drains_all_downloaded_fragments(tmp_path, monkeypatch, finished):
+    monkeypatch.setattr("clipper_studio.chat.REPLAY_POLL_BYTES", 1)
+    watchdog = ChatWatchdog(600, lambda: None, lambda _: None)
+
+    def replay(operation, args, *, timeout, check):
+        assert operation == "replay"
+        name = "replay.live_chat.json" + ("" if finished else ".part")
+        (args[1] / name).write_bytes(b"".join(replay_line(i, 60 + i, "Viewer") for i in range(5)))
+        watchdog.stopped = True
+        if not finished:
+            check()
+
+    monkeypatch.setattr("clipper_studio.chat.run_download", replay)
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, dict(REPLAY_INFO, duration=600), watchdog)
+    assert len(buckets) == 5
+    assert buckets.warning == (None if finished else CHAT_TIMEOUT_ERROR)
+
+
 @pytest.fixture
 def stub_yt_dlp(monkeypatch):
     class Downloader:

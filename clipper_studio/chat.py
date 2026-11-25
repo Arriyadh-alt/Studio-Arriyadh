@@ -243,10 +243,11 @@ def _ingest_attempt(info, work, writer, should_continue):
         try:
             if watchdog:
                 while True:
+                    watchdog.check()
                     previous = position
                     consume(replay, final=replay == path, max_bytes=REPLAY_POLL_BYTES)
                     watchdog.advanced(offset)
-                    if position == previous or watchdog.expired():
+                    if position == previous:
                         break
             else:
                 consume(replay, final=replay == path)
