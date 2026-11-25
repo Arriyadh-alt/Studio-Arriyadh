@@ -11,7 +11,7 @@ DEFAULT_PENALTIES = dict(missing_trigger=9, misleading_hook=12, incomplete_conve
                          static_footage=8, repetitive=10, poor_framing=8, abrupt_ending=8,
                          low_value_scene=12)
 SCORE_FIELDS = ("scene", "trigger", "reaction", "needs_manual_review", "hooks", "selected_hook",
-                "hook_anchors", "score_breakdown", "score_penalties", "score_explanation", "score_tier")
+                "hook_anchors", "hook_quote_spans", "score_breakdown", "score_penalties", "score_explanation", "score_tier")
 
 
 def score_tier(score):

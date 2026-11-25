@@ -167,10 +167,10 @@ def hook_options(words, reaction, start):
     # Quote setup, not the conclusion. In the absence of speech, describe only measured evidence.
     trigger = reaction["trigger_time"]
     peak = reaction["peak_time"]
-    setup = [(at, text) for at, end, text in phrases(words) if end <= peak and _usable(text)]
+    setup = [(at, end, text) for at, end, text in phrases(words) if end <= peak and _usable(text)]
     quotes = {}
-    for at, text in setup:
-        quotes.setdefault(" ".join(text.split()[:9]).rstrip(".,!? ")[:46], at)
+    for at, end, text in setup:
+        quotes.setdefault(" ".join(text.split()[:9]).rstrip(".,!? ")[:46], (at, end))
         if len(quotes) == 2:
             break
     transcript = _text(words)
@@ -180,20 +180,22 @@ def hook_options(words, reaction, start):
     placement = _clock(start)
     notice = reaction["notice_time"]
     if indonesian:
-        options = {f'Simak: “{quote}”': at for quote, at in quotes.items()}
+        quoted = {f'Simak: “{quote}”': span for quote, span in quotes.items()}
+        options = {hook: span[0] for hook, span in quoted.items()}
         if reaction["verified"] and "scene change" in reaction["evidence"]:
             options[f"Perhatikan perubahan layar di {anchor}"] = event
         options.update({f"Reaksi mulai di {_clock(notice)}": notice,
                         f"Dari {placement} ke reaksi di {_clock(peak)}": peak,
                         f"Dengarkan perubahan suara di {_clock(peak)}": peak})
     else:
-        options = {f'Before it happens: “{quote[:43]}”': at for quote, at in quotes.items()}
+        quoted = {f'Before it happens: “{quote[:43]}”': span for quote, span in quotes.items()}
+        options = {hook: span[0] for hook, span in quoted.items()}
         if reaction["verified"] and any("change" in cue for cue in reaction["evidence"]):
             options[f"Watch the screen change at {anchor}"] = event
         options.update({f"The reaction starts at {_clock(notice)}": notice,
                         f"From {placement} to the reaction at {_clock(peak)}": peak,
                         f"Listen for the change in sound at {_clock(peak)}": peak})
-    return options
+    return options, quoted
 
 
 def component_scores(scene, reaction, words, excitement, start, end, laughter, hooks):

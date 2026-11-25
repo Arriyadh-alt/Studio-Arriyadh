@@ -659,13 +659,17 @@ def create_app(data_dir=None, analysis_workers=None, render_workers=None, metada
                                                                                          max_seconds=COMMENTARY_SECONDS))
                             directed = cut_source(source, work / "directed.mp4", plan)
                         else:
+                            quote_span = spec.get("hook_quote_spans", {}).get(editorial_hook) if director.hook else None
+                            if quote_span:
+                                quote_start, quote_end = (t - spec["start"] for t in quote_span)
+                                quote_span = (quote_start, quote_end) if 0 <= quote_start < quote_end <= duration else None
                             plan = plan_edit(levels if levels is not None else loudness(source, duration), captions,
                                              duration, director, peak,
                                              spec.get("score"), spec.get("thumbnail_text") or hook,
                                              story_context(stream_metadata(jid, generation, job), spec,
                                                            caption_language or getattr(captions, "language", None), work,
                                                            store.root / "voices"),
-                                             trigger=trigger_offset)
+                                             trigger=trigger_offset, quote_span=quote_span)
                             if director.hook and editorial_hook and plan.hook is None:
                                 plan.hook = {"style": "source", "text": editorial_hook,
                                              "duration": min(3., plan.duration)}

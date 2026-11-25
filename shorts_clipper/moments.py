@@ -271,7 +271,7 @@ def analyze_signals(audio, visual, duration, clips, lead, transcribe_window, pro
         if conclusion is None:
             finish_reaction(reaction, audio_signal, selected, end)
         scene = classify_scene(levels, visual, selected, start, end, peak, laughter[peak])
-        options = hook_options(selected, reaction, start)
+        options, quoted = hook_options(selected, reaction, start)
         components, flags, explanation = component_scores(scene, reaction, selected, audio_signal,
                                                            start, end, laughter[peak], options)
         moment = {"start": start, "end": end, "peak": float(peak), "category": category,
@@ -282,6 +282,7 @@ def analyze_signals(audio, visual, duration, clips, lead, transcribe_window, pro
         if reaction["verified"]:
             moment["trigger"] = trigger
         moment["hook_anchors"] = options
+        moment["hook_quote_spans"] = quoted
         moments.append(moment)
     result = []
     for moment in sorted(moments, key=lambda m: m["score"], reverse=True):
@@ -295,6 +296,8 @@ def analyze_signals(audio, visual, duration, clips, lead, transcribe_window, pro
         moment["hooks"] = _refine(moment, options)[:3]
         used.update(hook.casefold() for hook in moment["hooks"])
         moment["hook_anchors"] = {hook: moment["hook_anchors"][hook] for hook in moment["hooks"]}
+        moment["hook_quote_spans"] = {h: span for h, span in moment["hook_quote_spans"].items()
+                                      if h in moment["hooks"]}
         moment["selected_hook"] = moment["hooks"][0]
         moment["title"] = moment["selected_hook"][:60]
     progress(1, "Analysis complete")

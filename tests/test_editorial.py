@@ -16,8 +16,9 @@ def word(start, text):
 
 
 def test_generated_hooks_fit_review_and_rerender_requests():
-    options = hook_options([word(1, "The entrance behind this massive underground door looks blocked.")],
-                           dict(trigger_time=2, peak_time=4, notice_time=3, verified=True, evidence=[]), 0)
+    options, quoted = hook_options([word(1, "The entrance behind this massive underground door looks blocked.")],
+                                   dict(trigger_time=2, peak_time=4, notice_time=3, verified=True, evidence=[]), 0)
+    assert list(quoted.values()) == [(1, 2)]
     for hook in options:
         assert MomentPatch(selected_hook=hook).selected_hook == DirectorSpec(hook_text=hook).hook_text
 
@@ -85,6 +86,7 @@ def test_hooks_are_grounded_deduplicated_and_start_covers_trigger(monkeypatch):
         assert all("ternyata" not in hook.lower() for hook in m["hooks"])
     assert len({hook for m in moments for hook in m["hooks"]}) == 6
     assert any("musuh" in hook for hook in moments[0]["hooks"])
+    assert list(moments[0]["hook_quote_spans"].values()) == [(119, 120)]
 
 
 def test_retry_can_reuse_transcript_checkpoints_from_shorter_windows(tmp_path, monkeypatch):
