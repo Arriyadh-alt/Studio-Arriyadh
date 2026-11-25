@@ -187,7 +187,7 @@ def hook_options(words, reaction, start):
                         f"Dari {placement} ke reaksi di {_clock(peak)}": peak,
                         f"Dengarkan perubahan suara di {_clock(peak)}": peak})
     else:
-        options = {f'Before the reaction: “{quote}”': at for quote, at in quotes.items()}
+        options = {f'Before it happens: “{quote[:43]}”': at for quote, at in quotes.items()}
         if reaction["verified"] and any("change" in cue for cue in reaction["evidence"]):
             options[f"Watch the screen change at {anchor}"] = event
         options.update({f"The reaction starts at {_clock(notice)}": notice,

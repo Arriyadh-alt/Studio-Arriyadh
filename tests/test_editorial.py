@@ -5,13 +5,21 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from shorts_clipper.editorial import backtrack_reaction, classify_scene
+from clipper_studio.api import DirectorSpec, MomentPatch
+from shorts_clipper.editorial import backtrack_reaction, classify_scene, hook_options
 from shorts_clipper.moments import analyze_media, analyze_signals
 from shorts_clipper.scoring import DEFAULT_WEIGHTS, editorial_score, score_tier, scoring_config
 
 
 def word(start, text):
     return dict(start=start, end=start + 1, word=text)
+
+
+def test_generated_hooks_fit_review_and_rerender_requests():
+    options = hook_options([word(1, "The entrance behind this massive underground door looks blocked.")],
+                           dict(trigger_time=2, peak_time=4, notice_time=3, verified=True, evidence=[]), 0)
+    for hook in options:
+        assert MomentPatch(selected_hook=hook).selected_hook == DirectorSpec(hook_text=hook).hook_text
 
 
 def test_map_and_inventory_are_not_justified_by_loud_audio():
