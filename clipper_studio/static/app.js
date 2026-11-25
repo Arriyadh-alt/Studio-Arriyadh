@@ -257,6 +257,7 @@ function clipHtml(clip,index) {
     ${PodcastControls.isPodcastClip(clip)?PodcastControls.summary(clip):`<div class="samples">${clip.message_sample.length ? clip.message_sample.map(m=>`<span class="sample">${escapeHtml(m)}</span>`).join('') : 'No sample messages'}</div>`}
     ${clip.error ? `<p class="error">${escapeHtml(clip.error)}${clip.status==='failed'?'<br>Adjust the settings below or try Re-render again.':''}</p>` : ''}
     ${authenticityHtml(clip.authenticity)}
+    ${clip.status==='ready' ? `<a class="button performance-clip" href="#performance/${current.id}/${clip.id}">Review integrity &amp; record performance</a>` : ''}
     ${clip.status==='ready' ? `<form class="thumbnail-editor"><label>Thumbnail text<input name="text" maxlength="64" value="${escapeHtml(clip.thumbnail_text)}" placeholder="${escapeHtml(clip.thumbnail_hook || 'Automatic hook')}" autocomplete="off"></label><p class="hint">Leave blank to use the automatic hook.</p><div class="actions"><button type="submit">Regenerate ↻</button><a class="button thumbnail-download">Download JPG ↓</a></div><p class="hint thumbnail-status" role="status" hidden></p></form>` : ''}
     <form class="review"><div class="time-grid"><div>${timeField('start')}</div><div>${timeField('end')}</div></div>
       <div class="render-options"><label>Layout<select data-field="mode"><option value="crop" ${draft.mode==='crop'?'selected':''}>Center crop</option><option value="blur" ${draft.mode==='blur'?'selected':''}>Blurred background</option></select></label><label class="check"><input type="checkbox" data-field="captions" ${draft.captions?'checked':''}> Captions</label></div>
@@ -405,7 +406,9 @@ function route() {
   poll?.abort(); poll=null;
   notice(''); notice('', '#poll-notice'); current=null; drafts.clear();
   const jobPage = /^#jobs\//.test(location.hash);
-  $('#home').hidden=jobPage; $('#job-view').hidden=!jobPage;
+  const performancePage = /^#performance(?:\/[a-zA-Z0-9]+\/[a-zA-Z0-9]+)?$/.test(location.hash);
+  $('#home').hidden=jobPage || performancePage; $('#job-view').hidden=!jobPage;
+  $('#performance').hidden=!performancePage;
   $('#clips').innerHTML=''; $('#job-heading').innerHTML='';
   globalThis.MomentReview?.reset();
   $('#analysis-detail').hidden=true;
@@ -417,7 +420,8 @@ function route() {
   chartKey=undefined; $('#chart').innerHTML='';
   $('#download-kept').hidden=true; $('#delete-unkept').hidden=true; $('#keep-hint').hidden=true;
   globalThis.scrollTo(0,0);
-  clearInterval(timer); refresh(); timer=setInterval(refresh,2000);
+  clearInterval(timer);
+  if (!performancePage) { refresh(); timer=setInterval(refresh,2000); }
 }
 $('#lead').addEventListener('input',event=>$('#lead-value').textContent=`${event.target.value} seconds`);
 $('#refresh-jobs').addEventListener('click',()=>refresh());

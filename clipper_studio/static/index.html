@@ -16,15 +16,17 @@
   <link rel="stylesheet" href="./moments.css">
   <link rel="stylesheet" href="./podcast.css">
   <link rel="stylesheet" href="./branding.css">
+  <link rel="stylesheet" href="./feedback.css">
   <script src="./captions.js" defer></script>
   <script src="./tracking.js" defer></script>
   <script src="./podcast.js" defer></script>
   <script src="./app.js" defer></script>
   <script src="./moments.js" defer></script>
   <script src="./branding.js" defer></script>
+  <script src="./feedback.js" type="module"></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="#"><span class="brand-icon">✂</span> Clipper Studio</a><span class="tag">From stream to standout</span></header>
+  <header class="topbar"><a class="brand" href="#"><span class="brand-icon">✂</span> Clipper Studio</a><nav class="workspace-nav" aria-label="Workspace"><span class="tag">From stream to standout</span><a class="button" id="performance-link" href="#performance">Performance</a></nav></header>
   <main>
     <div id="notice" role="alert" hidden></div>
     <p id="poll-notice" class="error" role="status" hidden></p>
@@ -112,6 +114,55 @@
       <div class="section-heading clips-heading"><div><span class="eyebrow">Made for the moment</span><h2 id="clips-title">Your highlights</h2></div><div class="heading-actions"><a id="download-kept" class="button" hidden>Download kept clips ↓</a><button id="delete-unkept" class="quiet" hidden>Delete unkept</button></div></div>
       <p id="keep-hint" class="hint" hidden>Star ★ Keep on your best clips to download them together</p>
       <div id="clips" class="clips"></div>
+    </section>
+    <section id="performance" aria-labelledby="performance-title" hidden>
+      <a class="back" href="#">← All streams</a>
+      <span class="eyebrow">Optional · YouTube Shorts</span>
+      <h1 id="performance-title">Performance</h1>
+      <p class="hint">Compare actual YouTube Studio metrics with saved AI editorial estimates. Missing metrics stay blank; neither scores nor trends guarantee views.</p>
+      <p id="performance-status" role="status"></p>
+      <div class="performance-grid">
+        <form id="publication-form" class="panel performance-panel">
+          <h2 id="publication-heading">Record a published highlight</h2>
+          <p class="hint">Publish outside Clipper Studio. This form records a link and metrics only; it never uploads or publishes.</p>
+          <label>Rendered highlight<select name="clip" required></select></label>
+          <div id="publication-integrity"></div>
+          <div class="performance-fields">
+            <label>Published YouTube URL<input name="publish_url" type="url" required placeholder="https://www.youtube.com/shorts/…"></label>
+            <label>Publication date<input name="publish_date" type="date"></label>
+            <label>Published title<input name="title" maxlength="200" placeholder="Defaults to the clip title"></label>
+            <label>Hook used<input name="hook" maxlength="200"></label>
+            <label>Hook style<select name="hook_style"><option value="">Not recorded</option><option>question</option><option>curiosity gap</option><option>direct statement</option><option>source quote</option><option>commentary</option><option>no hook</option><option>other</option></select></label>
+          </div>
+          <details id="publication-metrics"><summary>Enter YouTube metrics <span>All optional</span></summary><fieldset id="performance-metrics" class="performance-fields" aria-label="YouTube metrics"></fieldset></details>
+          <p id="publication-metrics-reset" class="hint" role="status" hidden>A different video link clears the existing metrics when saved. Add the new video's metrics after saving.</p>
+          <label class="check" id="confirm-publication-label"><input type="checkbox" name="confirmed_published" required> I already published this video outside Studio.</label>
+          <div class="performance-actions"><button class="primary" type="submit">Mark as published</button><button type="button" class="quiet" id="cancel-publication" hidden>Cancel edit</button></div>
+        </form>
+        <div>
+          <form id="performance-import" class="panel performance-panel">
+            <h2>Import analytics</h2>
+            <p class="hint">Use a per-video YouTube Studio CSV (not a daily totals or chart export) or JSON. Match existing records by published YouTube URL or video ID. To link one new CSV row, select its rendered highlight in the form.</p>
+            <details><summary>JSON format</summary><p class="hint">Include <code>job_id</code>, <code>clip_id</code>, <code>publish_url</code> and an optional <code>metrics</code> object; use one object or an array. CSV can also include Job ID and Clip ID columns. IDs appear after selecting a rendered highlight.</p><pre>{"job_id":"job123","clip_id":"clip456",
+ "publish_url":"https://youtu.be/AbCdEf12345",
+ "metrics":{"views":120,"average_percentage_viewed":73}}</pre></details>
+            <label>Performance export<input type="file" name="file" accept=".csv,.json,text/csv,application/json" required></label>
+            <label class="check"><input type="checkbox" name="confirmed_published" required> These videos were already published outside Studio.</label>
+            <button type="submit">Import records</button>
+          </form>
+          <section class="panel performance-panel" aria-labelledby="calibration-heading">
+            <h2 id="calibration-heading">Recommendation calibration</h2>
+            <p class="hint">Comparable average percentage viewed measurements can slightly adjust the scoring weights for future recommendations. Use similar reporting windows and audiences when comparing clips. Group trends are suggestions for future edits, not proof of causation.</p>
+            <div id="performance-calibration"></div>
+          </section>
+        </div>
+      </div>
+      <section class="panel performance-panel" aria-labelledby="comparison-heading">
+        <h2 id="comparison-heading">Editorial score vs. measured performance</h2>
+        <label>Compare with<select id="performance-compare"></select></label>
+        <div id="performance-comparison"></div>
+        <div id="publication-records"></div>
+      </section>
     </section>
   </main>
   <footer><span>Clipper Studio · Let the chat pick.</span><a href="https://app.devin.ai/sessions/dae3999fdb914b70885df4c30adcf656" target="_blank" rel="noopener">Request changes ↗</a></footer>
