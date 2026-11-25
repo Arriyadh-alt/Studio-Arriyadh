@@ -41,7 +41,7 @@ def normalized_message(text):
 
 
 def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_seconds=180,
-                  min_gap=60, tail=20, *, chat_delay=23):
+                  min_gap=60, tail=20, *, chat_delay=23, check=lambda: None):
     """Estimate moments from peak lag or rise onset, reaching back at most 30 seconds."""
     if not math.isfinite(duration) or duration <= 0 or not 15 <= lead <= 20 or not 1 <= clips <= 50:
         raise ValueError("Positive duration, 1-50 clips and lead within 15-20 seconds are required")
@@ -49,20 +49,23 @@ def detect_spikes(messages, duration, clips=8, lead=18, bin_seconds=5, baseline_
         raise ValueError("Invalid detector configuration")
     if not math.isfinite(chat_delay) or chat_delay < 0:
         raise ValueError("Chat delay must be finite and nonnegative")
+    check()
     if isinstance(messages, ChatBuckets):
         if bin_seconds != BIN_SECONDS or duration != messages.duration:
             raise ValueError("Replay buckets must match the analysis time base")
         with messages.reader() as (group, count):
-            return _score(group, count, duration, clips, lead, bin_seconds, baseline_seconds, min_gap, tail, chat_delay)
+            return _score(group, count, duration, clips, lead, bin_seconds, baseline_seconds, min_gap, tail, chat_delay,
+                          check)
     bins = [[] for _ in range(math.ceil(duration / bin_seconds))]
     for message in messages:
+        check()
         if 0 <= message.offset_seconds < duration:
             bins[int(message.offset_seconds // bin_seconds)].append(message)
     return _score(bins.__getitem__, lambda i: len(bins[i]), duration, clips, lead, bin_seconds,
-                  baseline_seconds, min_gap, tail, chat_delay)
+                  baseline_seconds, min_gap, tail, chat_delay, check)
 
 
-def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_seconds, min_gap, tail, chat_delay):
+def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_seconds, min_gap, tail, chat_delay, check):
     length = math.ceil(duration / bin_seconds)
     radius = max(1, round(5 / bin_seconds))
     group = lru_cache(maxsize=3)(read_group)
@@ -75,6 +78,7 @@ def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_secon
     def authors_by_message(i):
         authors = {}
         for message, text in zip(group(i), normalized(i)):
+            check()
             if text:
                 authors.setdefault(text, set()).add(message.author.strip().casefold())
         return authors
@@ -107,6 +111,7 @@ def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_secon
 
     signal, totals, intensities = [], [], []
     for i in range(length):
+        check()
         reacting, active, _, strength = reactions(i)
         signal.append(strength)
         totals.append(len(active))
@@ -115,6 +120,7 @@ def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_secon
     def smooth_values(values):
         smoothed = []
         for i in range(length):
+            check()
             neighbors = range(max(0, i - radius), min(length, i + radius + 1))
             weights = [(j, radius + 1 - abs(j - i)) for j in neighbors]
             smoothed.append(sum(values[j] * w for j, w in weights) / sum(w for _, w in weights))
@@ -131,6 +137,7 @@ def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_secon
         global_mad = median(abs(value - global_median) for value in values)
         points = []
         for i, value in enumerate(values):
+            check()
             history = [values[j] for j in range(max(0, i - window), min(length, i + window + 1))
                        if abs(j - i) > exclusion]
             if len(history) >= max(8, window // 2):
@@ -148,6 +155,7 @@ def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_secon
     volume_stats = robust_series(volume)
     series = []
     for i, (baseline, z) in enumerate(reaction_stats):
+        check()
         reaction_score = .7 * z + .3 * min(z * 2, share_stats[i][1])
         score = reaction_score + .25 * volume_stats[i][1]
         series.append({"time": i * bin_seconds, "count": count(i), "baseline": baseline,
@@ -160,6 +168,7 @@ def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_secon
     minimum_peak_authors = 1 if minimum_reactors == 2 else 3
     candidates = []
     for i, point in enumerate(series):
+        check()
         if point['score'] < threshold:
             continue
         nearby = range(max(0, i - radius), min(length, i + radius + 1))
@@ -177,6 +186,7 @@ def _score(read_group, count, duration, clips, lead, bin_seconds, baseline_secon
             continue
         context_authors, farewells, giveaways = set(), set(), set()
         for j in range(max(0, i - exclusion), min(length, i + exclusion + 1)):
+            check()
             for m in group(j):
                 author = m.author.strip().casefold()
                 context_authors.add(author)

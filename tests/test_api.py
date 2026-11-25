@@ -398,12 +398,11 @@ def test_queued_job_survives_new_client_and_worker_continues(monkeypatch, tmp_pa
             second = client.post("/api/jobs", json={"ai_analysis":False, "review":False, "url":"https://m.youtube.com/watch?v=puMjBYns9L0"}).json()["id"]
             assert first != second
             refreshed = TestClient(app)
-            assert refreshed.get(f"/api/jobs/{first}").json()["status"] == "running"
-            queued = wait_job(refreshed, second, lambda job: job["metadata"] is not None and job["queue_position"] == 1)
-            assert queued["status"] == "queued"
-            assert queued["stage"] == "Queued (position 1)"
+            for jid in (first, second):
+                published = wait_job(refreshed, jid, lambda job: job["status"] == "completed")
+                assert published["chat_pending"] and published["queue_position"] is None
             recent = {job["id"]: job for job in refreshed.get("/api/jobs?summary=true").json()}
-            assert recent[second]["queue_position"] == 1
+            assert recent[second]["queue_position"] is None
             assert "clips" not in recent[second] and "activity" not in recent[second]
             assert calls == [REPLAY_URL]
         finally:

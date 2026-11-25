@@ -282,7 +282,7 @@ const stageStatusLabels = {
 };
 let stageMarkup, stageAction;
 function drawStages(job) {
-  const idle = !busy(job) && !job.chat_retrying;
+  const idle = !busy(job) && !job.chat_retrying && !job.chat_pending;
   const resume = idle && !job.analysis_complete && ['failed', 'cancelled'].includes(job.status);
   $('#analysis-stages').hidden = !job.stages;
   $('#resume-analysis').hidden = !resume;
@@ -324,12 +324,13 @@ function drawJob(job) {
   drawStages(job);
   const retry = !PodcastControls.isPodcast(job) && job.url && job.metadata &&
     (job.chat_error || job.status==='failed') && ['completed','completed_with_errors','failed'].includes(job.status);
-  $('#chat-status').hidden = !(retry || job.chat_retrying || job.chat_warning || job.chat_error);
+  $('#chat-status').hidden = !(retry || job.chat_retrying || job.chat_pending || job.chat_warning || job.chat_error);
   $('#chat-warning').hidden = !job.chat_warning;
   $('#chat-warning').textContent = job.chat_warning || '';
-  $('#chat-detail').hidden = !(job.chat_retrying || job.chat_error);
-  $('#chat-detail').textContent = job.chat_retrying ? 'Retrying chat analysis…' : job.chat_error || '';
-  $('#retry-chat').hidden = !retry || !!job.chat_retrying;
+  $('#chat-detail').hidden = !(job.chat_retrying || job.chat_pending || job.chat_error);
+  $('#chat-detail').textContent = job.chat_retrying ? 'Retrying chat analysis…' :
+    job.chat_pending ? 'Chat analysis is still running…' : job.chat_error || '';
+  $('#retry-chat').hidden = !retry || !!job.chat_retrying || !!job.chat_pending;
   globalThis.MomentReview?.draw(job);
   PodcastControls.drawRights(job);
   $('.activity-panel').hidden = PodcastControls.isPodcast(job) || !!job.upload;

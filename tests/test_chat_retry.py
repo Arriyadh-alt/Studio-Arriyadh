@@ -1,9 +1,11 @@
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clipper_studio.api import create_app
-from clipper_studio.chat import CHAT_TIMEOUT_ERROR, DownloadCancelled, _download_replay, fetch_chat, fetch_metadata
+from clipper_studio.chat import (CHAT_PROCESSING_ERROR, CHAT_TIMEOUT_ERROR, DownloadCancelled, _download_replay,
+                                 fetch_chat, fetch_metadata)
 from clipper_studio.spikes import detect_spikes
 from test_api import media, saved_job
 from test_chat import REPLAY_URL, replay_line, stub_yt_dlp
@@ -53,7 +55,8 @@ def test_chat_retry_retains_more_complete_buckets(stub_yt_dlp, tmp_path, monkeyp
         assert buckets.read_bytes() != previous_buckets
 
 
-def test_chat_retry_scores_partial_replay_after_teardown_grace(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scoring_times_out", [False, True])
+def test_chat_retry_scores_partial_replay_after_teardown_grace(tmp_path, monkeypatch, scoring_times_out):
     watchdog = None
 
     def fetch(url, directory, info, budget):
@@ -78,6 +81,8 @@ def test_chat_retry_scores_partial_replay_after_teardown_grace(tmp_path, monkeyp
     monkeypatch.setattr("clipper_studio.chat.run_download", download)
     monkeypatch.setattr("clipper_studio.api.detect_spikes", score)
     monkeypatch.setattr("clipper_studio.api.CHAT_FINISH_GRACE", .02)
+    if scoring_times_out:
+        monkeypatch.setattr("clipper_studio.chat.CHAT_PROCESSING_SECONDS", .05)
     app = create_app(tmp_path)
     jid = "chatwatchdogretry"
     app.state.store.save(dict(saved_job(jid), moments=[]))
@@ -86,6 +91,6 @@ def test_chat_retry_scores_partial_replay_after_teardown_grace(tmp_path, monkeyp
         app.state.pending.join()
         job = app.state.store.get(jid)
     assert job["stages"]["chat_analysis"]["status"] == "partially_completed"
-    assert job["chat_error"] == CHAT_TIMEOUT_ERROR
+    assert job["chat_error"] == (CHAT_PROCESSING_ERROR if scoring_times_out else CHAT_TIMEOUT_ERROR)
     assert job["message_count"] == 5
     assert (tmp_path / jid / "chat/buckets.sqlite").is_file()

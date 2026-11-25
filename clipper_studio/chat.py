@@ -30,6 +30,8 @@ REPLAY_POLL_BYTES = 1024 * 1024
 CHAT_STALL_SECONDS = 45
 CHAT_PROJECTION_SECONDS = 90
 CHAT_TIMEOUT_ERROR = "Chat replay did not finish within the analysis time budget."
+CHAT_PROCESSING_SECONDS = 30
+CHAT_PROCESSING_ERROR = "Chat replay processing reached its time limit. Partial results were kept."
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,23 @@ class ChatWatchdog:
         self.offset = 0
         self.stopped = False
         self.processing = Event()
+        self.processing_deadline = None
+
+    def begin_processing(self):
+        if self.processing_deadline is None:
+            self.processing_deadline = min(self.deadline, time.monotonic()) + CHAT_PROCESSING_SECONDS
+        self.processing.set()
+
+    def resume_download(self):
+        self.processing_deadline = None
+        self.processing.clear()
+
+    def processing_expired(self, *, draining=False):
+        deadline = self.processing_deadline
+        if deadline is None:
+            return False
+        reserve = CHAT_PROCESSING_SECONDS / 4 if draining else 0
+        return time.monotonic() >= deadline - reserve
 
     def advanced(self, offset):
         if offset > self.offset:
@@ -244,13 +263,17 @@ def _ingest_attempt(info, work, writer, should_continue):
         replay = path if path.is_file() else partial
         try:
             if watchdog:
-                watchdog.processing.set()
+                watchdog.begin_processing()
                 while True:
                     watchdog.check()
                     previous = position
                     consume(replay, final=replay == path, max_bytes=REPLAY_POLL_BYTES)
                     watchdog.advanced(offset)
                     if position == previous:
+                        break
+                    if watchdog.processing_expired(draining=True) and position < replay.stat().st_size:
+                        writer.buckets.warning = CHAT_PROCESSING_ERROR
+                        record_guard("chat_processing")
                         break
             else:
                 consume(replay, final=replay == path)
@@ -279,7 +302,7 @@ def fetch_chat(url: str, directory: Path, info=None, should_continue=None):
                 try:
                     should_continue()
                     if isinstance(should_continue, ChatWatchdog):
-                        should_continue.processing.clear()
+                        should_continue.resume_download()
                     with TemporaryDirectory(dir=staging, prefix="attempt-") as temporary:
                         _ingest_attempt(info, Path(temporary), writer, should_continue)
                     failure = None

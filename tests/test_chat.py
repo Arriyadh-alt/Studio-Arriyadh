@@ -9,7 +9,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.downloader.common import FileDownloader
 from yt_dlp.utils import DownloadError
 
-from clipper_studio.chat import (CHAT_TIMEOUT_ERROR, ChatReplayError, ChatWatchdog, Message,
+from clipper_studio.chat import (CHAT_PROCESSING_ERROR, CHAT_TIMEOUT_ERROR, ChatReplayError, ChatWatchdog, Message,
                                  fetch_chat, fetch_metadata, parse_chat)
 from clipper_studio.spikes import detect_spikes
 
@@ -98,6 +98,28 @@ def test_watchdog_drains_all_downloaded_fragments(tmp_path, monkeypatch, finishe
     _, buckets = fetch_chat(REPLAY_URL, tmp_path, dict(REPLAY_INFO, duration=600), watchdog)
     assert len(buckets) == 5
     assert buckets.warning == (None if finished else CHAT_TIMEOUT_ERROR)
+
+
+def test_expiring_drain_retains_ingested_buckets_as_partial(tmp_path, monkeypatch):
+    now = 0
+    monkeypatch.setattr("clipper_studio.chat.time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr("clipper_studio.chat.REPLAY_POLL_BYTES", 1)
+
+    def advance_clock(_):
+        nonlocal now
+        now = 23
+
+    watchdog = ChatWatchdog(600, lambda: None, advance_clock)
+
+    def replay(operation, args, *, timeout, check):
+        assert operation == "replay"
+        (args[1] / "replay.live_chat.json").write_bytes(
+            b"".join(replay_line(i, 60 + i, "Viewer") for i in range(5)))
+
+    monkeypatch.setattr("clipper_studio.chat.run_download", replay)
+    _, buckets = fetch_chat(REPLAY_URL, tmp_path, dict(REPLAY_INFO, duration=600), watchdog)
+    assert len(buckets) == 1
+    assert buckets.warning == CHAT_PROCESSING_ERROR
 
 
 @pytest.fixture

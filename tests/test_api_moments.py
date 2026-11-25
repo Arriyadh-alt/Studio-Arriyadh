@@ -143,6 +143,39 @@ def test_ai_starts_without_waiting_for_chat(monkeypatch, tmp_path, analysis):
         assert job["status"] == "completed" and job["chat_error"] == "Chat replay unavailable"
 
 
+def test_ai_publishes_and_renders_while_chat_is_scoring(monkeypatch, tmp_path, analysis, media):
+    scoring, release = threading.Event(), threading.Event()
+
+    def score(*args, **kwargs):
+        scoring.set()
+        assert release.wait(10)
+        return [proposal(4), {**proposal(4), "start": 300, "end": 340, "peak": 318}], []
+
+    def analyze(*args, **kwargs):
+        assert scoring.wait(5)
+        return [proposal()]
+
+    monkeypatch.setattr("clipper_studio.api.detect_spikes", score)
+    monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        jid = client.post("/api/jobs", json={"url": REPLAY_URL, "review": False, "clips": 2}).json()["id"]
+        try:
+            assert scoring.wait(5)
+            published = wait_job(client, jid, lambda job: job["analysis_complete"] and
+                                 any(clip["status"] == "ready" for clip in job["clips"]))
+            assert published["moments"][0]["sources"] == ["ai"]
+            assert published["stages"]["chat_analysis"]["status"] == "processing"
+        finally:
+            release.set()
+        app.state.pending.join()
+        finished = client.get(f"/api/jobs/{jid}").json()
+        assert finished["moments"][0] == published["moments"][0]
+        assert finished["clips"][0]["id"] == published["clips"][0]["id"]
+        assert finished["stages"]["chat_analysis"]["status"] == "completed"
+        assert any(moment["sources"] == ["chat"] for moment in finished["moments"])
+
+
 @pytest.mark.parametrize("ai_analysis", [False, True])
 def test_blocked_chat_leaves_analysis_worker_and_job_available(monkeypatch, tmp_path, analysis, ai_analysis):
     chat_entered, release_chat, allow_ai = threading.Event(), threading.Event(), threading.Event()
@@ -160,6 +193,7 @@ def test_blocked_chat_leaves_analysis_worker_and_job_available(monkeypatch, tmp_
     monkeypatch.setattr("clipper_studio.api.fetch_chat", chat)
     monkeypatch.setattr("clipper_studio.api.analyze_media", analyze)
     monkeypatch.setattr("clipper_studio.api.CHAT_FINISH_GRACE", .1)
+    monkeypatch.setattr("clipper_studio.chat.CHAT_STALL_SECONDS", .2)
     app = create_app(tmp_path, analysis_workers=1)
     with TestClient(app) as client:
         request = {"url": REPLAY_URL, "ai_analysis": ai_analysis, "review": True}
@@ -171,7 +205,7 @@ def test_blocked_chat_leaves_analysis_worker_and_job_available(monkeypatch, tmp_
             assert running["stages"]["chat_analysis"]["status"] == "processing"
             second = client.post("/api/jobs", json=request).json()["id"]
             allow_ai.set()
-            result = wait_job(client, first, lambda job: job["status"] == "completed")
+            result = wait_job(client, first, lambda job: job["status"] == "completed" and not job["chat_pending"])
             assert result["moments"][0]["sources"] == ["ai"]
             assert result["chat_warning"] == CHAT_FALLBACK_WARNING
             assert result["stages"]["chat_analysis"]["status"] == "failed"

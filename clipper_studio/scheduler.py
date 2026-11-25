@@ -19,6 +19,7 @@ class Scheduler:
         self.analysis = deque()
         self.analyzing = set()
         self.checks = deque()
+        self.chats = deque()
         self.priority = deque()
         self.renders = OrderedDict()
         self.outstanding = 0
@@ -46,6 +47,8 @@ class Scheduler:
             while not self.stopping:
                 if kind == "metadata" and self.checks:
                     return self.checks.popleft()
+                if kind == "chat" and self.chats:
+                    return self.chats.popleft()
                 if kind == "analysis" and self.analysis:
                     for index, item in enumerate(self.analysis):
                         if item[0] not in self.analyzing:
@@ -69,6 +72,8 @@ class Scheduler:
             try:
                 if kind == "metadata":
                     self.preflight(item[0], item[2])
+                elif kind == "chat":
+                    item()
                 elif kind == "analysis":
                     self.analyze(item[0], item[2])
                 else:
@@ -79,7 +84,8 @@ class Scheduler:
                 with self.condition:
                     if kind == "analysis":
                         self.analyzing.remove(item[0])
-                    self.outstanding -= 1
+                    if kind != "chat":
+                        self.outstanding -= 1
                     self.condition.notify_all()
 
     def positions(self):
@@ -114,12 +120,34 @@ class Scheduler:
 
     def start(self):
         for kind, count in (("metadata", self.metadata_workers if self.preflight else 0),
-                            ("analysis", self.analysis_workers), ("render", self.render_workers)):
+                            ("analysis", self.analysis_workers), ("chat", self.analysis_workers),
+                            ("render", self.render_workers)):
             for index in range(count):
                 thread = threading.Thread(target=self._worker, args=(kind,), daemon=True,
                                           name=f"{kind}-{index + 1}")
                 self.threads.append(thread)
                 thread.start()
+
+    def queue_chat(self, work):
+        with self.condition:
+            if not self.stopping:
+                self.chats.append(work)
+                self.condition.notify_all()
+
+    def background(self, work):
+        def run():
+            try:
+                work()
+            finally:
+                with self.condition:
+                    self.outstanding -= 1
+                    self.condition.notify_all()
+
+        with self.condition:
+            if self.stopping:
+                return
+            self.outstanding += 1
+            threading.Thread(target=run, daemon=True, name="chat-collection").start()
 
     def join(self):
         with self.condition:
